@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kernels de secuencias y mapas aproximados</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 13, title: 'Kernels de secuencias y mapas aproximados', minutes: 6, language: 'es', next: '../ch14/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 12) ---------- */
+// ámbar = lo elegido: camino, pesos que se multiplican, campana del kernel, resultado · rosa (local) = salida del transductor y cadena intermedia z;
+// en la segunda mitad, la distribución p y las frecuencias sorteadas · blanco = promedio de cosenos · gris = cosenos sueltos y sorteos
+const HUE = { hyp: COL.task, out: COL.rat, un: COL.dim, cx: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'T_{1}(x, z)', 'm^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe.
+const aSYM = /([αρξΦΨΛδσεωℝ⟨⟩⊤‖√∑⊥⟺∘≈∼∞])/;                                      // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : q === '∘' ? { 'font-size': size * 1.5 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea, cada una con su color; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNum = v => (v < 0 ? '−' : '') + Math.abs(v);
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aInt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+$)/g, ' ');           // entero con separador de miles
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+// --- Cadenas y bigramas (ejemplo 6.22). Las dos cadenas son ilustrativas.
+const aX = 'abaab', aY = 'babab';
+const aBig = ['aa', 'ab', 'ba', 'bb'];
+const aGrams = s => Array.from({ length: s.length - 1 }, (_, i) => s.slice(i, i + 2));    // los bigramas de s, en orden
+const aCount = (s, z) => aGrams(s).filter(g => g === z).length;
+const aPhi = s => aBig.map(z => aCount(s, z));                                       // vector de conteos
+const aPx = aPhi(aX), aPy = aPhi(aY), aPr = aPx.map((v, k) => v * aPy[k]), aK = aPr.reduce((s, v) => s + v, 0);
+// --- Transductores ponderados (definición 6.19). E: transiciones [origen, entrada, salida, peso, destino]; '' = ε; fin: peso final de cada estado final.
+const aT4 = { ini: 0, fin: { 2: 8, 3: 2 }, E: [[0, 'a', 'b', 3, 1], [0, 'b', 'b', 2, 2], [1, 'a', 'a', 1, 1], [1, 'a', 'a', 2, 2], [1, 'b', 'a', 4, 3], [2, 'b', 'a', 3, 3], [2, 'b', 'b', 2, 2]] };   // figura 6.4
+const aTb = { ini: 0, fin: { 2: 1 }, E: [[0, 'a', '', 1, 0], [0, 'b', '', 1, 0], [0, 'a', 'a', 1, 1], [0, 'b', 'b', 1, 1], [1, 'a', 'a', 1, 2], [1, 'b', 'b', 1, 2], [2, 'a', '', 1, 2], [2, 'b', '', 1, 2]] };   // figura 6.7a
+// Caminos de aceptación con entrada x y salida y (ninguna transición tiene ε en la entrada, así que la búsqueda termina).
+// Cada camino: es = índices de sus transiciones, end = estado final, w = producto de los pesos, incluido el del estado final.
+const aPaths = (Tr, x, y) => {
+  const res = [];
+  const go = (q, i, j, es) => {
+    if (i === x.length && j === y.length && q in Tr.fin) res.push({ es, end: q, w: es.reduce((s, k) => s * Tr.E[k][3], Tr.fin[q]) });
+    Tr.E.forEach((e, k) => { if (e[0] !== q || x[i] !== e[1] || (e[2] && y[j] !== e[2])) return; go(e[4], i + 1, j + (e[2] ? 1 : 0), es.concat(k)); });
+  };
+  go(Tr.ini, 0, 0, []);
+  return res;
+};
+const aW = (Tr, x, y) => aPaths(Tr, x, y).reduce((s, p) => s + p.w, 0);              // T(x, y): suma sobre los caminos
+const aEx = ['aab', 'baa'], aExP = aPaths(aT4, aEx[0], aEx[1]), aExW = aW(aT4, aEx[0], aEx[1]);   // el par del libro
+// Comprobación 1: entrada bb, salida ba; se pregunta por el estado donde termina el único camino.
+const aQ1s = ['bb', 'ba'], aQ1P = aPaths(aT4, aQ1s[0], aQ1s[1]), aQ1 = [1, 2, 3], aQ1r = aQ1.indexOf(aQ1P[0].end);
+// Los caminos del transductor de bigramas para x: uno por posición i del bigrama (i = número de vueltas en el estado 0).
+const aBp = aGrams(aX).map((z, i) => ({ i, z, es: aPaths(aTb, aX, z).find(q => q.es.filter(k => aTb.E[k][4] === 0).length === i).es }));
+const aTx_ = aBig.map(z => aW(aTb, aX, z)), aTy_ = aBig.map(z => aW(aTb, aY, z));    // T(x, z) y T(y, z) por caminos
+const aKc = aBig.reduce((s, z, k) => s + aTx_[k] * aTy_[k], 0);                      // (T ∘ T⁻¹)(x, y) = Σ_z T(x, z) T(y, z)
+const aDemo = 2, aZab = aBig.indexOf('ab');                                         // camino que se recorre despacio · bigrama que se cuenta
+// --- Costo
+const aMbig = 100000;
+// --- Características aleatorias de Fourier en una dimensión (kernel gaussiano con σ = 1: p es la normal estándar, tabla 6.1).
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aNorm = r => () => Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());   // normal estándar por Box-Muller
+const aOm = (seed, D) => Array.from({ length: D }, aNorm(aRng(seed)));              // D frecuencias sorteadas
+const aZ = Array.from({ length: 161 }, (_, k) => -4 + k * .05);                      // rejilla de z = x − x′, con x, x′ ∈ [−2, 2]
+const aGz = z => Math.exp(-z * z / 2);                                              // G(z): la campana del kernel
+const aP = w => Math.exp(-w * w / 2) / Math.sqrt(2 * Math.PI);                      // p(ω)
+const aSeed = 10, aDmax = 1000, aW1 = aOm(aSeed, aDmax);                            // las frecuencias del capítulo
+// aPre[D][k] = Σ_{i<D} cos(ω_i z_k); el promedio con D cosenos es aPre[D][k] / D = Ψ(x) · Ψ(x′) para z_k = x − x′.
+const aPre = [new Float64Array(aZ.length)];
+aW1.forEach((w, i) => { const a = new Float64Array(aZ.length); aZ.forEach((z, k) => { a[k] = aPre[i][k] + Math.cos(w * z); }); aPre.push(a); });
+const aAvg = D => Array.from(aPre[D], v => v / D);
+const aErrOf = D => aZ.reduce((e, z, k) => Math.max(e, Math.abs(aPre[D][k] / D - aGz(z))), 0);   // error máximo sobre la rejilla
+const aDs = [10, 100, 1000];                                                        // los D que nombra la narración
+// Comprobación 2: tres promedios con distinto número de cosenos (prefijos de las mismas frecuencias).
+const aQ2 = [30, 1000, 3], aQ2r = aQ2.indexOf(Math.max(...aQ2));
+// Error máximo para varios sorteos por cada D (rejilla de paso 0.1). Se calcula una sola vez, al primer uso.
+const aCD = [10, 30, 100, 300, 1000, 3000], aCN = 12;
+let aCc = null;
+const aConc = () => aCc || (aCc = aCD.map((D, j) => {
+  const es = Array.from({ length: aCN }, (_, s) => { const om = aOm(5000 + 97 * j + s, D); let e = 0; for (let k = 0; k < aZ.length; k += 2) { let u = 0; for (let i = 0; i < D; i++) u += Math.cos(om[i] * aZ[k]); e = Math.max(e, Math.abs(u / D - aGz(aZ[k]))); } return e; });
+  const so = es.slice().sort((a, b) => a - b);
+  return { D, es, med: (so[aCN / 2 - 1] + so[aCN / 2]) / 2 };
+}));
+/* aMATH:end */
+
+// Cadena como fila de casillas. s.lit(i, col, ta, tb) tiñe la casilla i desde ta y la devuelve a su color en tb; s.set(i, ch, t) cambia su letra.
+const aStr = (p, str, x, y, { cw = 60, t0 = .4, fill = COL.chalk } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), s = { g, x, y, cw, n: str.length }, size = cw * .62;
+  s.c = [...str].map((ch, i) => [mk('rect', { x: x + i * cw + 2, y: y + 2, width: cw - 4, height: cw - 4, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g), T(g, ch === ' ' ? '' : ch, { x: x + i * cw + cw / 2, y: y + cw / 2 + size * .3, size, fill, anchor: 'middle', font: MATH, weight: 600 })]);
+  if (t0 != null) show(g, t0);
+  s.lit = (i, col, ta, tb) => { const [r, t] = s.c[i]; tw(r, { c_stroke: col }, ta, .15); tw(t, { c_fill: col }, ta, .15); if (tb != null) { tw(r, { c_stroke: COL.faint }, tb, .25); tw(t, { c_fill: fill }, tb, .25); } };
+  s.set = (i, ch, t) => aAt(() => { s.c[i][1].textContent = ch; }, t);
+  return s;
+};
+// Transductor como grafo. spec.st: [id, x, y, rótulo] por estado; spec.ed: una entrada por transición de Tr.E, en el mismo orden:
+// { bend } (arco entre dos estados; positivo = se curva a la derecha del sentido de avance) o { loop: ángulo en grados } (lazo), más { lx, ly } (rótulo).
+// Estado inicial = círculo grueso; estado final = círculo doble. Rótulo de una transición: entrada (blanco) : salida (rosa) / peso (ámbar).
+// gr.hot(k, ta, tb) tiñe una transición; gr.walk(ficha, k, t0, dur) mueve una ficha a lo largo de ella; gr.flash(id, t) hace latir un estado.
+const aRad = 38;
+const aGraph = (p, Tr, spec, { t0 = .4, tE = null, size = 28 } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g, { o: tE == null ? 1 : 0 }), gs = G(g), pos = {}, gr = { g, ge, gs, pos, st: {}, ring: {}, ed: [] };
+  const f = P => P.map(v => v.toFixed(1)).join(' ');
+  spec.st.forEach(([id, x, y]) => { pos[id] = [x, y]; });
+  Tr.E.forEach(([a, i, o, w, b], k) => {
+    const sp = spec.ed[k], [x1, y1] = pos[a], [x2, y2] = pos[b];
+    let d, P2, C;
+    if (a === b) {
+      const th = sp.loop * Math.PI / 180, pt = (ang, r) => [x1 + r * Math.cos(ang), y1 + r * Math.sin(ang)], C1 = pt(th - .75, aRad + 95);
+      C = pt(th + .75, aRad + 95); P2 = pt(th + .5, aRad + 13);
+      d = `M${f(pt(th - .5, aRad))}C${f(C1)} ${f(C)} ${f(P2)}`;
+    } else {
+      const L = Math.hypot(x2 - x1, y2 - y1), bd = sp.bend || 0, off = (P, Q, r) => { const l = Math.hypot(Q[0] - P[0], Q[1] - P[1]); return [P[0] + (Q[0] - P[0]) * r / l, P[1] + (Q[1] - P[1]) * r / l]; };
+      C = [(x1 + x2) / 2 - (y2 - y1) / L * bd, (y1 + y2) / 2 + (x2 - x1) / L * bd]; P2 = off([x2, y2], C, aRad + 13);
+      d = `M${f(off([x1, y1], C, aRad))}Q${f(C)} ${f(P2)}`;
+    }
+    const ha = Math.atan2(P2[1] - C[1], P2[0] - C[0]), u = [Math.cos(ha), Math.sin(ha)];
+    const pe = mk('path', { d, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round' }, ge);
+    const hd = mk('path', { d: `M${f([P2[0] + 12 * u[0], P2[1] + 12 * u[1]])}L${f([P2[0] - 4 * u[0] - 8 * u[1], P2[1] - 4 * u[1] + 8 * u[0]])}L${f([P2[0] - 4 * u[0] + 8 * u[1], P2[1] - 4 * u[1] - 8 * u[0]])}Z`, fill: COL.dim }, ge);
+    if (sp.lx != null) aRow(ge, [[i || 'ε'], [':', COL.dim], [o || 'ε', HUE.out], ['/' + w, HUE.hyp]], sp.lx, sp.ly, null, { size, weight: 600 });
+    gr.ed.push({ pe, hd });
+  });
+  spec.st.forEach(([id, x, y, lab]) => {
+    const sg = G(gs), ini = id === Tr.ini, fin = id in Tr.fin;
+    gr.ring[id] = mk('circle', { cx: x, cy: y, r: aRad, fill: COL.board, stroke: COL.chalk, 'stroke-width': ini ? 7 : 3 }, sg);
+    if (fin) mk('circle', { cx: x, cy: y, r: aRad - 8, fill: 'none', stroke: COL.chalk, 'stroke-width': 2.5 }, sg);
+    T(sg, lab, { x, y: y + (lab.length > 1 ? 8 : 10), size: lab.length > 1 ? 23 : 30, anchor: 'middle', font: MATH, weight: 600 });
+    gr.st[id] = sg;
+  });
+  if (t0 != null) show(g, t0);
+  if (tE != null) show(ge, tE);
+  gr.hot = (k, ta, tb) => { const { pe, hd } = gr.ed[k]; tw(pe, { c_stroke: HUE.hyp }, ta, .15); tw(hd, { c_fill: HUE.hyp }, ta, .15); if (tb != null) { tw(pe, { c_stroke: COL.dim }, tb, .3); tw(hd, { c_fill: COL.dim }, tb, .3); } };
+  gr.at = (k, q) => { const e = gr.ed[k].pe, P = e.getPointAtLength(q * e.getTotalLength()); return [P.x, P.y]; };
+  gr.tok = () => put(mk('circle', { r: 12, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 3 }, g), { x: pos[Tr.ini][0], y: pos[Tr.ini][1], o: 0 });
+  gr.walk = (tok, k, ta, dur) => prog(q => { const [x, y] = gr.at(k, q); put(tok, { x, y }); }, ta, dur);
+  gr.flash = (id, t) => { const c = gr.ring[id], w0 = id === Tr.ini ? 7 : 3; tw(c, { 'a_stroke-width': 11, c_stroke: HUE.hyp }, t, .25, out); tw(c, { 'a_stroke-width': w0, c_stroke: COL.chalk }, t + .7, .6); };
+  return gr;
+};
+// Disposición de la figura 6.4 y de la figura 6.7a.
+const aS4 = { st: [[0, 150, 420, '0'], [1, 420, 290, '1'], [2, 420, 560, '2/8'], [3, 690, 420, '3/2']],
+  ed: [{ lx: 178, ly: 330 }, { lx: 176, ly: 532 }, { loop: -90, lx: 486, ly: 238 }, { lx: 434, ly: 436 }, { lx: 574, ly: 336 }, { lx: 590, ly: 532 }, { loop: 90, lx: 486, ly: 634 }] };
+const aSb = { st: [[0, 190, 480, '0'], [1, 470, 480, '1'], [2, 750, 480, '2/1']],
+  ed: [{ loop: -90, lx: 150, ly: 384 }, { loop: -90, lx: 150, ly: 350 }, { bend: -62, lx: 290, ly: 432 }, { bend: 62, lx: 290, ly: 548 }, { bend: -62, lx: 570, ly: 432 }, { bend: 62, lx: 570, ly: 548 }, { loop: -90, lx: 710, ly: 384 }, { loop: -90, lx: 710, ly: 350 }] };
+// Trazo de y = f(u) entre u0 y u1; aPoly une una lista de valores sobre la rejilla aZ.
+const aCurve = (f, u0, u1, UX, UY, n = 160) => { let d = ''; for (let k = 0; k <= n; k++) { const u = u0 + (u1 - u0) * k / n; d += (k ? 'L' : 'M') + UX(u).toFixed(1) + ' ' + UY(f(u)).toFixed(1); } return d; };
+const aPoly = (vals, UX, UY) => vals.map((v, k) => (k ? 'L' : 'M') + UX(aZ[k]).toFixed(1) + ' ' + UY(v).toFixed(1)).join('');
+// Flecha recta con punta, y caja con rótulo, para el esquema de la composición.
+const aArr = (p, x1, x2, y) => mk('path', { d: `M${x1} ${y}H${x2}M${x2 - 12} ${y - 9}L${x2} ${y}L${x2 - 12} ${y + 9}`, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, p);
+const aBoxT = (p, x, y, w, h, lab) => { const g = G(p, { o: 0 }); mk('rect', { x, y, width: w, height: h, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, g); aTx(g, lab, x + w / 2, y + h / 2 + 13, null, { size: 38, fill: HUE.hyp, weight: 700, anchor: 'middle' }); return g; };
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 13', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Kernels de secuencias', { x: 800, y: 420, size: 64, weight: 600, anchor: 'middle' });
+    T(g, 'y mapas aproximados', { x: 800, y: 500, size: 48, weight: 600, anchor: 'middle', fill: COL.task });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Comparar cadenas con un kernel, y aproximar un kernel con cosenos al azar.', 800, 620, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['cad', 'Kernel de bigramas', (m) => {
+    const p = panel(0), tx = m('x'), twi = m('win'), ty = m('y'), tp = m('prod'), ts = m('sum'), tk = m('pds'), SX = 200, CW = 60, YR = [230, 350], CX = k => 800 + k * 150, n = aX.length - 1;
+    aNote(p, 'cadenas ilustrativas sobre el alfabeto {a, b} · los conteos se calculan en la página');
+    aTitle(p, 'Comparar dos cadenas: los bigramas que comparten');
+    const rows = [aX, aY].map((s, r) => { aTx(p, 'xy'[r], SX - 58, YR[r] + 44, .4, { size: 42, weight: 600 }); return aStr(p, s, SX, YR[r], { cw: CW, t0: .4 + r * .15 }); });
+    // la ventana recorre los bigramas de x y después los de y; cada uno suma 1 en su columna
+    const win = put(mk('rect', { x: -3, y: -3, width: 2 * CW + 6, height: CW + 6, fill: 'none', stroke: HUE.hyp, 'stroke-width': 5 }, p), { x: SX, y: YR[0], o: 0 });
+    show(win, tx + 4.4, .3);
+    text(p, 'bigrama: dos símbolos seguidos', SX, 470, tx + 4.4, { size: 26, fill: HUE.hyp });
+    aBig.forEach((z, k) => text(p, z, CX(k), 196, twi + k * .08, { size: 34, fill: COL.dim, anchor: 'middle', font: MATH, weight: 600 }));
+    const cnt = YR.map(y => aBig.map((z, k) => text(p, '0', CX(k), y + 45, twi + .2, { size: 42, anchor: 'middle', font: MATH, weight: 600 })));
+    const when = [i => twi + .4 + i * 1.2, i => ty + .1 + i * .5];
+    [aX, aY].forEach((s, r) => {
+      const acc = aBig.map(() => 0);
+      aGrams(s).forEach((z, i) => {
+        const t = when[r](i), k = aBig.indexOf(z), e = cnt[r][k], v = ++acc[k];
+        tw(win, { x: SX + i * CW, y: YR[r] }, t - .3, .3);
+        aAt(() => { e.textContent = v; }, t + .1); tw(e, { c_fill: HUE.hyp }, t + .1, .1); tw(e, { c_fill: COL.chalk }, t + .5, .4);
+      });
+    });
+    hide(win, tp - .2, .3);
+    // producto por columna y suma
+    text(p, 'producto de los conteos', SX, 530, tp, { size: 26, fill: COL.dim });
+    aBig.forEach((z, k) => aTx(p, `${aPx[k]} × ${aPy[k]} = ${aPr[k]}`, CX(k), 532, tp + .3 + k * .45, { size: 30, anchor: 'middle', weight: 600 }));
+    text(p, 'kernel de bigramas', SX, 620, ts, { size: 26, fill: COL.dim });
+    aRow(p, [['K(x, y)  =  '], [aPr.join(' + ')], ['  =  '], [String(aK), HUE.hyp]], CX(0) - 60, 624, [ts, ts, ts + 1.5, ts + 1.5], { size: 40, weight: 700 });
+    // los conteos son un vector: K es un producto interno
+    YR.forEach((y, r) => { aTx(p, '(', CX(0) - 62, y + 48, tk, { size: 56, fill: COL.dim, anchor: 'middle' }); aTx(p, ')', CX(3) + 62, y + 48, tk, { size: 56, fill: COL.dim, anchor: 'middle' }); aTx(p, `=  Φ(${'xy'[r]})`, CX(3) + 96, y + 44, tk, { size: 34 }); });
+    aTx(p, 'K(x, y)  =  Φ(x) · Φ(y):   producto interno de dos vectores de conteos', SX, 730, tk + .6, { size: 28, font: UI });
+    text(p, 'por eso es un kernel PDS', SX, 782, tk + 3.6, { size: 28, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['trans', 'Transductores ponderados', (m) => {
+    const p = panel(0), tst = m('st'), ttr = m('tr'), tl = m('lab'), ti = m('ini'), tpa = m('pair'), t1 = m('p1'), t2 = m('p2'), ts = m('sum'), RX = 850;
+    aNote(p, 'el transductor de la figura 6.4 del libro · caminos y pesos calculados en la página');
+    aTitle(p, 'Un transductor ponderado');
+    const gr = aGraph(p, aT4, aS4, { t0: .4, tE: ttr });
+    aS4.st.forEach(([id], k) => gr.flash(id, tst + k * .15));
+    // cómo se lee una transición
+    const g1 = G(p);
+    gr.hot(0, tl, ti - .3);
+    const e0 = aT4.E[0];
+    aRow(g1, [[e0[1]], [':', COL.dim], [e0[2], HUE.out], ['/' + e0[3], HUE.hyp]], RX, 250, tl, { size: 48, weight: 700 });
+    aRow(g1, [[`lee ${e0[1]}`], ['   ·   ', COL.dim], [`escribe ${e0[2]}`, HUE.out], ['   ·   ', COL.dim], [`peso ${e0[3]}`, HUE.hyp]], RX + 170, 246, [tl + 1, tl + 1.6, tl + 2.6, tl + 3.4, tl + 4.2], { size: 28, font: UI, weight: 600 });
+    text(g1, 'círculo grueso: estado inicial', RX, 340, ti, { size: 28 }); gr.flash(aT4.ini, ti);
+    text(g1, 'círculo doble: estado final, con su peso', RX, 396, ti + 3.2, { size: 28 }); Object.keys(aT4.fin).forEach(id => gr.flash(+id, ti + 3.2));
+    aTx(g1, `(el estado 3 termina con peso ${aT4.fin[3]}; el 2, con peso ${aT4.fin[2]})`, RX, 440, ti + 4.4, { size: 24, fill: COL.dim, font: UI });
+    hide(g1, tpa - .4, .3);
+    // el par del libro: entrada aab, salida baa
+    aTx(p, 'entrada  x', RX, 262, tpa, { size: 28, font: UI }); const sx = aStr(p, aEx[0], RX + 190, 220, { t0: tpa });
+    aTx(p, 'salida  y', RX, 352, tpa + 2.6, { size: 28, font: UI, fill: HUE.out }); const sy = aStr(p, aEx[1], RX + 190, 310, { t0: tpa + 2.6, fill: HUE.out });
+    const tok = gr.tok();
+    const run = (pth, num, t0, dt, y, tEnd) => {
+      const parts = [[`camino ${num}:    `]], times = [t0];
+      pth.es.forEach((k, j) => { parts.push([(j ? ' × ' : '') + aT4.E[k][3], HUE.hyp]); times.push(t0 + (j + .9) * dt); });
+      parts.push([' × ' + aT4.fin[pth.end], HUE.hyp], ['   =   ' + pth.w]); times.push(t0 + (pth.es.length + .5) * dt, t0 + (pth.es.length + 1.1) * dt);
+      aRow(p, parts, RX, y, times, { size: 34, weight: 600 });
+      aAt(() => put(tok, { x: gr.pos[aT4.ini][0], y: gr.pos[aT4.ini][1] }), t0 - .1); show(tok, t0 - .1, .2);
+      pth.es.forEach((k, j) => { const ta = t0 + j * dt + .1; gr.hot(k, ta, tEnd); gr.walk(tok, k, ta, dt * .85); sx.lit(j, HUE.hyp, ta, tEnd); sy.lit(j, HUE.hyp, ta + dt * .4, tEnd); });
+      gr.flash(pth.end, t0 + (pth.es.length + .5) * dt - .2); hide(tok, tEnd, .3);
+    };
+    run(aExP[0], 1, t1 + .3, 1.3, 470, t2 - .2);
+    run(aExP[1], 2, t2 + .2, .75, 540, ts + .2);
+    aRow(p, [[`T(${aEx[0]}, ${aEx[1]})  =  `], [aExP.map(q => q.w).join(' + ')], ['  =  '], [String(aExW), HUE.hyp]], RX, 650, [ts, ts + .5, ts + 3.2, ts + 3.2], { size: 40, weight: 700 });
+    text(p, 'suma sobre los caminos del producto de los pesos', RX, 706, ts + .5, { size: 26, fill: COL.dim });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), RX = 860;
+    T(p, 'El mismo transductor, otro par de cadenas', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    const gr = aGraph(p, aT4, aS4, { t0: null });
+    aTx(p, 'entrada', RX, 302, null, { size: 30, font: UI }); aStr(p, aQ1s[0], RX + 170, 260, { t0: null });
+    aTx(p, 'salida', RX, 402, null, { size: 30, font: UI, fill: HUE.out }); aStr(p, aQ1s[1], RX + 170, 360, { t0: null, fill: HUE.out });
+    aTx(p, 'El camino empieza en el estado 0.', RX, 500, null, { size: 26, font: UI, fill: COL.dim });
+    S.q1 = aQ1.map(id => gr.st[id]); S.q1P = aQ1.map(id => gr.pos[id]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-camino', prompt: [`Entrada ${aQ1s[0]}, salida ${aQ1s[1]}: ¿en qué estado termina el camino?`],
+    build: pickEls(S.q1.map((el, k) => ({ el, box: [S.q1P[k][0] - 54, S.q1P[k][1] - 54, 108, 108], label: 'estado ' + aQ1[k] })), aQ1r,
+      `Lee b y escribe b hasta el 2; lee b y escribe a hasta el 3. Peso: ${aQ1P[0].es.map(k => aT4.E[k][3]).join(' × ')} × ${aT4.fin[aQ1P[0].end]} = ${aQ1P[0].w}.`,
+      k => aQ1[k] === 1 ? 'Al estado 1 solo se llega leyendo a, y esta entrada empieza con b.' : 'Si el camino se queda en el estado 2, por su lazo, la salida es bb y no ba.'),
+  }], done) }],
+
+  ['big', 'Contar bigramas', (m) => {
+    const p = panel(0), tx = m('x'), tl = m('loop'), te = m('emit'), tr = m('rest'), ta = m('all'), tc = m('count'), RX = 960, RY = i => 300 + i * 60;
+    aNote(p, 'el transductor de la figura 6.7a del libro · ε = cadena vacía · caminos calculados en la página');
+    aTitle(p, 'Un transductor que cuenta bigramas');
+    const gr = aGraph(p, aTb, aSb, { t0: .4 }), tok = gr.tok();
+    aTx(p, 'x', 132, 236, tx, { size: 42, weight: 600 }); const sx = aStr(p, aX, 190, 192, { t0: tx });
+    aTx(p, 'salida  z', 190, 668, te, { size: 30, font: UI, fill: HUE.out }); const sz = aStr(p, '  ', 350, 626, { t0: te, fill: HUE.out });
+    text(p, 'ε: cadena vacía, no escribe nada', 190, 760, tl + .6, { size: 26, fill: COL.dim });
+    // un camino: vueltas en el estado 0, dos pasos que copian el bigrama, vueltas en el estado 2. steps = [inicio, duración] por símbolo leído.
+    const row = (b, t, box) => {
+      const r = aRow(p, [[aX.slice(0, b.i), COL.faint], [b.z, HUE.out], [aX.slice(b.i + 2), COL.faint], ['        z  =  ', COL.dim], [b.z, HUE.out]], RX, RY(b.i), t, { size: 38, weight: 600 });
+      if (box) { const e = put(mk('rect', { x: RX - 16, y: RY(b.i) - 42, width: r.end - RX + 32, height: 56, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, p), { o: 0 }); show(e, tc, .3); }
+    };
+    const walk = (b, steps, tEnd) => {
+      aAt(() => put(tok, { x: gr.pos[0][0], y: gr.pos[0][1] }), steps[0][0] - .05); show(tok, steps[0][0] - .05, .15);
+      let out = 0;
+      b.es.forEach((k, j) => {
+        const [t, dur] = steps[j], o = aTb.E[k][2];
+        gr.hot(k, t, t + dur + .1); gr.walk(tok, k, t, dur); sx.lit(j, o ? HUE.out : COL.dim, t, tEnd);
+        if (o) { sz.set(out, o, t + dur * .6); out++; }
+      });
+      hide(tok, tEnd, .15); sz.set(0, '', tEnd); sz.set(1, '', tEnd);
+    };
+    const demo = aBp[aDemo], dst = [];
+    for (let j = 0; j < aX.length; j++) dst.push(j < demo.i ? [tl + .2 + j * 1.8, 1.4] : j < demo.i + 2 ? [te + .4 + (j - demo.i) * 2.3, 1.6] : [tr + .3 + (j - demo.i - 2) * 1.5, 1.2]);
+    walk(demo, dst, ta - .15); row(demo, tr + 2, demo.z === aBig[aZab]);
+    text(p, 'un camino por cada posición del bigrama', RX, 230, ta, { size: 26, fill: COL.dim });
+    aBp.filter(b => b.i !== aDemo).forEach((b, n) => { const t0 = ta + .3 + n * 1.25; walk(b, b.es.map((k, j) => [t0 + j * .21, .19]), t0 + 1.15); row(b, t0 + 1, b.z === aBig[aZab]); });
+    // el peso T(x, z) cuenta los caminos que escriben z
+    aRow(p, [[`T(x, ${aBig[aZab]})  =  `], [String(aTx_[aZab]), HUE.hyp]], RX, 600, tc + 1, { size: 42, weight: 700 });
+    aTx(p, 'T_{bigram}(x, z)  =  número de veces', RX, 690, tc + 5, { size: 30, weight: 600 });
+    aTx(p, 'que el bigrama z aparece en x', RX, 734, tc + 5, { size: 30, weight: 600, font: UI });
+    text(p, '(ejemplo 6.22)', RX, 778, tc + 5, { size: 22, fill: COL.dim });
+  }],
+
+  ['pds', 'Kernels racionales', (m) => {
+    const p = panel(0), td = m('def'), twh = m('when'), ti = m('inv'), tc = m('comp'), tt = m('thm'), tz = m('z'), t6 = m('six'), tal = m('alg'), PY = 290, CW = 56, CY = PY + CW / 2, ZX = k => 250 + k * 300;
+    aNote(p, 'las mismas cadenas x e y del comienzo · T(x, z) y T(y, z) se calculan sumando caminos del transductor de bigramas');
+    aTitle(p, 'Kernels racionales, y cuándo son PDS');
+    const gd = G(p);
+    aTx(gd, 'kernel racional (def. 6.20):    K(x, y)  =  U(x, y),    con U un transductor ponderado', 100, 204, td, { size: 28, font: UI });
+    // esquema de la composición: x → T → z → T⁻¹ → y
+    aTx(p, 'x', 100 + 2.5 * CW, PY - 16, .4, { size: 30, fill: COL.dim, anchor: 'middle' }); aStr(p, aX, 100, PY, { cw: CW, t0: .4 });
+    aTx(p, 'y', 1060 + 2.5 * CW, PY - 16, .5, { size: 30, fill: COL.dim, anchor: 'middle' }); aStr(p, aY, 1060, PY, { cw: CW, t0: .5 });
+    show(aBoxT(p, 450, PY - 12, 130, CW + 24, 'T'), ti + 1.6); show(aBoxT(p, 850, PY - 12, 130, CW + 24, 'T^{−1}'), ti + 3.6);
+    const g2 = G(p); aTx(g2, 'T^{−1}(x, y)  =  T(y, x):  entrada y salida intercambiadas', 915, PY + 122, ti + 4.2, { size: 24, fill: COL.dim, anchor: 'middle' });
+    const ga = G(p, { o: 0 }); [[392, 440], [590, 640], [772, 840], [990, 1048]].forEach(([a, b]) => aArr(ga, a, b, CY)); show(ga, tc);
+    aTx(p, 'z', 650 + CW, PY - 16, tc + 2.6, { size: 30, fill: HUE.out, anchor: 'middle' }); const sz = aStr(p, '  ', 650, PY, { cw: CW, t0: tc + 2.6, fill: HUE.out });
+    const g3 = G(p), f = aTx(g3, '(T_{1} ∘ T_{2})(x, y)  =  ∑_{z} T_{1}(x, z) · T_{2}(z, y)', 100, 500, tc + 4, { size: 32, weight: 600 });
+    text(g3, '(6.19)', 100 + f.getComputedTextLength() + 24, 498, tc + 4, { size: 22, fill: COL.dim });
+    hide(g3, tt - .4, .3); hide(g2, tt - .4, .3);
+    // teorema 6.21
+    aRow(p, [['Teorema 6.21:    ', HUE.hyp], ['K = T ∘ T^{−1}', HUE.hyp], ['  es un kernel racional PDS', HUE.hyp]], 100, 470, tt, { size: 32, weight: 600, font: UI });
+    aTx(p, 'K(x, y)  =  ∑_{z} T(x, z) · T(y, z)', 100, 530, tt + 2.6, { size: 32, weight: 600 });
+    hide(gd, tz - .4, .3);
+    // con el transductor de bigramas: z recorre los bigramas
+    const dz = (t6 - tz - .6) / aBig.length;
+    aBig.forEach((z, k) => {
+      const t = tz + .4 + k * dz;
+      sz.set(0, z[0], t); sz.set(1, z[1], t);
+      aRow(p, [['z = '], [z, HUE.out]], ZX(k), 630, t, { size: 32, weight: 600 });
+      aTx(p, `${aTx_[k]} × ${aTy_[k]}  =  ${aTx_[k] * aTy_[k]}`, ZX(k), 684, t + dz * .45, { size: 32, weight: 600 });
+    });
+    aRow(p, [['K(x, y)  =  '], [aBig.map((z, k) => aTx_[k] * aTy_[k]).join(' + ')], ['  =  '], [String(aKc), HUE.hyp]], 100, 762, [t6 - .6, t6 - .6, t6, t6], { size: 36, weight: 700 });
+    text(p, 'el kernel de bigramas del comienzo', 620, 760, t6 + 1, { size: 26, fill: COL.dim });
+    aTx(p, 'cálculo:  componer T_{x} ∘ U ∘ T_{y}  y sumar los pesos de sus caminos    ·    tiempo O(|x| |y|)', 100, 836, tal, { size: 26, font: UI });
+  }],
+
+  ['costo', 'El costo', (m) => {
+    const p = panel(0), tg = m('gram'), tb = m('big'), te = m('exp'), tp = m('psi'), GX = 120, GY = 216, C = 10, M0 = 4, M1 = 40, SX = 780, NC = 4;
+    aNote(p, `tablas dibujadas hasta m = ${M1} · cada celda es un valor que hay que calcular y guardar`);
+    aTitle(p, 'El costo: una tabla de m por m');
+    const g = G(p, { o: 0 }); show(g, .4);
+    T(g, 'matriz de Gram K', { x: GX, y: GY - 16, size: 22, fill: COL.dim });
+    const sq = mk('rect', { x: GX, y: GY, fill: COL.chalk, 'fill-opacity': .16, stroke: COL.chalk, 'stroke-width': 2 }, g), gl = mk('path', { fill: 'none', stroke: COL.board, 'stroke-width': 1.5 }, g);
+    const cnt = aTx(g, '', GX, 676, null, { size: 30, weight: 600, font: UI });
+    let last = 0;
+    const setM = mm => { if (mm === last) return; last = mm; const w = mm * C; sq.setAttribute('width', w); sq.setAttribute('height', w); let d = ''; for (let k = 1; k < mm; k++) d += `M${GX + k * C} ${GY}v${w}M${GX} ${GY + k * C}h${w}`; gl.setAttribute('d', d); cnt._set(`m = ${mm}:    m^{2}  =  ${aInt(mm * mm)} valores`); };
+    setM(M0); prog(q => setM(Math.round(M0 + (M1 - M0) * q)), tg + 1.5, Math.max(4, tb - tg - 4));
+    aTx(p, `m = ${aInt(aMbig)}:    m^{2}  =  ${aInt(aMbig * aMbig)} valores`, GX, 728, tb, { size: 30, weight: 600, font: UI });
+    // con vectores explícitos: m filas y N columnas; para el gaussiano, N es infinito
+    const gs = G(p, { o: 0 }), st1 = mk('rect', { x: SX, y: GY, width: NC * C, height: M1 * C, fill: COL.chalk, 'fill-opacity': .16, stroke: COL.chalk, 'stroke-width': 2 }, gs);
+    show(gs, te);
+    const l1 = aTx(p, 'vectores explícitos Φ(x):  m × N', SX, GY - 16, te, { size: 22, fill: COL.dim, font: UI }), l2 = aTx(p, 'mapa aproximado Ψ(x):  m × 2D', SX, GY - 16, tp + 1, { size: 22, fill: HUE.hyp, font: UI });
+    aTx(p, 'con vectores explícitos Φ(x) ∈ ℝ^{N}:    m × N valores', SX + 40, 676, te, { size: 30, font: UI });
+    tw(st1, { a_width: 740 }, te + 5.2, 2.2); aTx(p, 'kernel gaussiano:    N = ∞', SX + 40, 728, te + 5.6, { size: 30, weight: 600, font: UI });
+    hide(l1, tp, .3); tw(st1, { a_width: NC * C, c_fill: HUE.hyp, c_stroke: HUE.hyp }, tp, 1.2);
+    aTx(p, 'Ψ(x) · Ψ(x′)  ≈  K(x, x′)', SX + 40, 794, tp + 2.4, { size: 36, weight: 600, fill: HUE.hyp });
+    aTx(p, 'con Ψ(x) ∈ ℝ^{2D}:    m × 2D valores', SX + 40, 842, tp + 4.6, { size: 30, font: UI });
+  }],
+
+  ['boch', 'Teorema de Bochner', (m) => {
+    const p = panel(0), tsh = m('shift'), tbo = m('boch'), tex = m('exp'), tpp = m('p'), t1 = m('one'), tmo = m('more'), tt = m('ten'), th = m('hun'), tma = m('many');
+    const ZX = z => 550 + z * 110, ZY = v => 600 - v * 140, WX = w => 1310 + w * 70, WY = v => 560 - v * 330;
+    aNote(p, `kernel gaussiano, σ = 1 · frecuencias sorteadas con semilla fija · error máximo sobre la rejilla dibujada, z ∈ [−4, 4]`);
+    aTitle(p, 'Un kernel como promedio de cosenos');
+    // ejes y la campana G(z)
+    const ax = G(p, { o: 0 }); show(ax, .4);
+    mk('path', { d: `M${ZX(-4)} ${ZY(0)}H${ZX(4)}M${ZX(0)} ${ZY(-1)}V${ZY(1.1)}M${ZX(0) - 8} ${ZY(1)}h16M${ZX(0) - 8} ${ZY(-1)}h16`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, ax);
+    aTx(ax, 'z = x − x′', ZX(4), ZY(-1) + 34, null, { size: 24, fill: COL.dim, anchor: 'end' });
+    const cs = aW1.slice(0, 3).map(w => path(p, aCurve(z => Math.cos(w * z), -4, 4, ZX, ZY), { stroke: COL.dim, 'stroke-width': 2.5 }, { d: 0 }));
+    draw(path(p, aCurve(aGz, -4, 4, ZX, ZY), { stroke: HUE.hyp, 'stroke-width': 5 }, { d: 0 }), .5, 1.2);
+    const av = put(mk('path', { fill: 'none', stroke: COL.chalk, 'stroke-width': 4, 'stroke-linejoin': 'round' }, p), { o: 0 });
+    const gt = G(p, { o: 0 }); show(gt, .6);
+    [-4, -2, 2, 4].forEach(z => aHalo(T(gt, aNum(z), { x: ZX(z), y: ZY(0) + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH })));
+    aHalo(T(gt, '1', { x: ZX(0) - 18, y: ZY(1) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH })); aHalo(T(gt, '−1', { x: ZX(0) - 18, y: ZY(-1) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+    aHalo(aTx(gt, 'G(z)', ZX(.75), ZY(.9), null, { size: 30, fill: HUE.hyp, weight: 700 }));
+    // el teorema
+    aTx(p, 'invariante por traslación:    K(x, x′)  =  G(x − x′)', 100, 196, tsh, { size: 28, font: UI });
+    aTx(p, 'gaussiano:  G(z) = exp(−z^{2}/2)', 1000, 196, tsh + 6, { size: 26, fill: HUE.hyp, font: UI });
+    aTx(p, 'Teorema 6.24 (Bochner):   K es PDS   ⟺   G es la transformada de Fourier de una medida no negativa p', 100, 250, tbo, { size: 28, font: UI, weight: 600 });
+    const f = aTx(p, 'K(x, x′)  =  E_{ω∼p}[ cos( ω · (x − x′) ) ]', 100, 320, tex, { size: 36, weight: 600, fill: HUE.hyp });
+    aTx(p, '(prop. 6.25, con K(x, x) = 1)', 100 + f.getComputedTextLength() + 30, 318, tex, { size: 22, fill: COL.dim, font: UI });
+    // la distribución p y las frecuencias sorteadas
+    const gp = G(p, { o: 0 }); show(gp, tpp);
+    mk('path', { d: `M${WX(-3.2)} ${WY(0)}H${WX(3.2)}`, stroke: COL.faint, 'stroke-width': 2 }, gp);
+    mk('path', { d: aCurve(aP, -3.2, 3.2, WX, WY, 80), fill: 'none', stroke: HUE.out, 'stroke-width': 4 }, gp);
+    [-2, 0, 2].forEach(w => T(gp, aNum(w), { x: WX(w), y: WY(0) + 30, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    aTx(gp, 'ω', WX(3.2), WY(0) + 30, null, { size: 26, fill: COL.dim, anchor: 'end' });
+    aTx(gp, 'p(ω): una gaussiana  (tabla 6.1)', WX(0), WY(aP(0)) - 22, null, { size: 24, fill: HUE.out, anchor: 'middle', font: UI });
+    const tk = put(mk('path', { fill: 'none', stroke: HUE.out, 'stroke-width': 2, 'stroke-opacity': .75 }, p), { o: 0 }); show(tk, t1, .3);
+    const cnt = aTx(p, '', WX(-3.2), 668, t1, { size: 36, weight: 700, font: UI }), er = aTx(p, '', WX(-3.2), 720, t1 + 1.2, { size: 28, font: UI });
+    let last = 0;
+    const setD = D => {
+      if (D === last) return; last = D;
+      av.setAttribute('d', aPoly(aAvg(D), ZX, ZY));
+      let d = ''; for (let i = 0; i < D; i++) if (Math.abs(aW1[i]) <= 3.2) d += `M${WX(aW1[i]).toFixed(1)} ${WY(0)}v-30`;
+      tk.setAttribute('d', d);
+      cnt._set(`D = ${aInt(D)} ${D === 1 ? 'coseno' : 'cosenos'}`); er._set(`error máximo:  ${aF2(aErrOf(D))}`);
+    };
+    setD(1);
+    draw(cs[0], t1 + .3, 1); show(av, t1 + 1.6, .5);
+    draw(cs[1], tmo + .2, .7); aAt(() => setD(2), tmo + .9); draw(cs[2], tmo + 1.2, .7); aAt(() => setD(3), tmo + 1.9);
+    cs.forEach(e => tw(e, { o: .3 }, tmo + 2.2, .4));
+    const grow = (a, b, t0, t1_) => prog(q => setD(Math.round(a * Math.pow(b / a, q))), t0, t1_ - t0, lin);
+    grow(3, aDs[0], tmo + 2.3, tt + .4); grow(aDs[0], aDs[1], tt + 2.2, th + .7); grow(aDs[1], aDs[2], th + 1.4, tma + 1.5);
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), W = 400;
+    T(p, 'Tres promedios de cosenos al azar', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Ámbar: la campana del kernel gaussiano. Blanco: el promedio de D cosenos.', 100, 184, null, { size: 26, font: UI });
+    S.q2 = aQ2.map((D, n) => {
+      const x0 = 130 + n * 480, g = G(p), UX = z => x0 + W / 2 + z * W / 8, UY = v => 500 - v * 170;
+      T(g, 'promedio ' + (n + 1), { x: x0 + W / 2, y: 270, size: 28, weight: 700, anchor: 'middle' });
+      mk('path', { d: `M${UX(-4)} ${UY(0)}H${UX(4)}M${UX(0)} ${UY(-.9)}V${UY(1.1)}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+      mk('path', { d: aCurve(aGz, -4, 4, UX, UY), fill: 'none', stroke: HUE.hyp, 'stroke-width': 5 }, g);
+      mk('path', { d: aPoly(aAvg(D), UX, UY), fill: 'none', stroke: COL.chalk, 'stroke-width': 3.5, 'stroke-linejoin': 'round' }, g);
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-cosenos', prompt: ['¿Cuál de los tres promedios usa más cosenos?'],
+    build: pickEls(S.q2.map((el, n) => ({ el, box: [110 + n * 480, 236, 440, 436], label: 'promedio ' + (n + 1) })), aQ2r,
+      `Con más cosenos, el promedio se pega a la campana: aquí D = ${aInt(aQ2[aQ2r])}.`,
+      n => `Ese usa D = ${aQ2[n]}: todavía se aparta de la campana (error máximo ${aF2(aErrOf(aQ2[n]))}).`),
+  }], done) }],
+
+  ['conc', 'El mapa y su garantía', (m) => {
+    const p = panel(0), tps = m('psi'), td = m('dot'), te = m('err'), tdo = m('down'), tt = m('thm'), tu = m('use'), RX = 830, dat = aConc();
+    const DX = D => 200 + (Math.log10(D) - 1) / (Math.log10(aCD[aCD.length - 1]) - 1) * 520, EY = v => 760 - v * 640;
+    aNote(p, `kernel gaussiano en una dimensión, X = [−2, 2] · ${aCN} sorteos con semilla fija por cada D · errores calculados en la página`);
+    aTitle(p, 'El mapa aproximado y su garantía');
+    const f = aTx(p, 'Ψ(x)  =  √(1/D) [ cos(ω_{1}·x), sin(ω_{1}·x), …, cos(ω_{D}·x), sin(ω_{D}·x) ]^{⊤}', 100, 204, tps - 2.6, { size: 30, weight: 600 });
+    text(p, '(6.21)', 100 + f.getComputedTextLength() + 24, 202, tps - 2.6, { size: 22, fill: COL.dim });
+    aRow(p, [['Ψ(x) · Ψ(x′)  =  (1/D) ∑_{i} cos( ω_{i} · (x − x′) )'], ['   ≈   K(x, x′)', HUE.hyp]], 100, 264, [td, td + 5], { size: 30, weight: 600 });
+    // error máximo frente a D
+    const ga = G(p, { o: 0 }); show(ga, te - .6);
+    mk('path', { d: `M${DX(10) - 40} ${EY(.55)}V${EY(0)}H${DX(3000) + 40}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, ga);
+    aCD.forEach(D => T(ga, aInt(D), { x: DX(D), y: EY(0) + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    [0, .25, .5].forEach(v => { mk('path', { d: `M${DX(10) - 48} ${EY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, ga); T(ga, String(v), { x: DX(10) - 56, y: EY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+    aTx(ga, 'D', DX(3000) + 40, EY(0) + 64, null, { size: 26, fill: COL.dim, anchor: 'end' });
+    aTx(ga, 'error máximo de Ψ(x) · Ψ(x′) frente a K(x, x′)', DX(10) - 40, EY(.55) - 16, null, { size: 22, fill: COL.dim, font: UI });
+    const dt = Math.max(.3, (tdo - te - .8) / aCD.length);
+    dat.forEach((c, j) => c.es.forEach((e, s) => show(put(mk('circle', { cx: DX(c.D) + (s - (aCN - 1) / 2) * 4, cy: EY(e), r: 6, fill: COL.dim }, p), { o: 0 }), te + .2 + j * dt + s * .03, .25)));
+    // la mediana de cada D
+    draw(path(p, dat.map((c, j) => (j ? 'L' : 'M') + DX(c.D).toFixed(1) + ' ' + EY(c.med).toFixed(1)).join(''), { stroke: HUE.hyp, 'stroke-width': 4 }, { d: 0 }), tdo, 1.6);
+    dat.forEach((c, j) => { if (j && j < dat.length - 1) return; aHalo(aTx(p, aF2(c.med), DX(c.D) + (j ? 0 : 34), EY(c.med) - (j ? 34 : 6), tdo + (j ? 1.6 : .2), { size: 26, fill: HUE.hyp, weight: 700, anchor: j ? 'middle' : 'start' })); });
+    text(p, 'ámbar: mediana de los sorteos', DX(100), EY(.42), tdo + .2, { size: 22, fill: HUE.hyp });
+    // teorema 6.28
+    text(p, 'Teorema 6.28', RX, 380, tt, { size: 28, fill: HUE.hyp, weight: 600 });
+    aTx(p, 'P[ sup_{x, x′ ∈ X} | Ψ(x) · Ψ(x′) − K(x, x′) |  ≥  ε ]', RX, 440, tt + .6, { size: 28, weight: 600 });
+    aRow(p, [['≤   (48 R σ_{p} / ε)^{2} · '], ['exp( −D ε^{2} / 4(N + 2) )', HUE.hyp]], RX + 40, 500, [tt + .6, tt + 5], { size: 30, weight: 600 });
+    aTx(p, 'X ⊂ ℝ^{N} en una bola de radio R   ·   σ_{p}^{2} = E[‖ω‖^{2}]   ·   0 < ε ≤ 32 R σ_{p}', RX, 552, tt + .6, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'con Ψ(x) alcanza una SVM lineal:', RX, 668, tu, { size: 28, font: UI });
+    aRow(p, [['tabla de  '], ['m × 2D', HUE.hyp], ['  valores, no de m^{2}']], RX, 716, tu + 3.6, { size: 28, weight: 600, font: UI });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Un kernel también compara cadenas: el de bigramas multiplica conteos y suma.', 'w1'], ['Transductor ponderado: suma, sobre los caminos, del producto de los pesos.', 'w2'],
+      ['Kernel racional: K = U. Si U = T ∘ T^{−1}, el kernel es PDS (teorema 6.21).', 'w3'], ['Bochner: promedio de cosenos al azar; con más frecuencias, mejor aproximación.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 31, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Un kernel PDS solo se puede definir entre vectores de números.'], ans: ['f'], why: 'También entre cadenas y otras estructuras discretas: el kernel de bigramas es un ejemplo.' },
+      { parts: ['El peso que un transductor da a un par de cadenas suma los pesos de todos sus caminos.'], ans: ['v'], why: 'Y el peso de cada camino es el producto de los pesos de sus transiciones y del estado final.' },
+      { parts: ['Para todo transductor ', $m('T'), ', la composición ', $m('T ∘ T⁻¹'), ' define un kernel PDS.'], ans: ['v'], why: 'Es el teorema 6.21: vale para cualquier transductor ponderado T.' },
+      { parts: ['En las características aleatorias de Fourier, todas las frecuencias son iguales.'], ans: ['f'], why: 'Se sortean, de forma independiente, con la distribución p que corresponde al kernel.' },
+      { parts: ['Al aumentar ', $m('D'), ', el producto de los vectores aproximados tiende a acercarse al kernel.'], ans: ['v'], why: 'Teorema 6.28: la probabilidad de un error mayor que épsilon decrece exponencialmente con D.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

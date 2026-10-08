@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>El modelo PAC</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 2, title: 'El modelo PAC', minutes: 6, language: 'es', next: '../ch03/' };
+
+/* ---------- helpers de dibujo del capítulo ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, err: COL.bad, strip: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R(h_{S}) ≤ 4e^{−mε/4}'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    mk('tspan', { dy: dy - prev, ...(k ? { 'font-size': size * .68 } : {}) }, e).textContent = k ? s.slice(2, -1) : s;
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+
+// Plano de entrada. D es ilustrativa: uniforme sobre el recuadro aDom. El concepto objetivo es el rectángulo aC.
+// Rectángulos como [x, y, ancho, alto] en coordenadas del escenario; puntos como [x, y, etiqueta].
+const aDom = [80, 120, 800, 540], aC = [250, 220, 450, 320], aH = [330, 260, 460, 230];
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aIn = ([x, y, w, hh], px, py) => px >= x && px <= x + w && py >= y && py <= y + hh ? 1 : 0;
+const aDraw = (seed, m) => { const r = aRng(seed); return Array.from({ length: m }, () => { const x = Math.round(aDom[0] + r() * aDom[2]), y = Math.round(aDom[1] + r() * aDom[3]); return [x, y, aIn(aC, x, y)]; }); };
+const aBBox = q => { const xs = q.map(pt => pt[0]), ys = q.map(pt => pt[1]), x = Math.min(...xs), y = Math.min(...ys); return [x, y, Math.max(...xs) - x, Math.max(...ys) - y]; };
+const aTight = pts => aBBox(pts.filter(pt => pt[2]));                       // el rectángulo más ajustado a los puntos con etiqueta 1
+const aCapR = (a, b) => { const x = Math.max(a[0], b[0]), y = Math.max(a[1], b[1]); return [x, y, Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - x), Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - y)]; };
+const aArea = r => r[2] * r[3];
+const aRisk = r => (aArea(aC) + aArea(r) - 2 * aArea(aCapR(aC, r))) / aArea(aDom);   // R(h) con D uniforme: masa de la diferencia simétrica
+const aMiss = (r, pts) => pts.filter(([x, y, l]) => aIn(r, x, y) !== l);           // puntos mal clasificados
+const aFmt = v => v.toFixed(2);
+const aNeed = (e, d) => Math.ceil(4 / e * Math.log(4 / d));                   // m ≥ (4/ε) log(4/δ), ecuación (2.6)
+
+const aS = aDraw(2, 320), aS20 = aS.slice(0, 20);                              // muestra principal y sus primeros 20 puntos
+const aEPS = .1, aDELTA = .05, aMB = aNeed(aEPS, aDELTA);
+const aRuns = Array.from({ length: 20 }, (_, i) => aDraw(5800 + i, 50));       // 20 muestras independientes de m = 50
+const aSB = aDraw(52, aMB);                                                    // muestra del tamaño que da la cota
+const aSW = aEPS / 4 * aArea(aDom), aSL = aSW / aC[3], aST = aSW / aC[2];      // franjas de masa ε/4: ancho de las laterales y alto de las otras
+const aStrips = [[aC[0], aC[1], aC[2], aST], [aC[0] + aC[2] - aSL, aC[1], aSL, aC[3]], [aC[0], aC[1] + aC[3] - aST, aC[2], aST], [aC[0], aC[1], aSL, aC[3]]];   // r1 arriba, r2 derecha, r3 abajo, r4 izquierda
+const aPos20 = aS20.filter(pt => pt[2]);
+const aSmall = aBBox(aPos20.filter(pt => pt[0] !== Math.min(...aPos20.map(q => q[0]))));   // deja fuera el positivo de más a la izquierda
+const aBig = aBBox([...aPos20, aS20[2]]);                                                     // se estira hasta encerrar un punto con etiqueta 0
+
+const aDot = (p, x, y, lab, o = 0, r = 9) => put(mk('circle', { r, fill: lab ? HUE.pos : HUE.neg }, p), { x, y, o });
+const aRect = (p, [x, y, w, hh], stroke, o = 1, extra = {}) => put(mk('rect', { x, y, width: w, height: hh, fill: 'none', stroke, 'stroke-width': 4, ...extra }, p), { o });
+const aRectDraw = (p, r, stroke) => put(aRect(p, r, stroke, 1, { pathLength: 1, 'stroke-dasharray': '1 1' }), { d: 0 });   // rectángulo listo para draw()
+const aTo = (e, [x, y, w, hh], t0, dur = 1) => tw(e, { a_x: x, a_y: y, a_width: w, a_height: hh }, t0, dur);
+const aFrame = (p, t0) => { const e = aRect(p, aDom, COL.faint, 0, { 'stroke-width': 2 }); show(e, t0); return e; };
+const aFilled = (p, r, fill, o = 0, op = .45) => aRect(p, r, 'none', o, { fill, 'fill-opacity': op, 'stroke-width': 0 });
+const aRing = ([x, y, w, hh]) => `M${x} ${y}h${w}v${hh}h${-w}z`;
+const aHole = (p, outer, inner, fill, o = 0) => put(mk('path', { d: aRing(outer) + aRing(inner), fill, 'fill-opacity': .45, 'fill-rule': 'evenodd' }, p), { o });   // outer menos inner
+const aFall = (d, t0) => { const y = st(d).y; put(d, { y: y - 46 }); tw(d, { o: 1, y }, t0, .45, out); };   // un punto de la muestra que cae
+const aView = (p, x, y, s) => G(p, { x: x - aDom[0] * s, y: y - aDom[1] * s, s });   // copia reducida del plano con su esquina en (x, y)
+const aNote = p => text(p, 'datos ilustrativos · D uniforme sobre el recuadro', 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+const aSwatch = (p, x, y, fill, t0) => show(put(mk('rect', { x, y: y - 20, width: 26, height: 22, fill, 'fill-opacity': .6 }, p), { o: 0 }), t0);
+// Región de error de R_S como marco: relleno rojo de c y, encima, R_S con relleno de pizarra. Crear antes que los puntos.
+const aErrFrame = (p, start, sw = 4) => {
+  const red = aFilled(p, aC, HUE.err), rs = aRect(p, start, HUE.hyp, 0, { fill: COL.board, 'stroke-width': sw });
+  return { red, rs };
+};
+const aBar = (p, x, y, w, t0, fill = COL.chalk) => { const e = put(mk('rect', { x, y: y - 20, width: 0, height: 22, fill, 'fill-opacity': .8 }, p), {}); tw(e, { a_width: w }, t0, .7, out); return e; };
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 2', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'El modelo PAC', { x: 800, y: 430, size: 88, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Cuántos ejemplos hacen falta para aprender, y con qué garantía.', 800, 600, m('sub'), { size: 34, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['concepto', 'Concepto, clase y muestra', (m) => {
+    const p = panel(0);
+    aFrame(p, .2); aNote(p);
+    const tc = m('class'), ts = m('sample'), th = m('hidden');
+    [[130, 160, 260, 150], [520, 150, 300, 420], [160, 430, 560, 190], [600, 380, 240, 230]].forEach((g, i) => {
+      const e = aRect(p, g, COL.dim, 0, { 'stroke-width': 3, 'stroke-dasharray': '10 8' });
+      show(e, tc + 2.6 + i * .45, .3); hide(e, tc + 5.6 + i * .15, .4);
+    });
+    const c = aRect(p, aC, COL.chalk, 0), cl = text(p, 'c', aC[0] + 14, aC[1] + 38, m('c', .5), { size: 34, font: MATH, weight: 600 });
+    show(c, m('c', .3)); tw(c, { o: .16 }, th, .8); hide(cl, th, .6);
+    const one = text(p, '1', 475, 410, m('label'), { size: 80, fill: HUE.pos, anchor: 'middle', weight: 700 });
+    const zero = text(p, '0', 790, 610, m('label', 1), { size: 80, fill: HUE.neg, anchor: 'middle', weight: 700 });
+    hide(one, tc, .4); hide(zero, tc, .4);
+    aS20.forEach(([x, y, l], i) => aFall(aDot(p, x, y, l), ts + .5 + i * .16));
+    const lg = G(p, { o: 0 });
+    mk('circle', { cx: 100, cy: 692, r: 9, fill: HUE.pos }, lg); T(lg, 'etiqueta 1', { x: 118, y: 700, size: 24, fill: HUE.pos });
+    mk('circle', { cx: 270, cy: 692, r: 9, fill: HUE.neg }, lg); T(lg, 'etiqueta 0', { x: 288, y: 700, size: 24, fill: HUE.neg });
+    show(lg, ts + .5);
+    text(p, 'X: los puntos del plano', 80, 100, m('space'), { size: 26, fill: COL.dim });
+    let prev = null;
+    [['c', 'Concepto c', 'regla que etiqueta cada punto con 1 o 0'], ['class', 'Clase de conceptos C', 'todos los rectángulos alineados a los ejes'], ['dist', 'Distribución D', 'fija y desconocida'],
+      ['sample', 'Muestra S', 'm = 20 puntos i.i.d. según D, con su etiqueta'], ['goal', 'Hipótesis h', 'la elige el aprendiz dentro de un conjunto H']].forEach(([k, n, d], i) => {
+      const g = G(p, { x: 940, y: 170 + i * 110, o: 0 });
+      T(g, n, { size: 32, weight: 600, fill: COL.task }); T(g, d, { y: 36, size: 22, fill: COL.dim });
+      show(g, m(k)); if (prev) tw(prev, { o: .4 }, m(k), .4); prev = g;
+    });
+    text(p, 'El aprendiz no ve c ni conoce D: solo la muestra.', 800, 800, th, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['errores', 'Dos errores', (m) => {
+    const p = panel(0), cap = aCapR(aC, aH), miss = aMiss(aH, aS20);
+    aFrame(p, .2); aNote(p);
+    const fn = aHole(p, aC, cap, HUE.err), fp = aHole(p, aH, cap, HUE.err);
+    show(aRect(p, aC, COL.chalk, 0), .2); draw(aRectDraw(p, aH, HUE.hyp), m('hyp'), 1);
+    text(p, 'c', aC[0] + 14, aC[1] + 38, .3, { size: 34, font: MATH, weight: 600 });
+    text(p, 'h', aH[0] + aH[2] - 34, aH[1] + 40, m('hyp', .6), { size: 34, font: MATH, weight: 600, fill: HUE.hyp });
+    aS20.forEach(([x, y, l], i) => show(aDot(p, x, y, l), .2 + i * .02, .25));
+    show(fn, m('fn')); show(fp, m('fp'));
+    miss.forEach(([x, y], i) => show(put(mk('circle', { r: 19, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, p), { x, y, o: 0 }), m('emp', .4 + i * .2), .25));
+    text(p, 'Hipótesis h', 940, 150, m('hyp'), { size: 32, fill: COL.task, weight: 600 });
+    aSwatch(p, 940, 226, HUE.err, m('fn')); text(p, 'falsos negativos', 980, 226, m('fn'), { size: 26, weight: 600 });
+    text(p, 'en c, fuera de h: h dice 0 donde c dice 1', 980, 258, m('fn'), { size: 22, fill: COL.dim });
+    aSwatch(p, 940, 316, HUE.err, m('fp')); text(p, 'falsos positivos', 980, 316, m('fp'), { size: 26, weight: 600 });
+    text(p, 'en h, fuera de c: h dice 1 donde c dice 0', 980, 348, m('fp'), { size: 22, fill: COL.dim });
+    text(p, 'Error de generalización', 940, 424, m('risk'), { size: 26, weight: 600 });
+    aTx(p, 'R(h) = P[ h(x) ≠ c(x) ],  con x extraído de D', 940, 466, m('risk', .3), { size: 28 });
+    aTx(p, `R(h) ≈ ${aFmt(aRisk(aH))}: la masa de la región de error`, 940, 506, m('rv'), { size: 28, fill: COL.bad });
+    text(p, 'Error empírico', 940, 580, m('emp'), { size: 26, weight: 600 });
+    aTx(p, 'R̂(h) = fracción de S mal clasificada', 940, 622, m('emp', .3), { size: 28 });
+    aTx(p, `R̂(h) = ${miss.length}/${aS20.length} = ${aFmt(miss.length / aS20.length)}`, 940, 662, m('ev'), { size: 28, fill: COL.bad });
+    text(p, 'El aprendiz solo puede calcular el error empírico: no conoce c ni D.', 800, 750, m('see'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+    aTx(p, 'Para una h fija, el promedio sobre las muestras S es exacto:  E[ R̂(h) ] = R(h)', 800, 810, m('avg'), { size: 28, anchor: 'middle' });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), cap = aCapR(aC, aH);
+    aFrame(p, .2);
+    const fn = aHole(p, aC, cap, HUE.err, 1), fp = aHole(p, aH, cap, HUE.err, 1), both = aFilled(p, cap, COL.board, 1, 0);
+    aRect(p, aC, COL.chalk); aRect(p, aH, HUE.hyp);
+    T(p, 'c', { x: aC[0] + 14, y: aC[1] + 38, size: 34, font: MATH, weight: 600 });
+    T(p, 'h', { x: aH[0] + aH[2] - 34, y: aH[1] + 40, size: 34, font: MATH, weight: 600, fill: HUE.hyp });
+    aS20.forEach(([x, y, l]) => aDot(p, x, y, l, 1));
+    T(p, 'c: concepto objetivo', { x: 940, y: 300, size: 28 }); T(p, 'h: hipótesis', { x: 940, y: 350, size: 28, fill: HUE.hyp });
+    S.q1 = [fn, fn, fn, both, fp];
+  }, { ask: done => { const cap = aCapR(aC, aH), b = cap[1] + cap[3]; return quiz(BAND, [{
+    id: 'c-fp', prompt: ['¿En qué zona comete h falsos positivos? Elegirla en el dibujo.'],
+    build: pickEls([[aC[0], aC[1], cap[0] - aC[0], aC[3]], [cap[0], aC[1], cap[2], cap[1] - aC[1]], [cap[0], b, cap[2], aC[1] + aC[3] - b], cap, [aC[0] + aC[2], aH[1], aH[0] + aH[2] - aC[0] - aC[2], aH[3]]]
+      .map((box, i) => ({ el: S.q1[i], box, label: ['dentro de c, a la izquierda de h', 'dentro de c, arriba de h', 'dentro de c, debajo de h', 'dentro de c y de h', 'dentro de h, fuera de c'][i] })), 4,
+      'Ahí h responde 1, pero esos puntos están fuera de c: su etiqueta verdadera es 0.',
+      i => i === 3 ? 'Ahí h y c coinciden: ambos dicen 1. No hay error.' : 'Esa zona está dentro de c y fuera de h: h dice 0 donde la etiqueta es 1. Son falsos negativos.'),
+  }], done); } }],
+
+  ['ajustado', 'El rectángulo más ajustado', (m) => {
+    const p = panel(0), sizes = [20, 80, 320], tights = sizes.map(n => aTight(aS.slice(0, n))), risks = tights.map(aRisk), miss = aMiss(tights[0], aS20);
+    const marks = ['risk', 'm80', 'm320'], ti = m('inside');
+    aFrame(p, .2); aNote(p);
+    const { red, rs } = aErrFrame(p, aDom), c = aRect(p, aC, COL.chalk, 0);
+    tw(c, { o: .16 }, .2, .4); tw(c, { o: 1 }, ti, .6);
+    const dots = aS.map(([x, y, l], i) => aDot(p, x, y, l, 0, i < 20 ? 9 : i < 80 ? 7 : 5));
+    dots.slice(0, 20).forEach((d, i) => show(d, .2 + i * .02, .25));
+    show(rs, m('algo', 1.2), .5); aTo(rs, tights[0], m('shrink'), 1.6);
+    dots.slice(0, 20).forEach((d, i) => { if (aS[i][2]) pulse(d, m('shrink', 1.7)); });
+    show(red, m('region'));
+    dots.slice(20, 80).forEach((d, i) => aFall(d, m('m80') + i * .02)); aTo(rs, tights[1], m('m80', 1.3), 1.2);
+    dots.slice(80).forEach((d, i) => aFall(d, m('m320') + i * .006)); aTo(rs, tights[2], m('m320', 1.5), 1.2);
+    text(p, 'Algoritmo A', 940, 150, m('algo'), { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'devolver el rectángulo más ajustado', 940, 190, m('algo'), { size: 24 });
+    text(p, 'que contiene los puntos con etiqueta 1', 940, 222, m('algo'), { size: 24 });
+    show(put(mk('path', { d: 'M940 276h26', stroke: HUE.hyp, 'stroke-width': 4 }, p), { o: 0 }), m('shrink', 1));
+    aTx(p, 'R_{S}: la hipótesis que devuelve A', 980, 286, m('shrink', 1), { size: 26 });
+    aTx(p, 'R_{S} queda dentro de c: sin falsos positivos', 940, 340, ti, { size: 26 });
+    aSwatch(p, 940, 396, HUE.err, m('region')); aTx(p, 'región de error: en c, fuera de R_{S}', 980, 396, m('region'), { size: 26 });
+    aTx(p, `error empírico: R̂(R_{S}) = ${miss.length}/${aS20.length}`, 940, 452, m('emp0'), { size: 26 });
+    aTx(p, 'error de generalización R(R_{S}), según m:', 940, 520, m('risk', -.3), { size: 24, fill: COL.dim });
+    sizes.forEach((n, i) => {
+      const y = 572 + i * 50, t = m(marks[i], i ? 2.2 : 0), w = risks[i] * 1400;
+      text(p, `m = ${n}`, 940, y, t, { size: 26 }); aBar(p, 1090, y, w, t, COL.bad);
+      text(p, `≈ ${aFmt(risks[i])}`, 1102 + w, y, t + .4, { size: 26, fill: COL.bad, weight: 600 });
+    });
+    text(p, 'El error baja al crecer m, pero cuánto baja depende de la muestra que tocó.', 800, 790, m('never'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0);
+    S.q2 = [aSmall, aBig, aTight(aS20)].map((r, i) => {
+      const g = aView(p, 40 + i * 520, 200, .6);
+      aRect(g, aDom, COL.faint, 1, { 'stroke-width': 3 }); aRect(g, r, HUE.hyp, 1, { 'stroke-width': 6 });
+      aS20.forEach(([x, y, l]) => aDot(g, x, y, l, 1, 13));
+      T(p, 'ABC'[i], { x: 280 + i * 520, y: 574, size: 30, anchor: 'middle', weight: 600 });
+      return g;
+    });
+    const lg = G(p);
+    mk('circle', { cx: 590, cy: 152, r: 9, fill: HUE.pos }, lg); T(lg, 'etiqueta 1', { x: 608, y: 160, size: 24, fill: HUE.pos });
+    mk('circle', { cx: 840, cy: 152, r: 9, fill: HUE.neg }, lg); T(lg, 'etiqueta 0', { x: 858, y: 160, size: 24, fill: HUE.neg });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-ajustado', prompt: ['El algoritmo A recibe esta muestra. ¿Qué rectángulo devuelve? Elegirlo en el dibujo.'],
+    build: pickEls(S.q2.map((el, i) => ({ el, box: [30 + i * 520, 190, 500, 400], label: 'rectángulo ' + 'ABC'[i] })), 2,
+      `Contiene los ${aPos20.length} puntos con etiqueta 1 y cada lado pasa por uno de ellos: no se puede ajustar más.`,
+      i => i === 0 ? `Deja fuera ${aMiss(aSmall, aS20).length} punto con etiqueta 1.` : `Contiene los puntos con etiqueta 1, pero no es el más ajustado: también encierra ${aMiss(aBig, aS20).length} punto con etiqueta 0.`),
+  }], done) }],
+
+  ['pac', 'Probablemente, aproximadamente', (m) => {
+    const p = panel(0), s = .18, risks = aRuns.map(r => aRisk(aTight(r))), ok = risks.filter(v => v <= aEPS).length, te = m('eps', 6.2);
+    aNote(p);
+    aRuns.forEach((run, i) => {
+      const x = 80 + (i % 5) * 162, y = 130 + Math.floor(i / 5) * 138, t = .3 + i * .09, good = risks[i] <= aEPS;
+      const g = aView(p, x, y, s); put(g, { o: 0 });
+      const fr = aRect(g, aDom, COL.faint, 1, { 'stroke-width': 11 });
+      const { red, rs } = aErrFrame(g, aTight(run), 14); put(red, { o: 1 }); put(rs, { o: 1 });
+      aRect(g, aC, COL.dim, 1, { 'stroke-width': 8 });
+      run.forEach(([px, py, l]) => aDot(g, px, py, l, 1, 13));
+      show(g, t, .3);
+      const v = text(p, aFmt(risks[i]), x + 72, y + 124, m('many', 3.4) + i * .05, { size: 22, anchor: 'middle', weight: 600 });
+      tw(fr, { c_stroke: good ? COL.good : COL.bad }, te, .4); tw(v, { c_fill: good ? COL.good : COL.bad }, te, .4);
+    });
+    text(p, `${aRuns.length} muestras, cada una con m = ${aRuns[0].length}`, 940, 150, m('many'), { size: 28, weight: 600 });
+    aTx(p, 'bajo cada una, el error R(h_{S}) de su rectángulo', 940, 188, m('many', 3.4), { size: 24, fill: COL.dim });
+    aTx(p, `ε = ${aEPS}`, 940, 268, m('eps'), { size: 36, fill: COL.task, weight: 600 });
+    aTx(p, 'aproximadamente correcta:  R(h_{S}) ≤ ε', 940, 308, te - .6, { size: 26 });
+    aTx(p, `${ok} de ${aRuns.length} muestras:  R(h_{S}) ≤ ε`, 940, 372, m('good'), { size: 28, fill: COL.good, weight: 600 });
+    aTx(p, `${aRuns.length - ok} de ${aRuns.length} muestras:  R(h_{S}) > ε`, 940, 414, m('bad'), { size: 28, fill: COL.bad, weight: 600 });
+    aTx(p, 'δ', 940, 494, m('dd'), { size: 36, fill: COL.task, weight: 600 });
+    text(p, 'probabilidad máxima tolerada', 980, 484, m('dd'), { size: 24 });
+    text(p, 'de una muestra desafortunada', 980, 514, m('dd'), { size: 24 });
+    aTx(p, 'P[ R(h_{S}) ≤ ε ] ≥ 1 − δ', 940, 606, m('formula'), { size: 44, fill: COL.task, weight: 600 });
+    aTx(p, 'probabilidad sobre la muestra S ∼ D^{m}', 940, 648, m('formula', .6), { size: 24, fill: COL.dim });
+    text(p, 'Probablemente (confianza 1 − δ), aproximadamente (precisión 1 − ε), correcta.', 800, 790, m('names'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['franjas', 'Cuántos puntos bastan', (m) => {
+    const p = panel(0), rs = aTight(aSB), tsm = m('sample');
+    aFrame(p, .2); aNote(p);
+    const strips = aStrips.map((r, i) => { const e = aFilled(p, r, HUE.strip, 0, .5); show(e, m('strips') + i * .3); return e; });
+    const red = aHole(p, aC, rs, HUE.err); show(red, m('inside'));
+    show(aRect(p, aC, COL.chalk, 0), .2);
+    text(p, 'c', aC[0] + aC[2] + 12, aC[1] + aC[3] + 4, .3, { size: 34, font: MATH, weight: 600 });
+    const hy = aRectDraw(p, rs, HUE.hyp); draw(hy, tsm + 2.6, 1.2);
+    [[aC[0] + aC[2] / 2, aC[1] - 14, 'middle'], [aC[0] + aC[2] + 14, aC[1] + aC[3] / 2, 'start'], [aC[0] + aC[2] / 2, aC[1] + aC[3] + 34, 'middle'], [aC[0] - 14, aC[1] + aC[3] / 2, 'end']].forEach(([x, y, anchor], i) => {
+      const e = aTx(p, `r_{${i + 1}}`, x, y, m('strips') + i * .3, { size: 34, fill: HUE.strip, anchor, weight: 600 });
+      hide(e, tsm, .4);
+    });
+    aSB.forEach(([x, y, l], i) => aFall(aDot(p, x, y, l, 0, 6), tsm + i * .01));
+    tw(hy, { 'a_stroke-width': 9 }, m('touch', 2.4), .25, out); tw(hy, { 'a_stroke-width': 4 }, m('touch', 2.7), .5);
+    text(p, 'Cuatro franjas a lo largo de los lados de c', 940, 150, m('strips'), { size: 28, fill: COL.task, weight: 600 });
+    aTx(p, `cada una con masa ε/4  (a escala para ε = ${aEPS})`, 940, 188, m('strips', 1.4), { size: 24, fill: COL.dim });
+    aTx(p, 'Un punto en cada franja: R_{S} tiene un lado en cada una', 940, 258, m('touch'), { size: 24 });
+    aTx(p, 'R(R_{S}) ≤ 4 · ε/4 = ε', 940, 322, m('inside', 2), { size: 36, fill: COL.good, weight: 600 });
+    aTx(p, `en el dibujo: R(R_{S}) ≈ ${aFmt(aRisk(rs))}`, 940, 360, m('inside', 2.6), { size: 24, fill: COL.dim });
+    text(p, 'Solo falla si la muestra esquiva una franja:', 940, 430, m('miss'), { size: 24 });
+    aTx(p, 'P[ R(R_{S}) > ε ] ≤ 4(1 − ε/4)^{m} ≤ 4e^{−mε/4}', 940, 474, m('prob'), { size: 30 });
+    aTx(p, 'm ≥ (4/ε) log(4/δ)', 940, 566, m('bound', 2.6), { size: 44, fill: COL.task, weight: 600 });
+    text(p, 'log: logaritmo natural', 940, 602, m('bound', 3), { size: 22, fill: COL.dim });
+    aTx(p, `ε = ${aEPS},  δ = ${aDELTA}   →   m ≥ ${aMB}`, 940, 668, m('num'), { size: 30, weight: 600 });
+    text(p, `La muestra del dibujo tiene m = ${aSB.length} puntos.`, 480, 710, m('num', 5), { size: 26, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['definicion', 'La definición completa', (m) => {
+    const p = panel(0), k = 1.3;
+    text(p, 'Una clase C es PAC-aprendible si existe', 940, 150, .3, { size: 26, weight: 600 });
+    text(p, 'un algoritmo A que garantiza', 940, 184, m('def', 2), { size: 26, weight: 600 });
+    aTx(p, 'P[ R(h_{S}) ≤ ε ] ≥ 1 − δ', 940, 250, m('def', 4.2), { size: 40, fill: COL.task, weight: 600 });
+    [['any', 'para todo ε > 0 y todo δ > 0'], ['dist', 'para toda distribución D'], ['conc', 'para todo concepto c en C'], ['poly', 'con m polinomial en 1/ε y 1/δ']].forEach(([mark, str], i) => {
+      const g = G(p, { x: 924, y: 326 + i * 48, o: 0 });
+      mk('circle', { cx: 24, cy: -9, r: 6, fill: COL.task }, g); T(g, str, { x: 46, size: 26, font: MATH });
+      tw(g, { o: 1, x: 940 }, m(mark), .5);
+    });
+    aTx(p, 'Rectángulos alineados a los ejes:  m ≥ (4/ε) log(4/δ)', 80, 150, m('rect'), { size: 30, weight: 600 });
+    const group = (y0, head, rows, t0, note) => {
+      text(p, head, 80, y0, t0, { size: 24, fill: COL.dim });
+      rows.forEach(([lab, n], i) => {
+        const y = y0 + 48 + i * 46, t = t0 + .4 + i * .5;
+        aTx(p, lab, 80, y, t, { size: 26 }); aBar(p, 250, y, n * k, t);
+        text(p, `m ≥ ${n}`, 262 + n * k, y, t + .4, { size: 26, weight: 600 });
+      });
+      text(p, note, 80, y0 + 190, t0 + 2.2, { size: 24, fill: COL.task, weight: 600 });
+    };
+    const A = [.2, .1, .05].map(e => [`ε = ${e}`, aNeed(e, aDELTA)]), B = [.05, .005, .0005].map(d => [`δ = ${d}`, aNeed(aEPS, d)]);
+    group(214, `δ = ${aDELTA} fijo`, A, m('half', -1.4), 'la mitad de ε: el doble de puntos');
+    group(450, `ε = ${aEPS} fijo`, B, m('conf', -1.4), `δ diez veces menor: solo ${B[1][1] - B[0][1]} puntos más`);
+    text(p, 'tamaños calculados con la cota del libro, ecuación (2.6)', 1570, 884, m('rect'), { size: 22, fill: COL.dim, anchor: 'end' });
+    text(p, 'Rectángulos alineados a los ejes:', 940, 560, m('rect'), { size: 26 });
+    text(p, 'clase PAC-aprendible', 940, 598, m('rect', .4), { size: 30, fill: COL.good, weight: 600 });
+    text(p, 'La garantía vale para toda distribución D: el argumento no usa su forma.', 800, 770, m('free'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Un concepto c etiqueta los puntos; el aprendiz solo ve una muestra S.', 'w1'], ['El error de generalización R(h) no se puede medir; el empírico, sí.', 'w2'],
+      ['PAC: con probabilidad ≥ 1 − δ, el error es a lo sumo ε.', 'w3'], ['Para los rectángulos basta m ≥ (4/ε) log(4/δ).', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 200, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 200, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 260, size: 32, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-simbolos', prompt: ['Para cada frase, ¿de qué símbolo de la definición PAC se habla?'],
+    build: grid([
+      { parts: ['Error de generalización máximo que se acepta'], ans: ['eps'], why: 'ε acota el error: la hipótesis debe ser aproximadamente correcta.' },
+      { parts: ['Probabilidad tolerada de recibir una muestra desafortunada'], ans: ['del'], why: 'La garantía puede fallar con probabilidad a lo sumo δ.' },
+      { parts: ['Número de ejemplos que recibe el algoritmo'], ans: ['m'], why: 'm es el tamaño de la muestra S.' },
+      { parts: ['Al reducirlo, aumenta la confianza de la garantía'], ans: ['del'], why: 'La confianza es 1 − δ.' },
+    ], [['eps', 'ε', COL.whole], ['del', 'δ', COL.irr], ['m', 'm', COL.real]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-mitad', prompt: ['Para los rectángulos basta ', $m('m ≥ (4/ε) log(4/δ)'), '. Si se exige la mitad de error ε, con el mismo δ, ¿qué pasa con ese tamaño de muestra?'],
+    build: choice([['Se duplica.'], ['Se eleva al cuadrado.'], ['Casi no cambia: ε está dentro del logaritmo.']], 0,
+      `ε aparece como 1/ε: la mitad de ε pide el doble de puntos. Con δ = ${aDELTA}, pasar de ε = 0.1 a ε = 0.05 lleva la cota de ${aNeed(.1, aDELTA)} a ${aNeed(.05, aDELTA)}.`,
+      [null, 'M crece como 1/ε, no como su cuadrado.', 'Lo que está dentro del logaritmo es δ; ε divide por fuera.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

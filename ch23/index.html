@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Regresión: cotas de generalización</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 23, title: 'Regresión: cotas de generalización', minutes: 6, language: 'es', next: '../ch24/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 22) ---------- */
+// En regresión no hay clases: tiza = puntos de la muestra (y testigos) · ámbar = la hipótesis o la función elegida ·
+// rosa (local) = residuo y pérdida · violeta = complejidad (log |H|, Rademacher, pseudo-dimensión) · verde/rojo = lado pedido logrado o no.
+const HUE = { pt: COL.chalk, hyp: COL.task, loss: COL.rat, cx: COL.real, ok: COL.good, bad: COL.bad };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'r^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξΦΨΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺≈∼∞⊤∈∃→↦′″⌊⌋])/;                                      // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aSetA = (e, o) => { Object.entries(o).forEach(([k, v]) => e.setAttribute(k, typeof v === 'number' ? v.toFixed(1) : v)); return e; };
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+// --- Modelo generador ilustrativo: x uniforme en [0, 2];  y = aF0 + aF1·x + ruido, ruido uniforme en [−aNz, aNz]. Así y ∈ [0, 2].
+const aF0 = .4, aF1 = .6, aNz = .4, aBres = 2, aM = aBres * aBres;                       // |h(x) − y| ≤ 2  ⟹  pérdida cuadrática ≤ M = 4
+const aDrawS = (seed, n) => { const r = aRng(seed); return Array.from({ length: n }, () => { const x = 2 * r(), e = (2 * r() - 1) * aNz; return [x, aF0 + aF1 * x + e]; }); };
+// Hipótesis: la recta que vale u en x = 0 y v en x = 2. Con u, v ∈ [0, 2] sus valores quedan en [0, 2].
+const aHy = (u, v, x) => u + (v - u) * x / 2;
+const aRes = (S0, u, v) => S0.map(([x, y]) => aHy(u, v, x) - y);                         // residuos h(x_i) − y_i
+const aEmp = (S0, u, v, pw = 2) => aSum(aRes(S0, u, v).map(r => Math.abs(r) ** pw)) / S0.length;   // (11.2), con la pérdida L_p
+// (11.1) exacto con la pérdida cuadrática: E[(h(x) − f(x))²] + Var(ruido); con h − f = a + b·x, E[x] = 1 y E[x²] = 4/3.
+const aRisk = (u, v) => { const a = u - aF0, b = (v - u) / 2 - aF1; return a * a + 2 * a * b + b * b * 4 / 3 + aNz * aNz / 3; };
+const aSeed = 103, aMs = 12, aS = aDrawS(aSeed, aMs), aSeed2 = 1103, aM2 = 1200, aS2 = aDrawS(aSeed2, aM2), aDl = .05;
+const aH0 = [.5, 1.5], aH1 = [1.5, .5];                                                  // la hipótesis de los primeros beats y otra, peor
+const aHiI = aRes(aS, ...aH0).reduce((q, r, i, all) => r < all[q] ? i : q, 0);   // el punto que más supera a la recta: el que se rotula
+// --- H finito: las 25 rectas con h(0) y h(2) en la cuadrícula {0, 0.5, 1, 1.5, 2}.
+const aGridV = [0, .5, 1, 1.5, 2], aHs = aGridV.flatMap(u => aGridV.map(v => [u, v])), aNH = aHs.length;
+const aRk = aHs.map(([u, v]) => aRisk(u, v)), aE1 = aHs.map(([u, v]) => aEmp(aS, u, v)), aE2 = aHs.map(([u, v]) => aEmp(aS2, u, v));
+const aFin = (n, k, dl, M0 = aM) => M0 * Math.sqrt((Math.log(k) + Math.log(1 / dl)) / (2 * n));   // teorema 11.1: M √((log|H| + log(1/δ)) / 2m)
+const aT1 = aFin(aMs, aNH, aDl), aT2 = aFin(aM2, aNH, aDl);
+const aConf = (n, dl, M0 = aM) => M0 * Math.sqrt(Math.log(1 / dl) / (2 * n));           // término de confianza: M √(log(1/δ) / 2m)
+// --- Rademacher. H∞ = todas las rectas con h(0), h(2) ∈ [0, 2]. Σ σ_i h(x_i) es lineal en (h(0), h(2)): el supremo está en una de las
+// cuatro esquinas del cuadrado [0, 2]², y la complejidad empírica sale exacta promediando sobre los 2^m vectores de signos.
+const aRad = S0 => { const n = S0.length, cs = [[0, 2], [2, 0], [2, 2]]; let tot = 0; for (let b = 0; b < 2 ** n; b++) { let best = 0; cs.forEach(([u, v]) => { let s = 0; for (let i = 0; i < n; i++) s += (b >> i & 1 ? 1 : -1) * aHy(u, v, S0[i][0]); if (s > best) best = s; }); tot += best / n; } return tot / 2 ** n; };
+const aRadS = aRad(aS);
+const aMu = (pw, B0 = aBres) => pw * B0 ** (pw - 1);                                     // pérdida L_p con |h(x) − y| ≤ M: μ = p M^(p−1)
+// --- Pseudo-dimensión. Un punto con su testigo: [z, t]. Signo de la recta a + b·z: +1 si pasa por encima del testigo, −1 si pasa por debajo.
+const aThru = ([z1, v1], [z2, v2]) => { const b = (v2 - v1) / (z2 - z1); return [v1 - b * z1, b]; };
+const aSgOf = (pts, [a, b]) => pts.map(([z, t]) => a + b * z > t ? 1 : -1);
+// Una recta que logra los signos sg con la mayor holgura de la lista, o null. El conjunto de rectas válidas, si no es vacío, tiene un vértice
+// con dos restricciones activas (los z son distintos): basta probar las rectas que pasan a distancia gp de dos testigos.
+const aLineFor = (pts, sg, gaps = [.35, .25, .15, .05, 1e-6]) => { for (const gp of gaps) for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) { const L = aThru([pts[i][0], pts[i][1] + sg[i] * gp], [pts[j][0], pts[j][1] + sg[j] * gp]); if (pts.every(([z, t], k) => sg[k] * (L[0] + L[1] * z - t) >= gp - 1e-9)) return L; } return null; };
+const aTryL = (pts, sg, skip, gp = .3) => { const q = pts.map((pt, i) => [pt[0], pt[1] + sg[i] * gp]).filter((_, i) => i !== skip); return aThru(q[0], q[1]); };   // cumple con todos menos con el punto skip
+const aCombos = n => Array.from({ length: 2 ** n }, (_, k) => Array.from({ length: n }, (_, i) => k >> (n - 1 - i) & 1 ? -1 : 1));   // (+,+), (+,−), (−,+), (−,−)
+const aP2 = [[.6, 1.2], [1.4, .8]], aP3 = [[.4, .8], [1, 1.3], [1.6, .8]], aP3a = aP3.slice(0, 2);
+const aC2 = aCombos(2), aL2 = aC2.map(sg => aLineFor(aP2, sg)), aL3a = aC2.map(sg => aLineFor(aP3a, sg));
+const aC3 = aCombos(3), aL3 = aC3.map(sg => aLineFor(aP3, sg)), aNo3 = aC3.filter((_, k) => !aL3[k]);   // las combinaciones de tres que ninguna recta logra
+const aPd = (d, n, M0 = aM) => M0 * Math.sqrt(2 * d * Math.log(Math.E * n / d) / n);     // primer término de (11.6)
+// --- Comprobaciones. 1: tres muestras de tres puntos (x = 1, 2, 3) frente a la hipótesis constante h = 2. 2: tres combinaciones sobre aP3.
+const aQ1 = [[3, 1, 3], [2, 2, 4], [2, 3, 1]], aQ1h = 2, aQ1res = aQ1.map(r => r.map(y => Math.abs(aQ1h - y))), aQ1mse = aQ1res.map(r => aSum(r.map(v => v * v)) / r.length), aQ1r = aQ1mse.indexOf(Math.max(...aQ1mse));
+const aQ2 = [[1, -1, 1], [1, 1, -1], [-1, 1, -1]], aQ2L = aQ2.map(sg => aLineFor(aP3, sg)), aQ2r = aQ2L.findIndex(L => !L);
+const aQ1tx = j => Number.isInteger(aQ1mse[j]) ? String(aQ1mse[j]) : `${aSum(aQ1res[j].map(v => v * v))}/${aQ1res[j].length} ≈ ${aQ1mse[j].toFixed(2)}`;
+const aF2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2).replace('-', '−');
+const aEq = v => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9 ? '=  ' + String(Math.round(v * 100) / 100).replace('-', '−') : '≈  ' + aF2(v);   // «=» solo si el valor es exacto con dos decimales
+const aInt = v => String(Math.round(v)).replace(/\B(?=(\d{3})+$)/g, ' ');           // miles con espacio fino
+const aLst = v => v.length > 1 ? v.slice(0, -1).join(', ') + ' y ' + v[v.length - 1] : String(v[0]);
+/* aMATH:end */
+
+let aClipN = 0;
+// Plano de regresión: marco de 2 × 2 unidades (la misma escala en los dos ejes, para que los cuadrados sean cuadrados), con la muestra S0.
+// Capas, de abajo hacia arriba: pl.g0 (libre, recortada al marco), pl.gs (cuadrados de la pérdida), pl.gr (residuos), pl.gh (la hipótesis), pl.gp (puntos).
+// pl.setH(u, v): pone la recta por (0, u) y (2, v) y recalcula residuos y cuadrados · pl.box(i): [x, y, lado] del cuadrado del punto i.
+const aPlot = (p, S0, { x0 = 120, y0 = 750, un = 280, t0 = .4, r = 9 } = {}) => {
+  const PX = x => x0 + x * un, PY = y => y0 - y * un, g = G(p, { o: t0 == null ? 1 : 0 }), id = 'aclip' + (aClipN++), pl = { g, PX, PY, x0, y0, un };
+  if (t0 != null) show(g, t0);
+  pl.fr = mk('rect', { x: x0, y: y0 - 2 * un, width: 2 * un, height: 2 * un, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  [0, 1, 2].forEach(v => { T(g, String(v), { x: PX(v), y: y0 + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); T(g, String(v), { x: x0 - 16, y: PY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  aTx(g, 'x', PX(1.5), y0 + 34, null, { size: 24, fill: COL.dim, anchor: 'middle' }); aTx(g, 'y', x0 - 16, PY(1.5) + 8, null, { size: 24, fill: COL.dim, anchor: 'end' });
+  mk('rect', { x: x0, y: y0 - 2 * un, width: 2 * un, height: 2 * un }, mk('clipPath', { id }, g));
+  pl.g0 = G(g); pl.gs = G(g, { o: 0 }); [pl.g0, pl.gs].forEach(e => e.setAttribute('clip-path', `url(#${id})`));
+  pl.gr = G(g, { o: 0 }); pl.gh = G(g, { o: 0 }); pl.gp = G(g);
+  pl.sq = S0.map(() => mk('rect', { fill: HUE.loss, 'fill-opacity': .26, stroke: HUE.loss, 'stroke-width': 2 }, pl.gs));
+  pl.rs = S0.map(() => mk('path', { stroke: HUE.loss, 'stroke-width': 5, 'stroke-linecap': 'round', fill: 'none' }, pl.gr));
+  pl.ln = mk('path', { stroke: HUE.hyp, 'stroke-width': 6, 'stroke-linecap': 'round', fill: 'none' }, pl.gh);
+  pl.hl = aTx(pl.gh, 'h', 0, 0, null, { size: 30, fill: HUE.hyp, weight: 700 });
+  pl.dot = S0.map(([x, y]) => mk('circle', { cx: PX(x), cy: PY(y), r, fill: HUE.pt, stroke: COL.board, 'stroke-width': 2 }, pl.gp));
+  pl.box = i => { const [x, y] = S0[i], hy = aHy(...pl.hv, x), s = Math.abs(hy - y) * un; return [x <= 1 ? PX(x) : PX(x) - s, Math.min(PY(hy), PY(y)), s]; };
+  pl.setH = (u, v) => {
+    pl.hv = [u, v]; pl.ln.setAttribute('d', `M${PX(0)} ${PY(u).toFixed(1)}L${PX(2)} ${PY(v).toFixed(1)}`); put(pl.hl, { x: PX(2) + 14, y: PY(v) + 10 });
+    S0.forEach(([x, y], i) => { const [bx, by, s] = pl.box(i); pl.rs[i].setAttribute('d', `M${PX(x).toFixed(1)} ${PY(y).toFixed(1)}V${PY(aHy(u, v, x)).toFixed(1)}`); aSetA(pl.sq[i], { x: bx, y: by, width: s, height: s }); });
+  };
+  return pl;
+};
+// Tablero de testigos: un eje con los puntos z_i, un testigo (z_i, t_i) por punto (marca horizontal) y una recta a + b·z recortada al marco.
+// wt.set(a, b): mueve la recta; en cada punto pone el cruce, un trazo desde el testigo y su signo (+ por encima del testigo, − por debajo; si hay lado pedido, ✓ verde o ✗ rojo) ·
+// wt.ask(sg): dibuja, a la izquierda de cada testigo, la flecha del lado pedido · capas: wt.gw (testigos), wt.ga (lo pedido), wt.gl (recta), wt.gs (cruces y signos).
+const aWit = (p, pts, { x0 = 120, y0 = 750, un = 280, t0 = .4, names = true, lw = 6 } = {}) => {
+  const k = un / 280, PX = z => x0 + z * un, PY = v => y0 - v * un, g = G(p, { o: t0 == null ? 1 : 0 }), id = 'aclip' + (aClipN++), wt = { g, PX, PY, pts, want: null };
+  if (t0 != null) show(g, t0);
+  mk('rect', { x: x0, y: y0 - 2 * un, width: 2 * un, height: 2 * un, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  mk('rect', { x: x0, y: y0 - 2 * un, width: 2 * un, height: 2 * un }, mk('clipPath', { id }, g));
+  pts.forEach(([z], i) => {
+    mk('path', { d: `M${PX(z)} ${y0}V${y0 - 2 * un}`, stroke: COL.faint, 'stroke-width': 2, 'stroke-dasharray': '5 7' }, g); mk('circle', { cx: PX(z), cy: y0, r: 6 * k + 3, fill: HUE.pt }, g);
+    if (names) aTx(g, `z_{${i + 1}}`, PX(z), y0 + 42, null, { size: 26, anchor: 'middle' });
+  });
+  wt.gw = G(g); wt.ga = G(g, { o: 0 });
+  pts.forEach(([z, t], i) => {
+    mk('path', { d: `M${PX(z) - 20 * k - 4} ${PY(t)}h${40 * k + 8}`, stroke: HUE.pt, 'stroke-width': 3 + 2 * k, 'stroke-linecap': 'round' }, wt.gw);
+    if (names) aTx(wt.gw, `t_{${i + 1}}`, PX(z) - 20 * k - 14, PY(t) + 8, null, { size: 26, anchor: 'end' });
+  });
+  wt.gl = G(g); wt.gl.setAttribute('clip-path', `url(#${id})`);
+  wt.ln = mk('path', { fill: 'none', stroke: HUE.hyp, 'stroke-width': lw, 'stroke-linecap': 'round' }, wt.gl);
+  wt.gs = G(g);
+  wt.cn = pts.map(() => mk('path', { fill: 'none', stroke: COL.dim, 'stroke-width': 2 + 2 * k }, wt.gs));
+  wt.cr = pts.map(() => mk('circle', { r: 5 * k + 3, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 2 }, wt.gs));
+  wt.sg = pts.map(() => aHalo(T(wt.gs, '', { size: 22 + 14 * k, weight: 700 })));
+  wt.set = (a, b) => {
+    wt.L = [a, b]; wt.ln.setAttribute('d', `M${PX(0)} ${PY(a).toFixed(1)}L${PX(2)} ${PY(a + 2 * b).toFixed(1)}`);
+    pts.forEach(([z, t], i) => {
+      const v = a + b * z, vc = Math.min(1.9, Math.max(.1, v)), up = v > t, good = !wt.want || (up ? 1 : -1) === wt.want[i];
+      aSetA(wt.cr[i], { cx: PX(z), cy: PY(vc), opacity: v === vc ? 1 : 0 }); wt.cn[i].setAttribute('d', `M${PX(z)} ${PY(t)}V${PY(vc).toFixed(1)}`); put(wt.sg[i], { x: PX(z) + 10 * k + 8, y: (PY(t) + PY(vc)) / 2 + (22 + 14 * k) * .34 });
+      wt.sg[i].textContent = !wt.want ? (up ? '+' : '−') : good ? '✓' : '✗'; wt.sg[i].setAttribute('fill', !wt.want ? COL.chalk : good ? HUE.ok : HUE.bad);
+    });
+  };
+  wt.ask = sg => {
+    wt.want = sg; put(wt.ga, { o: 1 });
+    pts.forEach(([z, t], i) => {
+      const y1 = PY(t) - sg[i] * (50 * k + 8), hd = 9 * k + 3;
+      mk('path', { d: `M${PX(z)} ${PY(t)}V${y1}M${PX(z) - hd} ${y1 + sg[i] * hd}L${PX(z)} ${y1}L${PX(z) + hd} ${y1 + sg[i] * hd}`, fill: 'none', stroke: HUE.pt, 'stroke-width': 2 + 2 * k, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, wt.ga);
+      T(wt.ga, sg[i] > 0 ? '+' : '−', { x: PX(z) - 12 * k - 8, y: y1 + (sg[i] > 0 ? 18 : 4), size: 22 + 14 * k, weight: 700, anchor: 'end' });
+    });
+  };
+  return wt;
+};
+const aSgTx = sg => '( ' + sg.map(s => s > 0 ? '+' : '−').join(',  ') + ' )';
+const aMix = (A, B, q) => A.map((v, i) => v + (B[i] - v) * q);
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const aE0 = aEmp(aS, ...aH0), aR0 = aRisk(...aH0);
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 3 · Capítulo 23', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Regresión: cotas de generalización', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Cuando la etiqueta es un número, el error tiene tamaño. Y las garantías se adaptan.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['reg', 'El problema de regresión', (m) => {
+    const p = panel(0), tp = m('pts'), th = m('hyp'), tr = m('res'), to = m('one'), tl = m('lossf'), td = m('dif'), RX = 800;
+    aNote(p, `datos ilustrativos, con semilla fija · tiza: la muestra · ámbar: la hipótesis · rosa: residuo y pérdida · violeta: complejidad`);
+    aTitle(p, 'Regresión: la etiqueta es un número real');
+    const pl = aPlot(p, aS); pl.setH(...aH0);
+    pl.dot.forEach((e, i) => { put(e, { o: 0 }); show(e, .5 + .12 * i, .3); });
+    // un punto, con su entrada y su etiqueta; después, lo que predice la hipótesis para esa entrada
+    const [hx, hy] = aS[aHiI], hh = aHy(...aH0, hx), gd = G(p, { o: 0 }), gd2 = G(p, { o: 0 }); show(gd, tp + .6, .4); show(gd2, tr, .4);
+    mk('path', { d: `M${pl.PX(hx)} ${pl.y0}V${pl.PY(hy)}H${pl.x0}`, stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '6 6', fill: 'none' }, gd);
+    mk('circle', { cx: pl.PX(hx), cy: pl.PY(hy), r: 16, fill: 'none', stroke: HUE.pt, 'stroke-width': 3 }, gd);
+    aTx(gd, 'x_{i}', pl.PX(hx), pl.y0 + 72, null, { size: 26, anchor: 'middle', weight: 600 }); aTx(gd, 'y_{i}', pl.x0 - 50, pl.PY(hy) + 8, null, { size: 26, anchor: 'end', weight: 600 });
+    mk('path', { d: `M${pl.PX(hx)} ${pl.PY(hh)}H${pl.x0}`, stroke: HUE.hyp, 'stroke-width': 2, 'stroke-dasharray': '6 6', fill: 'none' }, gd2);
+    mk('circle', { cx: pl.PX(hx), cy: pl.PY(hh), r: 9, fill: COL.board, stroke: HUE.hyp, 'stroke-width': 4 }, gd2);
+    aTx(gd2, 'h(x_{i})', pl.x0 - 50, pl.PY(hh) + 8, null, { size: 26, anchor: 'end', weight: 600, fill: HUE.hyp });
+    show(pl.gh, th);
+    put(pl.gr, { o: 1 }); pl.rs.forEach((e, i) => { put(e, { o: 0 }); show(e, i === aHiI ? to : to + .5 + .07 * i, .3); });
+    aRow(p, [['S = ( (x_{1}, y_{1}), …, (x_{m}, y_{m}) )'], ['        etiquetas reales:  ', COL.dim, UI, 24], ['y_{i} ∈ ℝ']], RX, 262, tp, { size: 28, weight: 600 });
+    aRow(p, [['h : X → Y', HUE.hyp], ['        una hipótesis: un valor para cada x', COL.chalk, UI, 24]], RX, 346, th, { size: 30, weight: 600 });
+    aRow(p, [['residuo:   ', HUE.loss, UI, 26], ['h(x_{i}) − y_{i}', HUE.loss], ['        lo predicho, menos lo correcto', COL.dim, UI, 22]], RX, 430, to, { size: 30, weight: 600 });
+    aRow(p, [['L : Y × Y → ℝ_{+}', HUE.loss], ['        función de pérdida: mide la magnitud del error', COL.chalk, UI, 24]], RX, 514, tl, { size: 30, weight: 600 });
+    aRow(p, [['clasificación:   ', COL.dim, UI, 24], ['¿ h(x) ≠ y ?', COL.dim]], RX, 620, td, { size: 28, weight: 600 });
+    aRow(p, [['regresión:   ', COL.chalk, UI, 24], ['¿ cuánto difieren  h(x)  e  y ?', COL.chalk, UI, 26]], RX, 676, td + 2.4, { size: 28, weight: 600 });
+  }],
+
+  ['loss', 'Pérdida y error', (m) => {
+    const p = panel(0), ts = m('sq'), tlp = m('lp'), te = m('emp'), tm = m('move'), tg = m('gen'), tb = m('bnd'), t4 = m('m4'), RX = 800, AX = 840, AX2 = 1180, BY = 672;
+    aNote(p, `modelo ilustrativo: x uniforme en [0, 2],  y = ${aF0} + ${aF1}x + ruido uniforme en ±${aNz} · R(h) exacto, por integración · cuadrados a la escala del dibujo`);
+    aTitle(p, 'La pérdida mide el residuo; el error es su promedio');
+    const pl = aPlot(p, aS); [pl.gr, pl.gh, pl.gs].forEach(e => put(e, { o: 1 }));
+    // el cuadrado promedio (error empírico) y el del error de generalización, a la escala del dibujo
+    const ga = G(p, { o: 0 }), gb = G(p, { o: 0 });
+    const qa = mk('rect', { fill: HUE.loss, 'fill-opacity': .45, stroke: HUE.loss, 'stroke-width': 3 }, ga), la = aTx(ga, '', AX, BY + 42, null, { size: 28, fill: HUE.loss, weight: 700 });
+    const qb = mk('rect', { fill: 'none', stroke: COL.chalk, 'stroke-width': 3, 'stroke-dasharray': '9 7' }, gb), lb = aTx(gb, '', AX2, BY + 42, null, { size: 28, weight: 700 });
+    const setQ = (e, x, v) => { const s = Math.sqrt(v) * pl.un; aSetA(e, { x, y: BY - s, width: s, height: s }); };
+    const upd = (u, v) => { pl.setH(u, v); const e = aEmp(aS, u, v), r = aRisk(u, v); setQ(qa, AX, e); setQ(qb, AX2, r); la._set(`R̂_{S}(h)  ${aEq(e)}`); lb._set(`R(h)  ${aEq(r)}`); };
+    upd(...aH0);
+    pl.sq.forEach((e, i) => { put(e, { o: 0 }); show(e, ts + .1 * i, .35); });
+    // promediar: una copia de cada cuadrado viaja hasta el cuadrado promedio
+    const s0 = Math.sqrt(aE0) * pl.un, tf = te + 2;
+    aS.forEach((_, i) => { const [bx, by, s] = pl.box(i), e = put(aSetA(mk('rect', { fill: HUE.loss, 'fill-opacity': .3, stroke: HUE.loss, 'stroke-width': 2 }, p), { x: bx, y: by, width: s, height: s }), { o: 0 }); show(e, tf + .05 * i, .2); tw(e, { a_x: AX, a_y: BY - s0, a_width: s0, a_height: s0 }, tf + .2 + .05 * i, 1.1); hide(e, tf + 1.4 + .05 * i, .3); });
+    show(ga, tf + 1.3, .4);
+    const tbk = Math.max(tm + 3, tg - 1.5);
+    prog(q => upd(...aMix(aH0, aH1, q)), tm + .3, 1.8); prog(q => upd(...aMix(aH1, aH0, q)), tbk, 1.2);
+    show(gb, tg + 2.6, .5);
+    const fr = put(mk('rect', { x: pl.x0, y: pl.y0 - 2 * pl.un, width: 2 * pl.un, height: 2 * pl.un, fill: HUE.loss, 'fill-opacity': .08, stroke: HUE.loss, 'stroke-width': 5 }, p), { o: 0 }); show(fr, t4 + 2.2, .5);
+    aRow(p, [['pérdida cuadrática:      ', COL.chalk, UI, 24], ['L(y, y′)  =  |y′ − y|^{2}', HUE.loss]], RX, 262, ts - .6, { size: 30, weight: 600 });
+    aRow(p, [['pérdida L_{p}:      ', COL.chalk, UI, 24], ['L(y, y′)  =  |y′ − y|^{p}', HUE.loss], [',     p ≥ 1']], RX, 320, tlp, { size: 28, weight: 600 });
+    aRow(p, [['R̂_{S}(h)  =  (1/m) ∑_{i ≤ m} L( h(x_{i}), y_{i} )'], ['        (11.2)   error empírico', COL.dim, UI, 22]], RX, 398, te, { size: 28, weight: 600 });
+    aRow(p, [['R(h)  =  E_{(x, y) ∼ D} [ L( h(x), y ) ]'], ['        (11.1)   error de generalización', COL.dim, UI, 22]], RX, 456, tg, { size: 28, weight: 600 });
+    aRow(p, [['L( h(x), y )  ≤  M'], ['        regresión acotada', COL.dim, UI, 22]], RX, 776, tb, { size: 28, weight: 600 });
+    aRow(p, [[`aquí:   |h(x) − y| ≤ ${aBres},      M = ${aM}  =  el área del marco`, HUE.loss, UI, 24]], RX, 824, t4, { size: 24, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], W = 420, HH = 380, Y = 262, U = 66, GX = 78, GY = 330;
+    T(p, 'Tres muestras de tres puntos, y la misma hipótesis constante', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Cada cuadro de la cuadrícula mide 1. Junto a cada residuo, su longitud.', 100, 190, null, { size: 26, fill: COL.dim, font: UI });
+    aSq(p, 100, 238, HUE.hyp, 'hipótesis h', { line: true }); aSq(p, 300, 238, HUE.pt, 'punto de la muestra', { dot: true }); aSq(p, 590, 238, HUE.loss, 'residuo y su cuadrado');
+    S.q1 = aQ1.map((ys, j) => {
+      const g = G(p, { x: BX[j], y: Y }), PX = x => GX + x * U, PY = y => GY - y * U;
+      mk('rect', { x: 0, y: 0, width: W, height: HH, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+      mk('circle', { cx: 380, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(j + 1), { x: 380, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+      let d = ''; for (let k = 0; k <= 4; k++) d += `M${PX(k)} ${PY(0)}V${PY(4)}M${PX(0)} ${PY(k)}H${PX(4)}`;
+      mk('path', { d, stroke: COL.faint, 'stroke-width': 1.5, fill: 'none', opacity: .6 }, g);
+      ys.forEach((y, k) => { const x = k + 1, s = Math.abs(y - aQ1h) * U; if (s) mk('rect', { x: x <= 2 ? PX(x) : PX(x) - s, y: Math.min(PY(y), PY(aQ1h)), width: s, height: s, fill: HUE.loss, 'fill-opacity': .26, stroke: HUE.loss, 'stroke-width': 2 }, g); });
+      ys.forEach((y, k) => { const x = k + 1; if (y !== aQ1h) { mk('path', { d: `M${PX(x)} ${PY(y)}V${PY(aQ1h)}`, stroke: HUE.loss, 'stroke-width': 5, 'stroke-linecap': 'round' }, g); aHalo(T(g, String(Math.abs(y - aQ1h)), { x: PX(x) + (x <= 2 ? -14 : 14), y: (PY(y) + PY(aQ1h)) / 2 + 9, size: 26, fill: HUE.loss, weight: 700, anchor: x <= 2 ? 'end' : 'start', font: MATH })); } });
+      mk('path', { d: `M${PX(0)} ${PY(aQ1h)}H${PX(4)}`, stroke: HUE.hyp, 'stroke-width': 5, 'stroke-linecap': 'round' }, g);
+      ys.forEach((y, k) => mk('circle', { cx: PX(k + 1), cy: PY(y), r: 10, fill: HUE.pt, stroke: COL.board, 'stroke-width': 2 }, g));
+      return g;
+    });
+    S.q1B = BX.map(bx => [bx, Y, W, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-cuadratica', prompt: ['¿En cuál es mayor el error empírico con la pérdida cuadrática?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'muestra ' + (j + 1) })), aQ1r,
+      `Residuos ${aLst(aQ1res[aQ1r])}: el promedio de los cuadrados es ${aQ1tx(aQ1r)}. El residuo grande pesa más.`,
+      j => `Ahí los residuos son ${aLst(aQ1res[j])}: el promedio de sus cuadrados es ${aQ1tx(j)}.`),
+  }], done) }],
+
+  ['fin', 'Hipótesis finitas', (m) => {
+    const p = panel(0), tH = m('H'), tba = m('bars'), tti = m('tick'), tho = m('hoef'), tun = m('union'), tth = m('thm'), tv = m('val'), tmo = m('more'), toc = m('occam'), RX = 800;
+    aNote(p, `H ilustrativo: las ${aNH} rectas con h(0) y h(2) en {0, 0.5, 1, 1.5, 2} · δ = ${aDl} · la segunda muestra, de ${aInt(aM2)} puntos, sale del mismo modelo`);
+    aTitle(p, 'Un conjunto finito de hipótesis');
+    const pl = aPlot(p, aS), gx = G(pl.g0, { o: 0 });
+    aS2.forEach(([x, y]) => mk('circle', { cx: pl.PX(x).toFixed(1), cy: pl.PY(y).toFixed(1), r: 2.2, fill: COL.dim }, gx)); show(gx, tmo, .8);
+    aHs.forEach(([u, v], k) => { const e = put(mk('path', { d: `M${pl.PX(0)} ${pl.PY(u)}L${pl.PX(2)} ${pl.PY(v)}`, stroke: HUE.hyp, 'stroke-width': 2.5, fill: 'none' }, pl.g0), { o: 0 }); tw(e, { o: .6 }, tH + .05 * k, .3); });
+    // una barra por hipótesis, ordenadas por su error de generalización
+    const CX = 856, CY = 772, CU = 70, ST = 27, ord = aHs.map((_, k) => k).sort((a, b) => aRk[a] - aRk[b]), BX = j => CX + 12 + j * ST, cy = v => CY - v * CU, cg = G(p, { o: 0 }), XE = CX + aNH * ST + 14;
+    show(cg, tba - .5, .4);
+    mk('path', { d: `M${CX} ${cy(aM) - 12}V${CY}H${XE}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, cg);
+    [0, 1, 2, 3, 4].forEach(v => { mk('path', { d: `M${CX - 6} ${cy(v)}h6`, stroke: COL.faint, 'stroke-width': 2 }, cg); T(cg, String(v), { x: CX - 14, y: cy(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+    mk('path', { d: `M${CX} ${cy(aM)}H${XE}`, stroke: HUE.loss, 'stroke-width': 2, 'stroke-dasharray': '8 7' }, cg); aTx(cg, `M = ${aM}`, XE - 2, cy(aM) + 30, null, { size: 24, fill: HUE.loss, weight: 700, anchor: 'end' });
+    aSq(cg, CX, 822, HUE.loss, 'error empírico'); aSq(cg, CX + 208, 822, COL.chalk, 'error de generalización', { line: true }); aSq(cg, CX + 510, 822, HUE.cx, 'término de la cota', { line: true });
+    ord.forEach((k, j) => {
+      const b = mk('rect', { x: BX(j), y: CY, width: 14, height: 0, fill: HUE.loss }, cg), st = put(mk('rect', { x: BX(j) + 5, y: cy(aE1[k] + aT1), width: 4, height: aT1 * CU, fill: HUE.cx }, cg), { o: 0 }), cp = put(mk('rect', { x: BX(j) - 1, y: cy(aE1[k] + aT1) - 2, width: 16, height: 4, fill: HUE.cx }, cg), { o: 0 });
+      tw(b, { a_y: cy(aE1[k]), a_height: aE1[k] * CU }, tba + .04 * j, .5, out);
+      show(put(mk('path', { d: `M${BX(j) - 4} ${cy(aRk[k]).toFixed(1)}h22`, stroke: COL.chalk, 'stroke-width': 3 }, cg), { o: 0 }), tti + .04 * j, .3);
+      show(st, tv + .03 * j, .3); show(cp, tv + .03 * j, .3);
+      tw(b, { a_y: cy(aE2[k]), a_height: aE2[k] * CU }, tmo + .6, 1.4); tw(st, { a_y: cy(aE2[k] + aT2), a_height: aT2 * CU }, tmo + .6, 1.4); tw(cp, { a_y: cy(aE2[k] + aT2) - 2 }, tmo + .6, 1.4);
+    });
+    const g1 = G(p), g2 = G(p), gv = G(p);
+    aRow(p, [[`|H| = ${aNH}`, HUE.hyp], ['        rectas', COL.chalk, UI, 24]], RX, 250, tH, { size: 30, weight: 600 });
+    aRow(g1, [['P[ R(h) − R̂_{S}(h) > ε ]   ≤   e^{−2mε²/M²}'], ['        Hoeffding: una h, pérdida en [0, M]', COL.dim, UI, 22]], RX, 306, tho, { size: 26, weight: 600 });
+    aRow(g1, [['P[ ∃ h ∈ H :  R(h) − R̂_{S}(h) > ε ]   ≤   |H| e^{−2mε²/M²}'], ['        cota de la unión', COL.dim, UI, 22]], RX, 358, tun, { size: 26, weight: 600 });
+    hide(g1, toc - .5, .4);
+    aRow(g2, [['crece con  ', COL.chalk, UI, 24], ['log |H|', HUE.cx], [':   conviene el conjunto más chico', COL.chalk, UI, 24]], RX, 306, toc, { size: 28, weight: 600 });
+    aTx(g2, 'con M = 1:  la cota de clasificación del cap. 3, caso inconsistente', RX, 358, toc + 3, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['R(h)  ≤  R̂_{S}(h)  +  '], ['M √( ( log |H| + log(1/δ) ) / 2m )', HUE.cx], ['     teorema 11.1', COL.dim, UI, 22]], RX, 418, tth, { size: 26, weight: 600 });
+    aRow(gv, [[`m = ${aMs},   M = ${aM}:      `, COL.chalk, UI, 24], [`término  ${aEq(aT1)}`, HUE.cx, UI, 26]], RX, 466, tv, { size: 26, weight: 700 }); hide(gv, tmo, .3);
+    aRow(p, [[`m = ${aInt(aM2)},   M = ${aM}:      `, COL.chalk, UI, 24], [`término  ${aEq(aT2)}`, HUE.cx, UI, 26], ['        10 veces menor', COL.dim, UI, 22]], RX, 466, tmo + .4, { size: 26, weight: 700 });
+  }],
+
+  ['rad', 'Rademacher y contracción', (m) => {
+    const p = panel(0), tf = m('fam'), tl = m('lip'), tpr = m('prop'), tth = m('thm'), tlp = m('lpm'), t2 = m('p2'), t1 = m('p1'), RX = 800;
+    aNote(p, `H: todas las rectas con valores en [0, 2] · ℜ̂_{S}(H) exacta sobre los ${aInt(2 ** aMs)} vectores de signos · en el caso L_{p}, M acota el residuo y la pérdida queda bajo M^{p}`);
+    aTitle(p, 'Infinitas hipótesis: Rademacher y el lema de contracción');
+    // la pérdida como función del residuo: |u|^p sobre [−M, M]; su mayor pendiente está en el borde
+    const X0 = 120, Y0 = 750, U = 140, LX = u => X0 + (u + 2) * U, LY = v => Y0 - v * U, g = G(p, { o: 0 }), gt = G(p, { o: 0 }), f1 = v => v.toFixed(1); show(g, .4); show(gt, tl + 4.5, .4);
+    mk('rect', { x: X0, y: Y0 - 4 * U, width: 4 * U, height: 4 * U, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+    mk('path', { d: `M${LX(0)} ${Y0}V${Y0 - 4 * U}`, stroke: COL.faint, 'stroke-width': 2, 'stroke-dasharray': '5 7' }, g);
+    [-2, -1, 0, 1, 2].forEach(v => T(g, String(v).replace('-', '−'), { x: LX(v), y: Y0 + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    [0, 1, 2, 3, 4].forEach(v => T(g, String(v), { x: X0 - 16, y: LY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+    aTx(g, 'residuo  h(x) − y', LX(0), Y0 + 74, null, { size: 24, fill: COL.dim, anchor: 'middle' });
+    T(G(g, { x: X0 - 56, y: LY(2), r: -90 }), 'pérdida', { size: 24, fill: COL.dim, anchor: 'middle' });
+    const cv = mk('path', { fill: 'none', stroke: HUE.loss, 'stroke-width': 6, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, g), tn = mk('path', { fill: 'none', stroke: COL.chalk, 'stroke-width': 4, 'stroke-linecap': 'round' }, gt);
+    const lmu = aHalo(aTx(gt, '', LX(0), LY(3.45), null, { size: 26, fill: HUE.loss, weight: 700, anchor: 'middle' })), lpw = aHalo(aTx(g, '', LX(0), LY(3.45) - 46, null, { size: 26, weight: 700, anchor: 'middle' }));
+    aHalo(aTx(gt, 'pendiente máxima: en el borde', LX(0), LY(3.45) + 40, null, { size: 22, fill: COL.dim, anchor: 'middle', font: UI }));
+    const l2 = aTx(p, '', RX + 470, 642, t2, { size: 28, fill: HUE.cx, weight: 700 });
+    const setP = pw => {
+      const mu = aMu(pw), top = aBres ** pw; let d = '';
+      for (let k = 0; k <= 80; k++) { const u = -2 + k / 20; d += (k ? 'L' : 'M') + f1(LX(u)) + ' ' + f1(LY(Math.abs(u) ** pw)); }
+      cv.setAttribute('d', d); tn.setAttribute('d', [1, -1].map(s => `M${f1(LX(s * 1.45))} ${f1(LY(top - .55 * mu))}L${f1(LX(s * 2))} ${f1(LY(top))}`).join(''));
+      lpw._set(`L(y, y′)  =  |y′ − y|^{${aF2(pw).replace(/\.?0+$/, '')}}`); lmu._set(`μ  ${aEq(mu)}`); l2._set(`2 μ ℜ̂_{S}(H)  ${aEq(2 * mu * aRadS)}`);
+    };
+    setP(2); prog(q => setP(2 - q), t1 + .2, 2.2);
+    aRow(p, [['G  =  { (x, y) ↦ L( h(x), y ) :  h ∈ H }'], ['        la familia de las pérdidas', COL.dim, UI, 22]], RX, 250, tf, { size: 27, weight: 600 });
+    aRow(p, [['L  es  ', COL.chalk, UI, 24], ['μ', HUE.loss], ['-Lipschitz en la predicción', COL.chalk, UI, 24], ['        lema de contracción de Talagrand', COL.dim, UI, 22]], RX, 320, tl, { size: 28, weight: 600 });
+    aRow(p, [['ℜ̂_{S}(G)', HUE.cx], ['   ≤   '], ['μ', HUE.loss], [' ℜ̂_{S}(H)', HUE.cx], ['        proposición 11.2', COL.dim, UI, 22]], RX, 390, tpr, { size: 30, weight: 600 });
+    aRow(p, [['R(h)  ≤  R̂_{S}(h)  +  2'], ['μ', HUE.loss], [' ℜ_{m}(H)', HUE.cx], ['  +  M √( log(1/δ) / 2m )'], ['     teorema 11.3', COL.dim, UI, 22]], RX, 474, tth, { size: 26, weight: 600 });
+    aRow(p, [['L_{p}  con  |h(x) − y| ≤ M :      '], ['μ  =  p M^{p−1}', HUE.loss], [',      pérdida  ≤  M^{p}']], RX, 558, tlp, { size: 27, weight: 600 });
+    aRow(p, [['aquí:   ', COL.dim, UI, 24], [`ℜ̂_{S}(H)  ${aEq(aRadS)}`, HUE.cx]], RX, 642, t2, { size: 28, weight: 700 });
+  }],
+
+  ['pd', 'Pseudo-dimensión', (m) => {
+    const p = panel(0), twi = m('wit'), tab = m('ab'), tfo = m('four'), tg = [m('g1'), m('g2'), m('g3'), m('g4')], tde = m('def'), tvc = m('vc'), RX = 800;
+    aNote(p, 'definiciones 11.4 y 11.5 · puntos y testigos ilustrativos, como en la figura 11.1 del libro, con rectas en lugar de curvas');
+    aTitle(p, 'Fragmentar con testigos: la pseudo-dimensión');
+    const wt = aWit(p, aP2), cur = { L: aL2[1].slice() };
+    put(wt.gw, { o: 0 }); put(wt.gs, { o: 0 }); show(wt.gw, twi + 1.6); show(wt.gs, tab + .6, .4);
+    const gl = aTx(p, 'g', wt.PX(2) + 14, 0, .4, { size: 30, fill: HUE.hyp, weight: 700 });
+    const mv = L => { wt.set(...L); put(gl, { y: wt.PY(Math.min(1.95, Math.max(.05, L[0] + 2 * L[1]))) + 10 }); };
+    mv(cur.L);
+    // la recta recorre las cuatro combinaciones; cada una queda anotada en un mosaico
+    let from = aL2[1];
+    aC2.forEach((sg, j) => {
+      const a = from, b = aL2[j]; prog(q => mv(aMix(a, b, q)), tg[j] - .35, .6); from = b;
+      const mt = aWit(p, aP2, { x0: RX + j * 188, y0: 610, un: 80, t0: tg[j] + .3, names: false, lw: 4 }); mt.set(...aL2[j]);
+      aTx(p, aSgTx(sg), RX + j * 188 + 80, 652, tg[j] + .3, { size: 26, anchor: 'middle', weight: 700, font: UI });
+    });
+    aRow(p, [['testigos  ', COL.chalk, UI, 26], ['t_{1}, …, t_{m} ∈ ℝ'], [':   un umbral por punto', COL.chalk, UI, 26]], RX, 250, twi, { size: 28, weight: 600 });
+    aRow(p, [['sgn( g(z_{i}) − t_{i} )'], [':      +  por encima del testigo,    −  por debajo', COL.chalk, UI, 24]], RX, 320, tab, { size: 28, weight: 600 });
+    aRow(p, [['fragmentado', HUE.hyp, UI, 26], [':   para algunos testigos, G logra las 2^{m} combinaciones', COL.chalk, UI, 24]], RX, 390, tfo, { size: 26, weight: 600 });
+    aRow(p, [['Pdim(G)', HUE.cx], ['   =   tamaño del mayor conjunto fragmentado por G', COL.chalk, UI, 24]], RX, 728, tde, { size: 30, weight: 600 });
+    aRow(p, [['Pdim(G)', HUE.cx], ['   =   VCdim( { (x, t) ↦ 1[ g(x) − t > 0 ] :  g ∈ G } )'], ['      (11.3)', COL.dim, UI, 22]], RX, 798, tvc, { size: 27, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], W = 420, HH = 380, Y = 262;
+    T(p, 'Tres puntos, cada uno con su testigo', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'La flecha dice de qué lado del testigo tiene que pasar la recta:  +  por encima,  −  por debajo.', 100, 190, null, { size: 26, fill: COL.dim, font: UI });
+    S.q2L = [];
+    S.q2 = aQ2.map((sg, j) => {
+      const g = G(p, { x: BX[j], y: Y });
+      mk('rect', { x: 0, y: 0, width: W, height: HH, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+      mk('circle', { cx: 380, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(j + 1), { x: 380, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+      const wt = aWit(g, aP3, { x0: 46, y0: 346, un: 150, t0: null, names: false, lw: 5 }); wt.ask(sg);
+      [wt.gl, wt.gs].forEach(e => put(e, { o: 0 }));
+      if (aQ2L[j]) { wt.set(...aQ2L[j]); S.q2L.push(wt.gl, wt.gs); }
+      return g;
+    });
+    S.q2B = BX.map(bx => [bx, Y, W, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-testigos', prompt: ['¿Qué combinación no logra ninguna recta?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'combinación ' + (j + 1) })), aQ2r,
+      'Una recta por debajo de los testigos de los extremos queda también por debajo del central.',
+      j => aQ2L[j][1] === 0 ? 'Esa sí se logra: con una recta horizontal entre los testigos.' : 'Esa sí se logra: con una recta inclinada, que deja al último testigo del otro lado.',
+      () => S.q2L.forEach(e => fx(e, { o: 1 }, .2, .5))),
+  }], done) }],
+
+  ['dim', 'La cota con pseudo-dimensión', (m) => {
+    const p = panel(0), tl2 = m('l2'), tl3 = m('l3'), thy = m('hyp'), tve = m('vec'), tth = m('thm'), tgr = m('grow'), RX = 800, no = aNo3[0];
+    aNote(p, `los mismos tres puntos de la comprobación · barras: primer término de (11.6) con M = ${aM}; los valores de d son ilustrativos`);
+    aTitle(p, 'Cuánto vale la pseudo-dimensión, y la cota que da');
+    // dos puntos: las cuatro combinaciones; tres puntos: una combinación que ninguna recta logra
+    const wa = aWit(p, aP3a), wb = aWit(p, aP3, { t0: tl3 });
+    wa.set(...aL3a[0]); let from = aL3a[0];
+    [1, 2, 3, 0].forEach((j, n) => { const a = from, b = aL3a[j]; prog(q => wa.set(...aMix(a, b, q)), tl2 + .5 + .7 * n, .5); from = b; });
+    hide(wa.g, tl3, .4);
+    wb.ask(no); const tries = [2, 0, 1].map(k => aTryL(aP3, no, k)); wb.set(...tries[0]); put(wb.gl, { o: 0 }); put(wb.gs, { o: 0 }); show(wb.gl, tl3 + 2.6, .4); show(wb.gs, tl3 + 2.6, .4);
+    tries.forEach((L, n) => { if (n) { const a = tries[n - 1]; prog(q => wb.set(...aMix(a, L, q)), tl3 + 2.6 + 1.9 * n, .8); } });
+    aRow(p, [['rectas sobre un eje:    ', COL.chalk, UI, 24], ['2 puntos, sí', COL.chalk, UI, 24], [';    3 puntos, nunca', COL.chalk, UI, 24], ['          Pdim = 2', HUE.cx]], RX, 250, [tl2, tl2, tl3, thy - 2.2], { size: 28, weight: 700 });
+    aRow(p, [['Pdim( { x ↦ w · x + b :  w ∈ ℝ^{N},  b ∈ ℝ } )   =   '], ['N + 1', HUE.cx], ['      teorema 11.6', COL.dim, UI, 22]], RX, 334, thy, { size: 27, weight: 600 });
+    aRow(p, [['H  espacio vectorial de funciones:    ', COL.chalk, UI, 24], ['Pdim(H) = dim(H)', HUE.cx], ['     teorema 11.7', COL.dim, UI, 22]], RX, 404, tve, { size: 27, weight: 600 });
+    aRow(p, [['teorema 11.8', HUE.hyp, UI, 24], [',  (11.6)', COL.dim, UI, 22], [':    si  ', COL.chalk, UI, 24], ['Pdim(G) = d', HUE.cx], ['  y la pérdida es  ≤ M,', COL.chalk, UI, 24]], RX, 488, tth, { size: 27, weight: 600 });
+    aRow(p, [['R(h) ≤ R̂_{S}(h) + '], ['M √( 2d log(em/d) / m )', HUE.cx], [' + M √( log(1/δ) / 2m )']], RX, 548, tth + 4.4, { size: 26, weight: 600 });
+    // el término de complejidad para dos valores de d, mientras m crece
+    const gb = G(p, { o: 0 }), DS = [2, 10], KX = 132, x0 = RX + 96, lm = aTx(gb, '', RX, 634, null, { size: 26, weight: 700, font: UI }); show(gb, tgr, .4);
+    const bars = DS.map((d, k) => { const y = 664 + 52 * k; aTx(gb, `d = ${d}`, RX, y + 22, null, { size: 24, fill: HUE.cx, weight: 600 }); return { e: mk('rect', { x: x0, y, width: 0, height: 30, fill: HUE.cx }, gb), t: T(gb, '', { x: x0, y: y + 23, size: 24, fill: COL.dim, font: MATH }) }; });
+    const setM = n => { lm._set(`m = ${aInt(n)}:      el término que crece con d y se achica con m`); DS.forEach((d, k) => { const v = aPd(d, n); bars[k].e.setAttribute('width', (v * KX).toFixed(1)); put(bars[k].t, { x: x0 + v * KX + 12 }); bars[k].t.textContent = aF2(v); }); };
+    setM(100); prog(q => { const v = 10 ** (2 + 3 * q), st = 10 ** Math.floor(Math.log10(v) - 1); setM(q >= 1 ? 1e5 : Math.round(v / st) * st); }, tgr + 1.6, 3.6, lin);
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Regresión:  etiquetas reales; la pérdida mide la magnitud del error, acotada por M.', 'w1'], ['H finito (teorema 11.1):  la cota de clasificación, multiplicada por M.', 'w2'],
+      ['Rademacher (teorema 11.3):  una pérdida μ-Lipschitz aporta, a lo sumo, un factor μ.', 'w3'], ['Pseudo-dimensión:  fragmentar con testigos; la cota (11.6) crece con d.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['En regresión, la pérdida mide cuánto difieren la predicción y la etiqueta, no solo si coinciden.'], ans: ['v'], why: 'Por eso se usan pérdidas como la cuadrática: el residuo al cuadrado.' },
+      { parts: ['El error empírico con la pérdida cuadrática es el mayor de los residuos al cuadrado.'], ans: ['f'], why: 'Es el promedio sobre la muestra: el error cuadrático medio (11.2).' },
+      { parts: ['Con H finito y la pérdida acotada por M, el término de la cota es el de clasificación multiplicado por M.'], ans: ['v'], why: 'Teorema 11.1: Hoeffding y la cota de la unión, con M. Si M = 1, coinciden.' },
+      { parts: ['Si la pérdida es μ-Lipschitz, la complejidad de Rademacher de las pérdidas es al menos μ veces la de H.'], ans: ['f'], why: 'Es a lo sumo μ veces la de H: el lema de contracción da una cota superior.' },
+      { parts: ['La pseudo-dimensión de las rectas sobre un eje es 3.'], ans: ['f'], why: 'Es N + 1 = 2: dos puntos se fragmentan con testigos; tres, nunca.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

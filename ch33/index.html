@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Procesos de decisión de Markov y políticas</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 33, title: 'Procesos de decisión de Markov y políticas', minutes: 7, language: 'es', next: '../ch34/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 32) ---------- */
+// Sin clases en este capítulo. Ámbar = el agente, la acción elegida y la política · verde = recompensa (rojo si es negativa) ·
+// violeta = el valor (V y Q) · rosa = probabilidades de transición y descuento · tiza = estados y lo demás.
+const HUE = { act: COL.task, rew: COL.good, neg: COL.bad, val: COL.real, pr: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'x_{j}', 'a^{*}'. Con t0 = null queda visible desde el inicio. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξχΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯≠π⊆])/;                        // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aHideAll = (els, t) => els.forEach(e => hide(e, t, .3));
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+// Sistema lineal A·z = c por eliminación de Gauss con pivoteo parcial (el del cap. 24).
+const aSolve = (A, c) => {
+  const n = c.length, a = A.map((r, i) => [...r, c[i]]);
+  for (let k = 0; k < n; k++) {
+    let pv = k; for (let i = k + 1; i < n; i++) if (Math.abs(a[i][k]) > Math.abs(a[pv][k])) pv = i;
+    [a[k], a[pv]] = [a[pv], a[k]];
+    for (let i = k + 1; i < n; i++) { const f = a[i][k] / a[k][k]; for (let j = k; j <= n; j++) a[i][j] -= f * a[k][j]; }
+  }
+  const z = Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) z[i] = (a[i][n] - a[i].slice(i + 1, n).reduce((s, v, j) => s + v * z[i + 1 + j], 0)) / a[i][i];
+  return z;
+};
+const aRng = seed => () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+// --- El MDP de la figura 17.3 del libro (start, other · search, carry, pickup). El libro deja R1, R2 y R3 sin valor: aquí 0, 1 y 3 (ilustrativos), y γ = 0.8.
+const aST = ['inicio', 'otro'], aAC = ['buscar', 'llevar', 'recoger'], aGAM = .8, aR1 = 0, aR2 = 1, aR3 = 3, aHOR = 60;
+// Una transición por flecha de la figura: desde s, con la acción a, se llega a «to» con probabilidad p y recompensa r. loop / bend: solo para dibujarla.
+const aED = [{ s: 0, a: 0, to: 0, p: .1, r: aR1, loop: -90 }, { s: 0, a: 0, to: 1, p: .9, r: aR1, bend: -.2 }, { s: 1, a: 1, to: 0, p: .5, r: aR3, bend: -.2 },
+  { s: 1, a: 1, to: 1, p: .5, r: -1, loop: -90 }, { s: 1, a: 2, to: 1, p: 1, r: aR2, loop: 90 }];
+const aMDP = { ini: 0, lab: aST, act: aAC, ed: aED };
+const aOut = (s, a) => aED.map((e, k) => ({ ...e, k })).filter(e => e.s === s && e.a === a);
+const aEr = (s, a) => aOut(s, a).reduce((v, e) => v + e.p * e.r, 0);                                   // E[r(s, a)]
+const aPm = pi => aST.map((_, s) => aST.map((_, t) => aOut(s, pi[s]).filter(e => e.to === t).reduce((v, e) => v + e.p, 0)));   // P de (17.6)
+const aRv = pi => aST.map((_, s) => aEr(s, pi[s]));                                                    // R de (17.6)
+const aV = (pi, gam = aGAM) => aSolve(aPm(pi).map((r, i) => r.map((v, j) => (i === j ? 1 : 0) - gam * v)), aRv(pi));   // (17.7): (I − γP) V = R
+const aQ = (V, s, a, gam = aGAM) => aOut(s, a).reduce((v, e) => v + e.p * (e.r + gam * V[e.to]), 0);       // (17.1), segunda forma
+// Trayectoria simulada de n pasos con la política determinista pi desde s0: por paso, { t, s, a, k: flecha, r, to }.
+const aTraj = (pi, s0, rnd, n = aHOR) => { const o = []; let s = s0; for (let t = 0; t < n; t++) { const es = aOut(s, pi[s]); let u = rnd(), e = es[es.length - 1]; for (const c of es) { if (u < c.p) { e = c; break; } u -= c.p; } o.push({ t, s, a: e.a, k: e.k, r: e.r, to: e.to }); s = e.to; } return o; };
+const aRet = (tr, gam = aGAM) => tr.reduce((v, x) => v + gam ** x.t * x.r, 0);                          // retorno descontado (truncado a los pasos simulados)
+// n trayectorias desde s0: retornos, promedio acumulado y promedio final.
+const aMC = (pi, s0, seed, n) => { const rnd = aRng(seed), rs = [], avg = []; let sum = 0; for (let i = 0; i < n; i++) { const g = aRet(aTraj(pi, s0, rnd)); rs.push(g); sum += g; avg.push(sum / (i + 1)); } return { rs, avg, mean: sum / n }; };
+// --- Datos: π lleva en «otro»; π′ recoge en «otro» (en «inicio» solo existe buscar).
+const aPI = [0, 1], aPI2 = [0, 2], aNMC = 5000;
+const aV1 = aV(aPI), aV2 = aV(aPI2);
+const aTR1 = aTraj(aPI, 0, aRng(12)), aG1 = aRet(aTR1);                                              // la trayectoria que camina el agente
+const aTR2 = aTraj(aPI, 0, aRng(5));                                                                // la de la comprobación 1
+const aMC0 = aMC(aPI, 0, 3, aNMC), aMC1 = aMC(aPI, 1, 103, aNMC);
+const aQ1 = [aQ(aV1, 1, 1), aQ(aV1, 1, 2)], aQ2 = [aQ(aV2, 1, 2), aQ(aV2, 1, 1)];                     // Q_π(otro, ·) y Q_π′(otro, ·)
+const aImp = aST.every((_, s) => aQ(aV1, s, aPI2[s]) >= aQ(aV1, s, aPI[s]) - 1e-12);                  // hipótesis del teorema 17.6 para π → π′
+const aOpt = pi => { const V = aV(pi); return aST.every((_, s) => { const as = [...new Set(aED.filter(e => e.s === s).map(e => e.a))]; return aQ(V, s, pi[s]) >= Math.max(...as.map(a => aQ(V, s, a))) - 1e-12; }); };   // (17.2)
+const aF = (v, n = 2) => (Math.abs(v) < 5e-7 ? 0 : v).toFixed(n).replace('-', '−'), aN = v => String(v).replace('-', '−');
+/* aMATH:end */
+
+// MDP como grafo (generaliza el aGraph de los caps. 13, 31 y 32): estados en cualquier lugar; una flecha por transición, rotulada «acción / [probabilidad, recompensa]»
+// como en la figura 17.3. M = { ini, lab, act, ed: [{ s, a, to, p, r, loop: ángulo en grados | bend }] }. Estado inicial = círculo grueso.
+// tl = [instante de las flechas y la acción, de la probabilidad, de la recompensa] (null: todo visible). vals: deja lugar para un número dentro del estado.
+// gr.pol(pi, t) tiñe de ámbar las flechas de la política y apaga las otras · gr.hot engrosa una flecha un momento · gr.setV escribe el valor de un estado ·
+// gr.tok / gr.go: ficha del agente que recorre una flecha · gr.ed[k].box = caja del rótulo.
+const aGraph = (p, M, pos, { t0 = .4, tS = null, tl = null, rad = 62, size = 24, vals = false } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g), gs = G(g, { o: tS == null ? 1 : 0 }), gr = { g, pos, M, rad, ed: [], ring: [], val: [], sg: [] };
+  const f = Q => Q.map(v => v.toFixed(1)).join(' '), ext = rad * 1.8, ap = ((2 * rad + 13) * Math.cos(.42) + 6 * (rad + ext) * Math.cos(.6)) / 8;
+  const off = (U, V, r) => { const l = Math.hypot(V[0] - U[0], V[1] - U[1]); return [U[0] + (V[0] - U[0]) * r / l, U[1] + (V[1] - U[1]) * r / l]; };
+  const head = (Q, C) => { const ha = Math.atan2(Q[1] - C[1], Q[0] - C[0]), u = [Math.cos(ha), Math.sin(ha)]; return `M${f([Q[0] + 12 * u[0], Q[1] + 12 * u[1]])}L${f([Q[0] - 4 * u[0] - 8 * u[1], Q[1] - 4 * u[1] + 8 * u[0]])}L${f([Q[0] - 4 * u[0] + 8 * u[1], Q[1] - 4 * u[1] - 8 * u[0]])}Z`; };
+  M.ed.forEach((e, k) => {
+    const [x1, y1] = pos[e.s], [x2, y2] = pos[e.to], eg = G(ge), ea = G(eg, { o: tl ? 0 : 1 });
+    let d, Q2, C, lx, ly;
+    if (e.s === e.to) {
+      const th = (e.loop ?? -90) * Math.PI / 180, pt = (ang, r) => [x1 + r * Math.cos(ang), y1 + r * Math.sin(ang)];
+      C = pt(th + .6, rad + ext); Q2 = pt(th + .42, rad + 13); d = `M${f(pt(th - .42, rad))}C${f(pt(th - .6, rad + ext))} ${f(C)} ${f(Q2)}`;
+      [lx, ly] = pt(th, ap + 18); if (Math.sin(th) > 0) ly += size * .75;
+    } else {
+      const len = Math.hypot(x2 - x1, y2 - y1), nx = -(y2 - y1) / len, ny = (x2 - x1) / len, bd = (e.bend ?? 0) * len, sd = bd < 0 ? -1 : 1;
+      C = [(x1 + x2) / 2 + nx * bd, (y1 + y2) / 2 + ny * bd]; Q2 = off([x2, y2], C, rad + 13); const Q0 = off([x1, y1], C, rad);
+      const mid = [(Q0[0] + 2 * C[0] + Q2[0]) / 4, (Q0[1] + 2 * C[1] + Q2[1]) / 4];
+      d = `M${f(Q0)}Q${f(C)} ${f(Q2)}`; lx = mid[0] + nx * sd * 22; ly = mid[1] + ny * sd * 22 + (ny * sd > 0 ? size * .75 : 0);
+    }
+    const pe = mk('path', { d, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round' }, ea), hd = mk('path', { d: head(Q2, C), fill: COL.dim }, ea);
+    const lg = G(eg), ls = aRow(lg, [[M.act[e.a], COL.chalk, UI], [' / [', COL.dim], [aN(e.p), HUE.pr], [', ', COL.dim], [aN(e.r), e.r < 0 ? HUE.neg : HUE.rew], [']', COL.dim]], 0, 0, null, { size, weight: 600 });
+    put(lg, { x: lx - ls.end / 2, y: ly });
+    if (tl) { ls.forEach((el, i) => { put(el, { o: 0 }); show(el, tl[[0, 1, 1, 2, 2, 1][i]] + k * .15, .4); }); show(ea, tl[0] + k * .15, .4); }
+    gr.ed.push({ g: eg, pe, hd, act: ls[0], ls, box: [lx - ls.end / 2 - 10, ly - size - 6, ls.end + 20, size + 18] });
+  });
+  M.lab.forEach((lab, id) => {
+    const [x, y] = pos[id], sg = G(gs);
+    gr.ring[id] = mk('circle', { cx: x, cy: y, r: rad, fill: COL.board, stroke: COL.chalk, 'stroke-width': id === M.ini ? 7 : 3 }, sg);
+    T(sg, lab, { x, y: y + (vals ? -8 : 9), size: 26, anchor: 'middle', weight: 600 });
+    gr.val[id] = aTx(sg, '', x, y + 30, null, { size: 28, fill: HUE.val, anchor: 'middle', weight: 700 });
+    gr.sg[id] = sg;
+  });
+  if (t0 != null) show(g, t0);
+  if (tS != null) show(gs, tS);
+  gr.pol = (pi, t) => M.ed.forEach((e, k) => {
+    const on = pi[e.s] === e.a, E = gr.ed[k], c = on ? HUE.act : COL.dim;
+    if (t == null) { E.pe.setAttribute('stroke', c); E.hd.setAttribute('fill', c); E.act.setAttribute('fill', on ? HUE.act : COL.chalk); put(E.g, { o: on ? 1 : .3 }); return; }
+    tw(E.pe, { c_stroke: c }, t, .35); tw(E.hd, { c_fill: c }, t, .35); tw(E.act, { c_fill: on ? HUE.act : COL.chalk }, t, .35); tw(E.g, { o: on ? 1 : .3 }, t, .35);
+  });
+  gr.hot = (k, ta, tb) => { const e = gr.ed[k].pe; tw(e, { 'a_stroke-width': 8 }, ta, .15); tw(e, { 'a_stroke-width': 3 }, tb, .3); };
+  gr.setV = (id, str, t, c = HUE.val) => { const e = gr.val[id]; if (t == null) { e._set(str); e.setAttribute('fill', c); return; } aAt(() => e._set(str), t); tw(e, { c_fill: COL.chalk }, t, .1); tw(e, { c_fill: c }, t + .5, .5); };
+  const rest = s => [pos[s][0], pos[s][1] + rad * .55];
+  gr.tok = s => put(mk('circle', { r: 13, fill: HUE.act, stroke: COL.board, 'stroke-width': 3 }, g), { x: rest(s)[0], y: rest(s)[1], o: 0 });
+  gr.go = (tok, k, t, dt) => {
+    const e = gr.ed[k].pe, to = M.ed[k].to, L = e.getTotalLength(), P0 = e.getPointAtLength(0);
+    gr.hot(k, t, t + dt * .85); tw(tok, { x: P0.x, y: P0.y }, t, dt * .15);
+    prog(v => { const Q = e.getPointAtLength(v * L); put(tok, { x: Q.x, y: Q.y }); }, t + dt * .15, dt * .55);
+    tw(tok, { x: rest(to)[0], y: rest(to)[1] }, t + dt * .7, dt * .15);
+  };
+  return gr;
+};
+const aPOS = [[240, 430], [700, 430]];
+// Recompensas de una trayectoria como barras: marco = recompensa r, relleno = γ^t · r (bs.disc encoge el relleno). Verde hacia arriba, rojo hacia abajo.
+// Debajo, filas t, r y γ^t. bs.show(k, t) muestra el paso k; bs.col[k] = grupo del paso; bs.cx(k) = su centro.
+const aBars = (p, tr, x0, yb, { n = 10, dx = 62, sc = 46, bw = 40, rows = [96, 134, 172], gam = aGAM, dots = true, heads = true, t0 = .4 } = {}) => {
+  const bs = { col: [], fill: [], gk: [], cx: k => x0 + k * dx }, g0 = G(p, { o: 0 }); show(g0, t0);
+  mk('path', { d: `M${x0 - 34} ${yb}H${x0 + (n - 1) * dx + 34}`, stroke: COL.faint, 'stroke-width': 2 }, g0);
+  if (heads) [['t', COL.dim], ['r', HUE.rew]].forEach(([s, c], i) => aTx(g0, s, x0 - 50, yb + rows[i], null, { size: 24, fill: c, anchor: 'end', weight: 600 }));
+  bs.gh = aTx(p, 'γ^{t}', x0 - 50, yb + rows[2], null, { size: 24, fill: HUE.pr, anchor: 'end', weight: 600 }); put(bs.gh, { o: 0 });
+  if (dots) T(g0, '…', { x: x0 + n * dx - 14, y: yb + rows[0], size: 26, fill: COL.dim, anchor: 'middle' });
+  tr.slice(0, n).forEach((x, k) => {
+    const g = G(p, { o: 0 }), cx = bs.cx(k), h = Math.abs(x.r) * sc, y = x.r > 0 ? yb - h : yb, c = x.r < 0 ? HUE.neg : HUE.rew;
+    if (x.r) { bs.fill[k] = mk('rect', { x: cx - bw / 2, y, width: bw, height: h, fill: c }, g); mk('rect', { x: cx - bw / 2, y, width: bw, height: h, fill: 'none', stroke: c, 'stroke-width': 2 }, g); }
+    else mk('path', { d: `M${cx - bw / 2} ${yb}h${bw}`, stroke: HUE.rew, 'stroke-width': 4 }, g);
+    T(g, String(k), { x: cx, y: yb + rows[0], size: 24, fill: COL.dim, anchor: 'middle', font: MATH });
+    T(g, aN(x.r), { x: cx, y: yb + rows[1], size: 26, fill: c, anchor: 'middle', font: MATH, weight: 700 });
+    bs.gk[k] = T(p, aF(gam ** k).replace(/\.?0+$/, ''), { x: cx, y: yb + rows[2], size: 22, fill: HUE.pr, anchor: 'middle', font: MATH, weight: 600, o: 0 });
+    bs.col[k] = g;
+  });
+  bs.show = (k, t) => show(bs.col[k], t, .3);
+  bs.disc = t => { show(bs.gh, t, .4); tr.slice(0, n).forEach((x, k) => { const h = Math.abs(x.r) * sc * gam ** k; show(bs.gk[k], t + k * .1, .3); if (x.r) tw(bs.fill[k], { a_height: h, ...(x.r > 0 ? { a_y: yb - h } : {}) }, t + .3 + k * .1, .7); }); };
+  return bs;
+};
+// Gráfica de un promedio acumulado (variante del aPlot del cap. 16): eje horizontal = número de trayectorias. ch.live(avg, col) devuelve n => traza hasta la trayectoria n.
+const aPlot = (p, x0, y0, w, h, { t0 = .4, nmax, v0, v1, yt = [], xt = [] } = {}) => {
+  const CX = n => x0 + n / nmax * w, VY = v => y0 - (Math.min(v1, Math.max(v0, v)) - v0) / (v1 - v0) * h, g = G(p, { o: 0 }), ch = { CX, VY, g };
+  mk('path', { d: `M${x0} ${y0 - h - 12}V${y0}H${x0 + w + 10}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  yt.forEach(v => { mk('path', { d: `M${x0 - 8} ${VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(v), { x: x0 - 16, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  xt.forEach(n => { mk('path', { d: `M${CX(n)} ${y0}v8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(n), { x: CX(n), y: y0 + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  T(g, 'trayectorias', { x: x0 + w, y: y0 + 64, size: 22, fill: COL.dim, anchor: 'end' });
+  const idx = []; for (let n = 1; n <= nmax; n += n < 40 ? 1 : n < 400 ? 4 : 20) idx.push(n);
+  ch.live = (avg, col) => { const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': 4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, g); return n => e.setAttribute('d', idx.filter(i => i <= n).map((i, j) => `${j ? 'L' : 'M'}${CX(i).toFixed(1)} ${VY(avg[i - 1]).toFixed(1)}`).join('')); };
+  show(g, t0);
+  return ch;
+};
+// Matriz chica entre corchetes: filas de números. Devuelve el ancho.
+const aMat = (p, rows, x, y, col, { cw = 62, rh = 40, size = 26 } = {}) => {
+  const w = rows[0].length * cw, h = rows.length * rh;
+  mk('path', { d: `M${x + 8} ${y}h-8v${h}h8M${x + w + 8} ${y}h8v${h}h-8`, stroke: COL.chalk, 'stroke-width': 2, fill: 'none' }, p);
+  rows.forEach((r, i) => r.forEach((v, j) => T(p, aN(v), { x: x + 8 + j * cw + cw / 2, y: y + i * rh + rh * .72, size, fill: col, anchor: 'middle', font: MATH, weight: 600 })));
+  return w + 16;
+};
+// Barra horizontal de un valor Q: rótulo, barra violeta y número. parts = piezas del rótulo (aRow).
+const aHBar = (p, parts, x, xb, y, v, t0, { sc = 62, col = HUE.val } = {}) => {
+  const g = G(p, { o: 0 }); aRow(g, parts, x, y, null, { size: 26, weight: 600 });
+  const r = mk('rect', { x: xb, y: y - 22, width: 0, height: 28, fill: col }, g);
+  aTx(g, aF(v), xb + v * sc + 14, y, null, { size: 26, fill: col, weight: 700 });
+  show(g, t0, .4); tw(r, { a_width: v * sc }, t0 + .2, .7, out);
+  return g;
+};
+// Ecuación de Bellman de un estado para la política pi, con los números del ejemplo: piezas de aRow.
+const aBel = (pi, s) => { const P = aPm(pi)[s]; return [[`V(${aST[s]})`, HUE.val], ['  =  ', COL.chalk], [aN(aEr(s, pi[s])), HUE.rew], ['  +  ', COL.chalk], [aN(aGAM), HUE.pr], [' · ( ', COL.chalk], [aN(P[0]), HUE.pr], [` V(${aST[0]})`, HUE.val], ['  +  ', COL.chalk], [aN(P[1]), HUE.pr], [` V(${aST[1]})`, HUE.val], [' )', COL.chalk]]; };
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 880;
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 33', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Procesos de decisión de Markov y políticas', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Un agente actúa, recibe recompensas y busca la mejor forma de elegir.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['esc', 'El escenario', (m, D) => {
+    const p = panel(0), ta = m('act'), tb = m('back'), LX = 850;
+    aNote(p, 'esquema de la figura 17.1 del libro · ámbar: agente, acción y política · verde / rojo: recompensa · violeta: valor · rosa: probabilidad y descuento');
+    aTitle(p, 'Aprendizaje por refuerzo: un agente interactúa con el entorno');
+    const bx = (x, lab, col, t) => { const g = G(p, { o: 0 }); mk('rect', { x, y: 330, width: 240, height: 100, fill: 'none', stroke: col, 'stroke-width': 4 }, g); T(g, lab, { x: x + 120, y: 391, size: 30, fill: col, anchor: 'middle', weight: 600 }); show(g, t); };
+    bx(120, 'Agente', HUE.act, .3); bx(520, 'Entorno', COL.chalk, .5);
+    const arr = (d, hx, hy, up, col, lab, ly, t) => {
+      const e = path(p, d, { stroke: col, 'stroke-width': 4 }, { d: 0 }); draw(e, t, .8);
+      const h = put(mk('path', { d: up ? `M${hx - 9} ${hy + 18}h18L${hx} ${hy + 2}Z` : `M${hx - 9} ${hy - 18}h18L${hx} ${hy - 2}Z`, fill: col }, p), { o: 0 }); show(h, t + .7, .2);
+      text(p, lab, 440, ly, t + .3, { size: 24, fill: col, anchor: 'middle', weight: 600 });
+      const dot = put(mk('circle', { r: 11, fill: col, stroke: COL.board, 'stroke-width': 3 }, p), { o: 0 });
+      return (t1, du) => { show(dot, t1, .1); prog(v => { const Q = e.getPointAtLength(v * e.getTotalLength()); put(dot, { x: Q.x, y: Q.y }); }, t1, du); hide(dot, t1 + du, .15); };
+    };
+    const go1 = arr('M240 330V250H640V314', 640, 330, false, HUE.act, 'acción', 236, ta - .2);
+    const go2 = arr('M600 430V500H280V446', 280, 430, true, COL.chalk, 'estado', 488, tb + .8), go3 = arr('M680 430V570H200V446', 200, 430, true, HUE.rew, 'recompensa', 558, tb + 1.6);
+    const cnt = aTx(p, 'paso  t = 0', 440, 650, ta, { size: 26, anchor: 'middle', fill: COL.dim });
+    const t1 = tb + 5.6, cyc = 3.4, nc = Math.floor((D - .6 - t1) / cyc);
+    go1(ta + .7, 1); go2(tb + 3, 1.2); go3(tb + 3, 1.4); aAt(() => cnt._set('paso  t = 1'), tb + 4.6);
+    for (let i = 0; i < nc; i++) { const t = t1 + i * cyc; go1(t, 1); go2(t + 1.2, 1.1); go3(t + 1.2, 1.3); aAt(() => cnt._set(`paso  t = ${i + 2}`), t + 2.6); }
+    [['sin muestra etiquetada', ':   reúne información al actuar', 'nolab'], ['llega solo la recompensa inmediata', '', 'imm'], ['dilema', ':   explorar lo desconocido o explotar lo que sabe', 'expl'], ['sin distribución fija', ':   la política define lo que se observa', 'dist']]
+      .forEach(([a, b, mark], i) => aRow(p, [[a, COL.chalk, UI], [b, COL.dim, UI]], LX, 290 + i * 70, m(mark), { size: 24, weight: 600 }));
+    aRow(p, [['modelo del entorno conocido', COL.dim, UI], ['   →   planificación', COL.chalk, UI]], 120, 750, m('plan'), { size: 26, weight: 600 });
+    aRow(p, [['modelo del entorno desconocido', COL.dim, UI], ['   →   aprendizaje', COL.chalk, UI]], 120, 802, m('learn'), { size: 26, weight: 600 });
+  }],
+
+  ['mdp', 'El modelo', (m) => {
+    const p = panel(0), ts = m('st'), ta = m('ac'), tp = m('pr'), tr = m('rw'), tm = m('mk'), tf = m('fin');
+    aNote(p, 'MDP de la figura 17.3 del libro (start, other · search, carry, pickup) · el libro deja las recompensas R1, R2 y R3 sin valor: aquí 0, 1 y 3, ilustrativas');
+    aTitle(p, 'Proceso de decisión de Markov (MDP)');
+    const gr = aGraph(p, aMDP, aPOS, { t0: null, tS: Math.min(ts, .5), tl: [ta, tp, tr] });
+    gr.sg.forEach((_, s) => { tw(gr.ring[s], { c_stroke: HUE.act }, ts + s * .4, .2); tw(gr.ring[s], { c_stroke: COL.chalk }, ts + 1 + s * .4, .5); });
+    gr.hot(1, tp + 6, tp + 9.5); gr.hot(2, tr + 5, tr + 6.3); gr.hot(3, tr + 6.5, tr + 8);
+    text(p, 'Definición 17.1', RX, 214, .5, { size: 24, fill: COL.dim });
+    const L = (parts, y, t) => aRow(p, parts, RX, y, t, { size: 26, weight: 600 });
+    L([['S', COL.chalk, MATH, 30], [':   estados      { inicio, otro }', COL.chalk, UI]], 270, ts);
+    L([['s_{0}', COL.chalk, MATH, 30], [':   estado inicial      inicio', COL.chalk, UI]], 326, ts + 1.6);
+    L([['A', HUE.act, MATH, 30], [':   acciones      { buscar, llevar, recoger }', COL.chalk, UI]], 382, ta);
+    L([['P[s′ | s, a]', HUE.pr, MATH, 30], [':   probabilidad de transición', COL.chalk, UI]], 438, tp);
+    L([['P[r′ | s, a]', HUE.rew, MATH, 30], [':   probabilidad de la recompensa', COL.chalk, UI]], 494, tr);
+    aRow(p, [['de Markov', HUE.act, UI], [':   transición y recompensa dependen solo del estado actual, no de toda la historia', COL.chalk, UI]], 100, 750, tm, { size: 26, weight: 600 });
+    aRow(p, [['MDP finito', HUE.act, UI], [':   S y A son conjuntos finitos', COL.chalk, UI]], 100, 802, tf, { size: 26, weight: 600 });
+  }],
+
+  ['pol', 'Política y retorno', (m) => {
+    const p = panel(0), tpo = m('pol'), td = m('det'), tst = m('stat'), tk = m('walk'), tdi = m('disc'), tsh = m('shr'), tre = m('ret'), tfh = m('fh'), n = 10;
+    aNote(p, `trayectoria simulada en la página, con semilla · el retorno suma ${aHOR} pasos:  γ^{${aHOR}} < 0.000002 · recompensas ilustrativas`);
+    aTitle(p, 'Política: qué acción tomar en cada estado');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3 }), tok = gr.tok(0), bs = aBars(p, aTR1, 950, 436, { n, rows: [90, 126, 162], t0: tk }), dt = (tdi - .5 - tk - 1) / n;
+    gr.pol(aPI, td + 1);
+    aRow(p, [['π', HUE.act, MATH, 30], [`(${aST[0]}) = ${aAC[aPI[0]]}`, HUE.act, UI], ['        π', HUE.act, MATH, 30], [`(${aST[1]}) = ${aAC[aPI[1]]}`, HUE.act, UI]], RX, 214, td + 1, { size: 26, weight: 600 });
+    show(tok, tk, .3);
+    aTR1.slice(0, n).forEach((x, k) => { const t = tk + 1 + k * dt; gr.go(tok, x.k, t, dt); bs.show(k, t + dt * .6); });
+    aRow(p, [['γ = ', HUE.pr], [aN(aGAM), HUE.pr], ['   factor de descuento,  γ ∈ [0, 1)', COL.dim, UI, 24]], RX, 262, tdi + 4, { size: 28, weight: 600 });
+    bs.disc(tsh - .4);
+    aRow(p, [['retorno  =  ', COL.chalk, UI, 26], ['∑_{t} ', COL.chalk], ['γ^{t}', HUE.pr], [' r(s_{t}, π(s_{t}))', HUE.rew], [`  ≈  ${aF(aG1)}`, COL.chalk]], RX, 660, tre, { size: 30, weight: 600 });
+    aRow(p, [['Definición 17.2', COL.dim, UI], [':   una política ', COL.chalk, UI], ['π', HUE.act, MATH, 30], [' asigna a cada estado una distribución sobre las acciones,   ', COL.chalk, UI], ['π: S → Δ(A)', HUE.act, MATH, 28]], 100, 734, tpo, { size: 24, weight: 600 });
+    aRow(p, [['determinista', HUE.act, UI], [':   una sola acción por estado', COL.chalk, UI]], 100, 784, td, { size: 24, weight: 600 });
+    aRow(p, [['estacionaria', HUE.act, UI], [':   no depende del tiempo', COL.chalk, UI]], 700, 784, tst, { size: 24, weight: 600 });
+    aRow(p, [['horizonte finito T', COL.dim, UI], [':   retorno  =  ', COL.chalk, UI], ['∑_{t ≤ T} r(s_{t}, π(s_{t}))', HUE.rew, MATH, 28], [',   sin descuento', COL.chalk, UI]], 100, 834, tfh, { size: 24, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), n = 6, bs = aBars(p, aTR2, 440, 500, { n, dx: 190, bw: 70, rows: [-280, 116, 0], dots: false, heads: false });
+    T(p, 'Otra trayectoria con la misma política', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, `γ = ${aN(aGAM)}`, 1500, 130, null, { size: 30, fill: HUE.pr, anchor: 'end', weight: 600 });
+    [['estado', 270, COL.chalk], ['acción', 316, HUE.act]].forEach(([s, y, c]) => T(p, s, { x: 100, y, size: 24, fill: c }));
+    T(p, 'paso', { x: 100, y: 220, size: 24, fill: COL.dim }); T(p, 'recompensa', { x: 100, y: 616, size: 24, fill: HUE.rew });
+    put(bs.gh, { o: 0 });
+    aTR2.slice(0, n).forEach((x, k) => { put(bs.col[k], { o: 1 }); T(bs.col[k], aST[x.s], { x: bs.cx(k), y: 270, size: 26, anchor: 'middle', weight: 600 }); T(bs.col[k], aAC[x.a], { x: bs.cx(k), y: 316, size: 26, fill: HUE.act, anchor: 'middle', weight: 600 }); });
+    S.q1 = aTR2.slice(0, n).map((x, k) => ({ el: bs.col[k], box: [bs.cx(k) - 90, 186, 180, 450], label: 'paso ' + k }));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-descuento', prompt: [`Descuento ${aGAM}. ¿Qué recompensa se multiplica por ${aF(aGAM ** 2)} en el retorno?`],
+    build: pickEls(S.q1, 2,
+      `${aF(aGAM ** 2)} es ${aGAM} al cuadrado: el factor del paso t = 2, el tercero de la trayectoria.`,
+      k => `La recompensa del paso t = ${k} se multiplica por ${aGAM} elevado a ${k}, que es ${aF(aGAM ** k).replace(/\.?0+$/, '')}.`),
+  }], done) }],
+
+  ['val', 'Valor de una política', (m) => {
+    const p = panel(0), tm = m('many'), tc = m('conv'), td = m('def'), ti = m('ini'), to = m('oth');
+    aNote(p, `${aNMC} trayectorias simuladas por estado, en la página, con semilla · cada retorno suma ${aHOR} pasos · recompensas ilustrativas`);
+    aTitle(p, 'Valor de una política: el retorno esperado');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true }); gr.pol(aPI, null);
+    text(p, 'retornos desde inicio:', RX, 214, .5, { size: 24, fill: COL.dim });
+    aMC0.rs.slice(0, 6).forEach((v, i) => aTx(p, aF(v), 1140 + i * 68, 214, .8 + i * .55, { size: 26, weight: 600 }));
+    text(p, '…', 1140 + 6 * 68, 214, .8 + 6 * .55, { size: 26, fill: COL.dim });
+    const ch = aPlot(p, 960, 600, 540, 300, { t0: tm - .3, nmax: aNMC, v0: 1.5, v1: 4.5, yt: [2, 3, 4], xt: [0, 2500, 5000] });
+    const cnt = aTx(p, 'promedio de 1 trayectoria', 960, 268, tm, { size: 24, font: UI, fill: COL.dim });
+    const run = (mc, t, du) => { const lv = ch.live(mc.avg, HUE.val); prog(v => { const k = Math.max(1, Math.round(aNMC * v ** 2.2)); lv(k); cnt._set(`promedio de ${k} ${k === 1 ? 'trayectoria' : 'trayectorias'}:   ${aF(mc.avg[k - 1])}`); }, t, du, lin); };
+    run(aMC0, tm + .4, td - tm - 1);
+    aTx(p, `desde inicio   ≈ ${aF(aMC0.mean)}`, 1495, ch.VY(aMC0.mean) + 38, ti, { size: 24, font: UI, fill: HUE.val, anchor: 'end', weight: 600 }); gr.setV(0, '≈ ' + aF(aMC0.mean), ti + .8);
+    run(aMC1, to - .4, 2.6);
+    aTx(p, `desde otro   ≈ ${aF(aMC1.mean)}`, 1495, ch.VY(aMC1.mean) - 22, to + 2, { size: 24, font: UI, fill: HUE.val, anchor: 'end', weight: 600 }); gr.setV(1, '≈ ' + aF(aMC1.mean), to + 2.4);
+    aRow(p, [['Definición 17.3', COL.dim, UI, 24], [':   ', COL.chalk, UI, 24], ['V_{π}(s)', HUE.val], ['  =  E[ ∑_{t} ', COL.chalk], ['γ^{t}', HUE.pr], [' r(s_{t}, a_{t})', HUE.rew], ['  |  s_{0} = s ]', COL.chalk]], 100, 750, td, { size: 30, weight: 600 });
+    aRow(p, [['valor de π en s', HUE.val, UI], [':   retorno esperado al empezar en s y seguir π', COL.chalk, UI]], 100, 804, td + 2.5, { size: 24, weight: 600 });
+  }],
+
+  ['bell', 'Ecuaciones de Bellman', (m) => {
+    const p = panel(0), tsp = m('split'), t2 = m('two'), tma = m('mat'), tth = m('thm'), tso = m('solve'), tck = m('chk');
+    aNote(p, `E[r(otro, llevar)] = 0.5 · ${aN(aR3)} + 0.5 · (−1) = ${aN(aEr(1, 1))} · sistema resuelto en la página · ecuaciones (17.5), (17.6) y (17.7) del libro`);
+    aTitle(p, 'Ecuaciones de Bellman: el valor de una política, sin simular');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true }); gr.pol(aPI, null);
+    aST.forEach((_, s) => gr.setV(s, '?', null));
+    const e0 = aRow(p, [['retorno', COL.chalk, UI, 26], ['  =  ', COL.chalk], ['primera recompensa', HUE.rew, UI, 26], ['  +  ', COL.chalk], ['γ', HUE.pr], [' · ', COL.chalk], ['retorno desde el estado siguiente', COL.chalk, UI, 26]], 100, 734, tsp, { size: 30, weight: 600 });
+    const e1 = aRow(p, [['Proposición 17.9', COL.dim, UI, 24], [':   ', COL.chalk, UI, 24], ['V_{π}(s)', HUE.val], ['  =  ', COL.chalk], ['E[r(s, π(s))]', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' ∑_{s′} ', COL.chalk], ['P[s′ | s, π(s)]', HUE.pr], [' V_{π}(s′)', HUE.val]], 100, 800, tsp + 9, { size: 30, weight: 600 });
+    aST.forEach((_, s) => { aRow(p, aBel(aPI, s), RX, 230 + s * 52, t2 + s * .8, { size: 26, weight: 600 }); aOut(s, aPI[s]).forEach(e => gr.hot(e.k, t2 + s * .8, t2 + s * .8 + 1.2)); });
+    aHideAll([...e0, ...e1], tth - .4);
+    const gm = G(p, { o: 0 }); show(gm, tma);
+    aRow(gm, [['V', HUE.val], [' = ', COL.chalk], ['R', HUE.rew], [' + ', COL.chalk], ['γ P', HUE.pr], [' V', HUE.val]], RX, 380, null, { size: 34, weight: 700 });
+    aTx(gm, 'P =', RX + 300, 380, null, { size: 28 }); const w1 = aMat(gm, aPm(aPI), RX + 356, 336, HUE.pr);
+    aTx(gm, 'R =', RX + 376 + w1, 380, null, { size: 28 }); aMat(gm, aRv(aPI).map(v => [v]), RX + 432 + w1, 336, HUE.rew);
+    aRow(p, [['Teorema 17.10', HUE.act, UI, 24], [':   en un MDP finito, solución única', COL.chalk, UI, 24]], RX, 480, tth, { size: 30, weight: 600 });
+    aRow(p, [['V', HUE.val], ['  =  (I − ', COL.chalk], ['γP', HUE.pr], [')^{−1} ', COL.chalk], ['R', HUE.rew]], RX, 536, tth + 3, { size: 34, weight: 700 });
+    aST.forEach((_, s) => { gr.setV(s, aF(aV1[s]), tso + 2.2 + s * 1.5); tw(gr.ring[s], { c_stroke: HUE.val }, tso + 2.2 + s * 1.5, .3); tw(gr.ring[s], { c_stroke: COL.chalk }, tso + 3.4 + s * 1.5, .5); });
+    aRow(p, [['V_{π}', HUE.val], [`  =  ( ${aV1.map(v => aF(v)).join(',  ')} )`, HUE.val]], RX, 610, tso + 2.2, { size: 30, weight: 700 });
+    aTx(p, `promedios simulados:   ≈ ${aF(aMC0.mean)}   y   ≈ ${aF(aMC1.mean)}`, RX, 660, tck, { size: 24, font: UI, fill: COL.dim });
+    aRow(p, [['evaluar una política', HUE.act, UI], [':   resolver un sistema lineal, con una ecuación por estado', COL.chalk, UI]], 100, 770, tso, { size: 26, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), gr = aGraph(p, aMDP, aPOS, { t0: null }), parts = aBel(aPI, 0);
+    T(p, 'La ecuación de Bellman del estado «inicio»', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'con la política que busca en «inicio»', { x: RX, y: 300, size: 24, fill: COL.dim }); T(p, 'y lleva en «otro»:', { x: RX, y: 336, size: 24, fill: COL.dim });
+    const row = aRow(p, parts, RX, 420, null, { size: 26, weight: 600 }), xa = row.xs[9] - 8, xb = row.xs[11] + 2;
+    mk('rect', { x: xa, y: 388, width: xb - xa, height: 46, fill: 'none', stroke: HUE.act, 'stroke-width': 3 }, p);
+    T(p, 'el término marcado', { x: (xa + xb) / 2, y: 474, size: 22, fill: HUE.act, anchor: 'middle' });
+    S.q2 = aED.map((e, k) => ({ el: gr.ed[k].g, box: gr.ed[k].box, label: `${aAC[e.a]}, de ${aST[e.s]} a ${aST[e.to]}` }));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-bellman', prompt: [`¿Qué flecha aporta el término ${aN(aED[1].p)} · V(otro) a la ecuación de V(inicio)?`],
+    build: pickEls(S.q2, 1,
+      `Con buscar, de «inicio» se pasa a «otro» con probabilidad ${aN(aED[1].p)}: ese es el peso de V(otro).`,
+      k => aED[k].s === 0 ? `Esa flecha vuelve a «inicio» con probabilidad ${aN(aED[k].p)}: aporta el término ${aN(aED[k].p)} · V(inicio).` : 'Esa flecha sale de «otro»: entra en la ecuación de V(otro), no en la de V(inicio).'),
+  }], done) }],
+
+  ['imp', 'Mejorar la política', (m) => {
+    const p = panel(0), tq = m('q'), tb = m('bars'), tal = m('alt'), tth = m('thm'), tsw = m('sw'), tn = m('new'), XB = 1200;
+    aNote(p, `Q calculada en la página con (17.1) · hipótesis del teorema 17.6 para π → π′: ${aImp ? 'se cumple en los dos estados' : 'no se cumple'} · recompensas ilustrativas`);
+    aTitle(p, 'La función Q: ¿conviene otra acción?');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true }); gr.pol(aPI, null);
+    aST.forEach((_, s) => gr.setV(s, aF(aV1[s]), null));
+    aRow(p, [['Definición 17.5', COL.dim, UI, 22], [':  ', COL.chalk, UI, 22], ['Q_{π}(s, a)', HUE.val], [' = E[ ', COL.chalk], ['r(s, a)', HUE.rew], [' + ', COL.chalk], ['γ', HUE.pr], [' V_{π}(s_{1})', HUE.val], [' ]', COL.chalk]], RX, 214, tq, { size: 28, weight: 600 });
+    text(p, 'tomar a en s, y después seguir la política', RX, 254, tq + 4, { size: 24, fill: COL.dim });
+    const b1 = aHBar(p, [['Q_{π}', HUE.val, MATH, 28], ['(otro, ', COL.chalk, UI], ['llevar', HUE.act, UI], [')', COL.chalk, UI]], RX, XB, 330, aQ1[0], tb);
+    const b2 = aHBar(p, [['Q_{π}', HUE.val, MATH, 28], ['(otro, ', COL.chalk, UI], ['recoger', COL.chalk, UI], [')', COL.chalk, UI]], RX, XB, 386, aQ1[1], tal);
+    gr.hot(4, tal, tal + 3); tw(gr.ed[4].g, { o: 1 }, tal, .3); tw(gr.ed[4].g, { o: .3 }, tal + 3.2, .4);
+    aRow(p, [['Teorema 17.6', HUE.act, UI], [':   si para todo s    ', COL.chalk, UI], ['E_{a∼π′(s)}[Q_{π}(s, a)]  ≥  E_{a∼π(s)}[Q_{π}(s, a)]', COL.chalk, MATH, 28], [',', COL.chalk, UI]], 100, 750, tth, { size: 24, weight: 600 });
+    aRow(p, [['entonces para todo s    ', COL.chalk, UI], ['V_{π′}(s)  ≥  V_{π}(s)', HUE.val, MATH, 28]], 290, 804, tth + 9, { size: 24, weight: 600 });
+    gr.pol(aPI2, tsw + .8);
+    aRow(p, [['política nueva  ', COL.dim, UI], ['π′', HUE.act, MATH, 28], [':   recoger en «otro»', HUE.act, UI]], RX, 470, tsw, { size: 24, weight: 600 });
+    const gt = G(p, { o: 0 }); show(gt, tn);
+    [['', 'V_{π}', 'V_{π′}'], ...aST.map((s, i) => [s, aF(aV1[i]), aF(aV2[i])])].forEach((r, i) => {
+      T(gt, r[0], { x: RX, y: 530 + i * 46, size: 24, fill: COL.chalk });
+      aTx(gt, r[1], RX + 190, 530 + i * 46, null, { size: i ? 28 : 26, fill: i ? COL.dim : HUE.val, anchor: 'middle', weight: 600 });
+      if (i) aTx(gt, '≤', RX + 280, 530 + i * 46, null, { size: 26, fill: COL.dim, anchor: 'middle' });
+      aTx(gt, r[2], RX + 370, 530 + i * 46, null, { size: i ? 28 : 26, fill: HUE.val, anchor: 'middle', weight: 700 });
+    });
+    aST.forEach((_, s) => gr.setV(s, aF(aV2[s]), tn + 3 + s * 1.6));
+  }],
+
+  ['opt', 'Política óptima', (m) => {
+    const p = panel(0), td = m('def'), tc = m('cond'), tk = m('chk'), te = m('ex'), ts = m('star'), tnl = m('nl'), XB = 1200, ok = aOpt(aPI2);
+    aNote(p, 'condición (17.2) comprobada en la página para π′ · ecuaciones (17.4) del libro · cómo resolverlas: capítulo 34');
+    aTitle(p, 'Política óptima: la condición de Bellman');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true }); gr.pol(aPI2, null);
+    aST.forEach((_, s) => gr.setV(s, aF(aV2[s]), null));
+    aRow(p, [['Definición 17.4', COL.dim, UI, 22], [':  ', COL.chalk, UI, 22], ['π^{*}', HUE.act], [' óptima si  ', COL.chalk, UI, 24], ['V_{π*}(s) ≥ V_{π}(s)', HUE.val]], RX, 214, td, { size: 28, weight: 600 });
+    aTx(p, 'para toda política π y todo estado s', RX, 254, td + 2, { size: 24, fill: COL.dim, font: UI });
+    aHBar(p, [['Q_{π′}', HUE.val, MATH, 28], ['(otro, ', COL.chalk, UI], ['recoger', HUE.act, UI], [')', COL.chalk, UI]], RX, XB, 340, aQ2[0], tk + 2);
+    aHBar(p, [['Q_{π′}', HUE.val, MATH, 28], ['(otro, ', COL.chalk, UI], ['llevar', COL.chalk, UI], [')', COL.chalk, UI]], RX, XB, 396, aQ2[1], tk + 4.5);
+    aRow(p, [['π′', HUE.act, MATH, 30], [ok ? '  cumple la condición:  es óptima' : '  no cumple la condición', ok ? COL.good : COL.bad, UI]], RX, 470, tk + 8, { size: 26, weight: 700 });
+    aST.forEach((_, s) => { tw(gr.ring[s], { c_stroke: ok ? COL.good : COL.bad }, tk + 8.2, .3); tw(gr.ring[s], { c_stroke: COL.chalk }, tk + 10, .6); });
+    aRow(p, [['Teorema 17.7', HUE.act, UI], [':   π es óptima  ⟺  toda acción a que elige en s está en  ', COL.chalk, UI], ['argmax_{a′} Q_{π}(s, a′)', HUE.val, MATH, 28]], 100, 700, tc, { size: 24, weight: 600 });
+    aRow(p, [['Teorema 17.8', HUE.act, UI], [':   todo MDP finito admite una política óptima determinista', COL.chalk, UI]], 100, 750, te, { size: 24, weight: 600 });
+    aRow(p, [['V^{*}(s)', HUE.val], ['  =  max_{a} { ', COL.chalk], ['E[r(s, a)]', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' ∑_{s′} ', COL.chalk], ['P[s′ | s, a]', HUE.pr], [' V^{*}(s′)', HUE.val], [' }', COL.chalk], ['      (17.4)', COL.dim, UI, 22]], 100, 808, ts, { size: 30, weight: 600 });
+    aRow(p, [['no lineal', COL.bad, UI], [':  por el máximo', COL.chalk, UI]], 1180, 808, tnl, { size: 24, weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Un MDP:  estados, acciones, probabilidades de transición y recompensas.', 'w1'], ['Una política elige la acción en cada estado;  su valor es el retorno descontado esperado.', 'w2'],
+      ['Ecuaciones de Bellman:  ese valor es la solución única de un sistema lineal.', 'w3'], ['Una política es óptima si y solo si cada acción que elige maximiza su función Q.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 26, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['En el aprendizaje por refuerzo, el agente recibe una muestra etiquetada antes de actuar.'], ans: ['f'], why: 'No recibe un conjunto etiquetado: reúne información al actuar.' },
+      { parts: ['En un MDP, la probabilidad de transición depende solo del estado actual y de la acción, no de la historia.'], ans: ['v'], why: 'Por eso el modelo es de Markov.' },
+      { parts: ['Con descuento menor que 1, una recompensa tardía pesa menos que la misma recompensa recibida antes.'], ans: ['v'], why: 'La recompensa del paso t se multiplica por el descuento elevado a t.' },
+      { parts: ['El valor de una política dada se obtiene resolviendo un sistema de ecuaciones lineales.'], ans: ['v'], why: 'Son las ecuaciones de Bellman de la proposición 17.9, con solución única (teorema 17.10).' },
+      { parts: ['Las ecuaciones de Bellman para los valores de la política óptima también son lineales.'], ans: ['f'], why: 'Las ecuaciones (17.4) llevan un máximo sobre las acciones: no son lineales.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-descuento', prompt: ['Una política recibe recompensa 1 en cada paso, sin fin, con factor de descuento 0.5. ¿Cuál es su valor?'],
+    build: choice([['1'], ['1.5'], ['2'], ['no está definido: la suma es infinita']], 2,
+      'El valor V cumple V = 1 + 0.5 · V, así que V = 2. Es la suma 1 + 0.5 + 0.25 + …',
+      ['Esa es solo la primera recompensa. Faltan las siguientes, cada una multiplicada por su potencia de 0.5.', 'Son solo los dos primeros términos: 1 + 0.5. La suma sigue con 0.25, 0.125, …', null, 'Con descuento menor que 1 la suma converge: los términos se achican como una progresión geométrica.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

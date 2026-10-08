@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maxent: garantía, algoritmo y regularización</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 26, title: 'Maxent: garantía, algoritmo y regularización', minutes: 7, language: 'es', next: '../ch27/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 25) ---------- */
+// Maxent: tiza = la muestra, la distribución empírica y lo que se mide sobre ella · ámbar = la distribución p, sus pesos w y lo que el algoritmo elige ·
+// rosa = la previa p₀ · violeta = la restricción (λ, las franjas), la regularización y los términos de complejidad.
+const HUE = { emp: COL.chalk, p: COL.task, pri: COL.rat, cx: COL.real, ok: COL.good, bad: COL.bad };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'p_{w}', 'D^{m}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξΦΨΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃→←↦′″⌊⌋½∇∝])/;                                 // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aSetA = (e, o) => { Object.entries(o).forEach(([k, v]) => e.setAttribute(k, typeof v === 'number' ? v.toFixed(1) : v)); return e; };
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+// --- Ejemplo ilustrativo, el del cap. 25: X = las seis caras de un dado cargado; aD es la distribución D, que el aprendiz no conoce; la misma muestra (semilla 43, m = 60).
+const aK = 6, aD = [.07, .10, .13, .17, .23, .30], aU = Array(aK).fill(1 / aK);
+const aDraw = (seed, n, d = aD) => { const r = aRng(seed); return Array.from({ length: n }, () => { let u = r(), j = 0; while (j < d.length - 1 && u >= d[j]) { u -= d[j]; j++; } return j; }); };
+const aSeed = 43, aMs = 60, aS = aDraw(aSeed, aMs);
+const aCnt = S0 => { const c = Array(aK).fill(0); S0.forEach(j => c[j]++); return c; };
+const aEmp = S0 => aCnt(S0).map(c => c / S0.length);                                      // la distribución empírica
+const aCn = aCnt(aS), aDh = aEmp(aS);
+// --- Características nuevas de este capítulo: N = 6 indicadores, Φ_j(x) = 1 si x es la cara j y 0 si no. Valores en [0, 1]: r = 1.
+const aN = 6, aR = 1, aPhiV = (j, x) => x === j ? 1 : 0;
+const aFeat = d => Array.from({ length: aN }, (_, j) => aSum(d.map((v, x) => v * aPhiV(j, x))));   // E_d[Φ], un promedio por característica
+const aMuH = aFeat(aDh), aMuT = aFeat(aD);
+const aWx = (w, x) => aSum(w.map((v, j) => v * aPhiV(j, x)));                             // w · Φ(x)
+// Distribuciones de Gibbs (12.9) con previa uniforme:  p_w[x] = p0[x] e^{w·Φ(x)} / Z(w).
+const aZ = w => aSum(aU.map((v, x) => v * Math.exp(aWx(w, x))));
+const aGibbs = w => { const e = aU.map((v, x) => v * Math.exp(aWx(w, x))), z = aSum(e); return e.map(v => v / z); };
+const aN1 = w => aSum(w.map(Math.abs)), aN2 = w => Math.sqrt(aSum(w.map(v => v * v))), aNul = w => w.filter(v => v === 0).length;
+const aDotV = (u, v) => aSum(u.map((a, j) => a * v[j]));
+// §12.7:  J(w) = λ‖w‖₁ − w · E_D̂[Φ] + log Σ_x p0[x] e^{w·Φ(x)}: el objetivo de (12.12) sin su término constante.
+const aJ = (w, lam, mu = aMuH) => lam * aN1(w) - aDotV(w, mu) + Math.log(aZ(w));
+// Pérdida logarítmica L_d(w) = E_{x∼d}[−log p_w[x]]; con d = aD es la real, con d = aDh es la empírica.
+const aLoss = (w, d = aD) => { const p = aGibbs(w); return -aSum(d.map((v, x) => v > 0 ? v * Math.log(p[x]) : 0)); };
+const aEnt = p => -aSum(p.map(v => v > 0 ? v * Math.log(v) : 0));
+// ε_j = E_{p_w}[Φ_j] − E_D̂[Φ_j]   y   δJ(w, e_j), con sus tres casos (§12.7).
+const aEps = (w, mu = aMuH) => aFeat(aGibbs(w)).map((v, j) => v - mu[j]);
+const aDJ = (w, eps, lam) => w.map((v, j) => v !== 0 ? lam * Math.sign(v) + eps[j] : Math.abs(eps[j]) <= lam ? 0 : -lam * Math.sign(eps[j]) + eps[j]);
+// El paso en forma cerrada (líneas 9 a 13 de la figura 12.2).
+const aEta = (wj, ej, lam, r = aR) => { const q = wj * r * r - ej; return Math.abs(q) <= lam ? -wj : q > lam ? (-lam - ej) / (r * r) : (lam - ej) / (r * r); };
+// CDMaxent (figura 12.2) desde w = 0. Se detiene cuando la mayor |δJ| baja de tol. keep: guarda cada paso (coordenada, derivada, paso, w y J).
+const aCD = (lam, { mu = aMuH, tol = 1e-10, max = 40000, keep = false } = {}) => {
+  let w = Array(aN).fill(0), t = 0; const steps = [];
+  for (; t < max; t++) {
+    const eps = aEps(w, mu), d = aDJ(w, eps, lam); let j = 0; d.forEach((v, k) => { if (Math.abs(v) > Math.abs(d[j])) j = k; });
+    if (Math.abs(d[j]) < tol) break;
+    const eta = aEta(w[j], eps[j], lam); w = w.slice(); w[j] += eta;
+    if (keep) steps.push({ t: t + 1, j, d: d[j], eta, w, J: aJ(w, lam, mu) });
+  }
+  return { lam, w, T: t, steps, p: aGibbs(w) };
+};
+// (12.16):  min_w λ‖w‖₂² − (1/m) Σ log p_w[x_i], por descenso de gradiente (objetivo suave y fuertemente convexo). Gradiente: 2λw + E_{p_w}[Φ] − E_D̂[Φ].
+const aL2 = (lam, mu = aMuH) => { let w = Array(aN).fill(0), it = 0; const sz = 1 / (2 * lam + 1); for (; it < 200000; it++) { const e = aEps(w, mu), g = w.map((v, j) => 2 * lam * v + e[j]); if (Math.max(...g.map(Math.abs)) < 1e-12) break; w = w.map((v, j) => v - sz * g[j]); } return { lam, w, it, p: aGibbs(w) }; };
+const aJ2 = (w, lam, mu = aMuH) => lam * aSum(w.map(v => v * v)) - aDotV(w, mu) + Math.log(aZ(w));
+// --- Los valores del capítulo.
+const aLam = .07, aRun = aCD(aLam, { keep: true }), aWs = aRun.w, aPs = aRun.p, aJs = aJ(aWs, aLam), aShow = 20;
+const aA = 1, aB = 5;                                                                      // las dos coordenadas que se mueven: los pesos de las caras 2 y 6
+const aInPl = aRun.steps.every(s => s.j === aA || s.j === aB);
+const aT3 = aRun.steps.findIndex(s => s.J - aJs < 1e-3) + 1;                               // pasos hasta quedar a menos de 0.001 del mínimo
+const aRunL2 = aL2(aLam), aW2s = aRunL2.w, aP2s = aRunL2.p;
+// --- Teorema 12.3. Pérdida real de la solución, la mejor posible y el λ del teorema.
+const aHD = aEnt(aD), aLDs = aLoss(aWs), aLDu = aLoss(Array(aN).fill(0));
+const aDelta = .05;
+// ℜ_m(H) para H = {±Φ_j}: E[ max_j |Σ_i σ_i Φ_j(x_i)| ] / m, estimada por simulación con semilla (reps muestras de tamaño m con sus signos).
+const aRadM = (m, reps = 4000, seed = 7) => { const r = aRng(seed); let acc = 0; for (let k = 0; k < reps; k++) { const s = Array(aN).fill(0); for (let i = 0; i < m; i++) { let u = r(), x = 0; while (x < aK - 1 && u >= aD[x]) { u -= aD[x]; x++; } const sg = r() < .5 ? -1 : 1; for (let j = 0; j < aN; j++) s[j] += sg * aPhiV(j, x); } acc += Math.max(...s.map(Math.abs)); } return acc / reps / m; };
+const aRadR = 4000, aRad = aRadM(aMs, aRadR), aConf = aR * Math.sqrt(Math.log(2 / aDelta) / (2 * aMs)), aLamT = 2 * aRad + aConf, aRunT = aCD(aLamT);
+const aDev = Math.max(...aMuH.map((v, j) => Math.abs(v - aMuT[j])));                       // ‖E_D[Φ] − E_D̂[Φ]‖_∞ en esta muestra
+// Curva de la pérdida real de la solución en función de λ, y los dos extremos que recorre el dial.
+const aLmax = .4, aLmin = .005, aAt = lam => aCD(Math.max(aLmin, lam));
+const aCurve = Array.from({ length: 161 }, (_, k) => { const lam = Math.max(aLmin, aLmax * k / 160); return [lam, aLoss(aCD(lam).w)]; });
+const aLlo = .01, aLhi = .26, aLDlo = aLoss(aCD(aLlo).w), aLDhi = aLoss(aCD(aLhi).w);
+// --- Teorema 12.5. w*: el de menor norma 2 entre los que logran inf_w L_D(w) (aquí, log D menos su media). Λ₂ = ‖w*‖₂.
+const aWst = (() => { const l = aD.map(Math.log), c = aSum(l) / aK; return l.map(v => v - c); })();
+const aLa2 = aN2(aWst), aC5 = (1 + Math.sqrt(Math.log(1 / aDelta))) ** 2;
+const aLamB = m => aR / (aLa2 * Math.sqrt(m)), aExc = m => aR * aLa2 / Math.sqrt(m) * (1 + aC5), aM2 = 240;
+const aLD2 = aLoss(aW2s);
+// --- Comprobaciones. 1: tres soluciones de (12.12) con λ medio, grande y chico. 2: las derivadas δJ en un estado intermedio del recorrido.
+const aQ1 = [['mid', aLam], ['big', aLhi], ['small', aLlo]], aQ1r = 1;
+const aQ2t = 3, aQ2w = aRun.steps[aQ2t - 1].w, aQ2d = aDJ(aQ2w, aEps(aQ2w), aLam), aQ2r = aRun.steps[aQ2t].j;
+const aF2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2).replace('-', '−');
+const aF3 = v => (Math.abs(v) < .0005 ? 0 : v).toFixed(3).replace('-', '−');
+const aF4 = v => (Math.abs(v) < .00005 ? 0 : v).toFixed(4).replace('-', '−');
+const aF1 = v => String(Math.round(v * 10) / 10).replace('-', '−');
+/* aMATH:end */
+
+let aClipN = 0;
+// Histograma sobre las seis caras, con base en yb y esquina izquierda en x0. Cuatro capas, que empiezan ocultas: franja violeta de ancho λ alrededor de cada
+// frecuencia empírica (hg.gb) · barra ancha de tiza = distribución empírica (hg.ge) · barra angosta ámbar = p (hg.gp) · trazo rosa de rayas = la previa (hg.g0).
+// hg.setE(d), hg.setP(d), hg.setP0(d) fijan las alturas; hg.setB(d, lam) coloca las franjas (recortadas en 0 y en cap) · hg.cx(j): centro de la cara de índice j.
+const aHg = (p, x0, yb, { slot = 90, sc = 600, we = 60, wp = 30, t0 = .4, size = 24, tag = true, cap = .46 } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), cx = j => x0 + slot * (j + .5), hg = { g, cx, x0, yb, slot, sc, W: slot * aK };
+  if (t0 != null) show(g, t0);
+  hg.gb = G(g, { o: 0 });
+  const bb = aU.map((_, j) => mk('rect', { x: cx(j) - slot / 2 + 5, width: slot - 10, fill: HUE.cx, 'fill-opacity': .34, stroke: HUE.cx, 'stroke-width': 2 }, hg.gb));
+  mk('path', { d: `M${x0 - 8} ${yb}H${x0 + slot * aK + 8}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  hg.ge = G(g, { o: 0 }); hg.gp = G(g, { o: 0 }); hg.g0 = G(g, { o: 0 });
+  const be = aU.map((_, j) => mk('rect', { x: cx(j) - we / 2, width: we, fill: HUE.emp, 'fill-opacity': .2, stroke: HUE.emp, 'stroke-width': 2.5 }, hg.ge));
+  const bp = aU.map((_, j) => mk('rect', { x: cx(j) - wp / 2, width: wp, fill: HUE.p }, hg.gp));
+  const b0 = aU.map(() => mk('path', { stroke: HUE.pri, 'stroke-width': 4, 'stroke-dasharray': '9 6', fill: 'none' }, hg.g0));
+  const bar = bs => d => d.forEach((v, j) => aSetA(bs[j], { y: yb - v * sc, height: v * sc }));
+  hg.setE = bar(be); hg.setP = bar(bp);
+  hg.setP0 = d => d.forEach((v, j) => b0[j].setAttribute('d', `M${(cx(j) - slot / 2 + 3).toFixed(1)} ${(yb - v * sc).toFixed(1)}h${slot - 6}`));
+  hg.setB = (d, lam) => d.forEach((v, j) => { const top = Math.min(cap, v + lam), bot = Math.max(0, v - lam); aSetA(bb[j], { y: yb - top * sc, height: Math.max(0, top - bot) * sc }); });
+  aU.forEach((_, j) => aTx(g, String(j + 1), cx(j), yb + size + 10, null, { size, fill: COL.dim, anchor: 'middle' }));
+  if (tag) aTx(g, 'x', x0 - 18, yb + size + 10, null, { size, fill: COL.dim, anchor: 'end' });
+  return hg;
+};
+// Pesos bajo un histograma: una barra ámbar por peso, alineada con su cara, hacia arriba si es positivo. Un peso exactamente nulo se marca con un aro.
+// wb.set(w) los fija; val: escribe el valor junto a cada barra no nula.
+const aWB = (p, hg, yb, { sc = 90, bw = 34, tag = 'w_{j}', val = false } = {}) => {
+  const g = G(p);
+  mk('path', { d: `M${hg.x0 - 8} ${yb}H${hg.x0 + hg.W + 8}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  const bs = aU.map((_, j) => mk('rect', { x: hg.cx(j) - bw / 2, width: bw, fill: HUE.p }, g));
+  const zs = aU.map((_, j) => mk('circle', { cx: hg.cx(j), cy: yb, r: 9, fill: COL.board, stroke: COL.chalk, 'stroke-width': 3.5 }, g));
+  const vs = val ? aU.map((_, j) => aTx(g, '', hg.cx(j), yb, null, { size: 22, fill: HUE.p, anchor: 'middle', weight: 700 })) : null;
+  if (tag) aTx(g, tag, hg.x0 - 18, yb + 8, null, { size: 24, fill: HUE.p, anchor: 'end', weight: 700 });
+  return { g, set: w => w.forEach((v, j) => { const hh = v === 0 ? 0 : Math.max(4, Math.abs(v) * sc); aSetA(bs[j], { y: v > 0 ? yb - hh : yb, height: hh }); zs[j].style.display = v === 0 ? '' : 'none'; if (vs) { vs[j]._set(v === 0 ? '' : aF2(v)); put(vs[j], { y: v > 0 ? yb - hh - 10 : yb + hh + 26 }); } }) };
+};
+// Dial lineal de un parámetro (lo … hi): riel, marcas, perilla y rótulo «nombre = valor». dial.set(v) lo mueve; dial.DX(v): abscisa del valor v.
+const aDialW = (p, x, y, W, t0, lo, hi, ticks, name = 'λ', col = HUE.cx) => {
+  const g = G(p, { o: 0 }), DX = v => x + (v - lo) / (hi - lo) * W;
+  mk('path', { d: `M${x} ${y}H${x + W}`, stroke: COL.faint, 'stroke-width': 6, 'stroke-linecap': 'round', fill: 'none' }, g);
+  ticks.forEach(v => { mk('path', { d: `M${DX(v)} ${y - 10}v20`, stroke: COL.dim, 'stroke-width': 2 }, g); T(g, String(v).replace('-', '−'), { x: DX(v), y: y + 42, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  const gm = G(g), kn = put(mk('circle', { r: 15, fill: col, stroke: COL.board, 'stroke-width': 2 }, g), { y }), lab = aTx(g, '', 0, y - 28, null, { size: 30, fill: col, weight: 700, anchor: 'middle' });
+  show(g, t0);
+  return { g, gm, DX, set: v => { put(kn, { x: DX(v) }); put(lab, { x: Math.max(x + 60, Math.min(x + W - 60, DX(v))) }); lab._set(`${name} = ${aF2(v)}`); } };
+};
+// Gráfica de funciones de una variable: marco con esquina superior izquierda en (x0, y0) y curvas recortadas al marco. gp.fn(f, attrs) traza u ↦ f(u) y devuelve
+// el trazo, que se redibuja con e._f(f) · ax: dibuja los ejes por el origen · xl: rótulo del eje horizontal.
+const aGPl = (p, x0, y0, W, HH, w0, w1, v0, v1, t0, wt, vt, { ax = false, xl = 'λ', fmt = aF2 } = {}) => {
+  const g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), WX = w => x0 + (w - w0) / (w1 - w0) * W, VY = v => y0 + HH - (v - v0) / (v1 - v0) * HH;
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: W, height: HH, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  if (ax) mk('path', { d: `M${x0} ${VY(0).toFixed(1)}h${W}M${WX(0).toFixed(1)} ${y0}v${HH}`, stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, g);
+  wt.forEach(v => T(g, String(v).replace('-', '−'), { x: WX(v), y: y0 + HH + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+  vt.forEach(v => T(g, fmt(v), { x: x0 - 12, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+  aTx(g, xl, x0 + W + 14, y0 + HH + 8, null, { size: 26, fill: COL.dim });
+  mk('rect', { x: x0, y: y0, width: W, height: HH }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  const lim = v => Math.max(v0 - 2 * (v1 - v0), Math.min(v1 + 2 * (v1 - v0), v));
+  const fn = (f, attrs) => { const e = put(mk('path', { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round', ...attrs }, gl), { o: 0 }); e._f = ff => { let d = ''; for (let k = 0; k <= 240; k++) { const w = w0 + (w1 - w0) * k / 240; d += (k ? 'L' : 'M') + WX(w).toFixed(1) + ' ' + VY(lim(ff(w))).toFixed(1); } e.setAttribute('d', d); }; e._f(f); return e; };
+  return { g, gl, WX, VY, fn };
+};
+// Plano de dos pesos (a en horizontal, b en vertical): cuadrado de lado sz con esquina superior izquierda en (x0, y0); a va de a0 a a0 + span y b de b0 a b0 + span.
+// wp.gl queda recortada al marco. wp.lev(f, c, v): curva de nivel v de una función convexa f(a, b) cuyo mínimo está en c (un rayo por dirección, por bisección).
+const aWPl = (p, x0, y0, sz, a0, b0, span, t0, la, lb) => {
+  const k = sz / span, WX = v => x0 + (v - a0) * k, WY = v => y0 + sz - (v - b0) * k, g = G(p, { o: 0 }), id = 'aclip' + (aClipN++);
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: sz, height: sz, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  mk('path', { d: `M${x0} ${WY(0).toFixed(1)}h${sz}M${WX(0).toFixed(1)} ${y0}v${sz}`, stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, g);
+  mk('rect', { x: x0, y: y0, width: sz, height: sz }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  const gt = G(g);
+  aHalo(aTx(gt, la, x0 + 12, WY(0) - 12, null, { size: 26, fill: COL.chalk, weight: 600 })); aHalo(aTx(gt, lb, WX(0) + 12, y0 + 32, null, { size: 26, fill: COL.chalk, weight: 600 }));
+  [[-.5, 0], [0, .5]].forEach(([a, b]) => { mk('path', { d: a ? `M${WX(a).toFixed(1)} ${(WY(0) - 7).toFixed(1)}v14` : `M${(WX(0) - 7).toFixed(1)} ${WY(b).toFixed(1)}h14`, stroke: COL.dim, 'stroke-width': 2 }, gt); aHalo(aTx(gt, aF1(a || b), a ? WX(a) : WX(0) + 14, a ? WY(0) + 32 : WY(b) + 8, null, { size: 22, fill: COL.dim, anchor: a ? 'middle' : 'start' })); });
+  const lev = (f, c, v) => { let d = ''; for (let j = 0; j < 144; j++) { const th = j / 144 * 2 * Math.PI, ux = Math.cos(th), uy = Math.sin(th); let lo = 0, hi = 4; for (let n = 0; n < 40; n++) { const md = (lo + hi) / 2; if (f(c[0] + md * ux, c[1] + md * uy) > v) hi = md; else lo = md; } d += (j ? 'L' : 'M') + WX(c[0] + lo * ux).toFixed(1) + ' ' + WY(c[1] + lo * uy).toFixed(1); } return d + 'Z'; };
+  return { g, gl, gt, WX, WY, k, lev };
+};
+// Columnas con signo sobre una línea de base (ε_j o δJ por coordenada). Capas: franja violeta ±λ (ch.gb), barras de tiza con borde (ch.ge), barras ámbar (ch.gd).
+// ch.eps(v) fija las de tiza · ch.band(lam) · ch.exc(eps, lam): en ámbar, lo que cada barra sobresale de la franja · ch.dj(d): barras ámbar desde la base, con aro en las nulas.
+const aCols = (p, x0, yb, { slot = 80, sc = 380, bw = 40, low = 130, size = 24, tag = 'j' } = {}) => {
+  const g = G(p), cx = j => x0 + slot * (j + .5), ch = { g, cx, x0, yb, slot, W: slot * aN };
+  ch.gb = G(g, { o: 0 }); const band = mk('rect', { x: x0, width: slot * aN, fill: HUE.cx, 'fill-opacity': .3, stroke: HUE.cx, 'stroke-width': 2 }, ch.gb);
+  mk('path', { d: `M${x0 - 8} ${yb}H${x0 + slot * aN + 8}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  ch.ge = G(g, { o: 0 }); ch.gd = G(g, { o: 0 });
+  const be = aU.map((_, j) => mk('rect', { x: cx(j) - bw / 2, width: bw, fill: HUE.emp, 'fill-opacity': .2, stroke: HUE.emp, 'stroke-width': 2.5 }, ch.ge));
+  const bd = aU.map((_, j) => mk('rect', { x: cx(j) - bw / 2, width: bw, fill: HUE.p }, ch.gd));
+  const zs = aU.map((_, j) => mk('circle', { cx: cx(j), cy: yb, r: 9, fill: COL.board, stroke: COL.chalk, 'stroke-width': 3.5, style: 'display:none' }, ch.gd));
+  const span = (e, a, b) => aSetA(e, { y: yb - Math.max(a, b) * sc, height: Math.abs(a - b) * sc });
+  ch.eps = v => v.forEach((u, j) => span(be[j], 0, u));
+  ch.band = lam => span(band, -lam, lam);
+  ch.exc = (eps, lam) => eps.forEach((u, j) => span(bd[j], Math.abs(u) > lam ? Math.sign(u) * lam : 0, Math.abs(u) > lam ? u : 0));
+  ch.dj = d => d.forEach((u, j) => { span(bd[j], 0, u); zs[j].style.display = u === 0 ? '' : 'none'; });
+  aU.forEach((_, j) => aTx(g, String(j + 1), cx(j), yb + low, null, { size, fill: COL.dim, anchor: 'middle' }));
+  if (tag) aTx(g, tag, x0 - 18, yb + low, null, { size, fill: COL.dim, anchor: 'end' });
+  return ch;
+};
+// Bola de una norma p en el plano, centrada en (cx, cy) y de radio R: bl.set(s) con s = 1/p (0: norma infinito, cuadrado · .5: norma 2, círculo · 1: norma 1, rombo).
+const aBall = (p, cx, cy, R, attrs) => {
+  const e = mk('path', { 'stroke-linejoin': 'round', ...attrs }, p), pw = (v, s) => Math.sign(v) * Math.pow(Math.abs(v), 2 * s);
+  const set = s => { let d = ''; for (let j = 0; j < 160; j++) { const th = (j + .5) / 160 * 2 * Math.PI; d += (j ? 'L' : 'M') + (cx + R * pw(Math.cos(th), s)).toFixed(1) + ' ' + (cy - R * pw(Math.sin(th), s)).toFixed(1); } e.setAttribute('d', d + 'Z'); };
+  set(0);
+  return { e, set };
+};
+// Recuadro numerado de una comprobación (los tres mosaicos de pickEls).
+const aCard = (p, x, y, w, hh, n) => { const g = G(p, { x, y }); mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); mk('circle', { cx: w - 40, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(n), { x: w - 40, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' }); return g; };
+// Vector de pesos como texto: ( 0, −0.34, … ).
+const aVec = w => '( ' + w.map(v => v === 0 ? '0' : aF2(v)).join(',  ') + ' )';
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const HX = 150, RX = 800, PX0 = 120, PY0 = 250, PSZ = 470;
+const aJab = (a, b) => { const w = Array(aN).fill(0); w[aA] = a; w[aB] = b; return aJ(w, aLam); };               // J sobre el plano de los dos pesos que se mueven
+const aPath = aRun.steps.map(s => [s.w[aA], s.w[aB]]), aLevs = [.0008, .004, .011, .022, .04, -aJs, .11, .17];
+// El plano de los pesos de las caras 2 y 6 con las curvas de nivel de J y su mínimo (beats dir y paso).
+const aJPlane = (p, tl) => {
+  const wp = aWPl(p, PX0, PY0, PSZ, -.75, -.1, 1, .4, 'w_{2}', 'w_{6}'), gc = G(wp.gl, { o: 0 }); show(gc, tl, .6);
+  aLevs.forEach(dv => mk('path', { d: wp.lev(aJab, [aWs[aA], aWs[aB]], aJs + dv), fill: 'none', stroke: HUE.cx, 'stroke-width': 2, opacity: .55 }, gc));
+  wp.min = put(mk('circle', { r: 10, fill: HUE.p, stroke: COL.board, 'stroke-width': 3 }, wp.g), { x: wp.WX(aWs[aA]), y: wp.WY(aWs[aB]), o: 0 }); show(wp.min, tl + .4);
+  return wp;
+};
+const aQ1why = { mid: 'Ahí p se apartó de la uniforme solo en dos caras: es el lambda intermedio.', small: 'Ahí p casi copia la empírica: es el lambda más chico de los tres.' };
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 3 · Capítulo 26', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Maxent: garantía, algoritmo y regularización', { x: 800, y: 450, size: 56, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Qué tan buena es la solución, cómo se calcula, y qué cambia al regularizar de otra manera.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['seis', 'Seis características', (m) => {
+    const p = panel(0), tf = m('feat'), tb = m('band'), tq = m('w'), ts = m('sol');
+    aNote(p, `datos ilustrativos: el dado y la muestra del cap. 25 (m = ${aMs}), con características nuevas · λ = ${aLam} · todo se calcula en la página`);
+    aTitle(p, 'El mismo dado, ahora con seis características');
+    const hg = aHg(p, HX, 500), gw = G(p, { o: 0 }), wb = aWB(gw, hg, 650, { val: true }); show(gw, tq);
+    hg.setE(aDh); hg.setB(aDh, aLam); put(hg.ge, { o: 1 }); show(hg.gb, tb + .3); show(hg.gp, tb + 3.2);
+    aSq(hg.g, HX, 196, HUE.emp, 'distribución empírica');
+    const g1 = G(p, { o: 0 }), g2 = G(p, { o: 0 }); aSq(g1, HX + 290, 196, HUE.cx, 'a distancia ≤ λ'); show(g1, tb + .3); aSq(g2, HX + 500, 196, HUE.p, 'p_{w}'); show(g2, tb + 3.2);
+    const setQ = q => { const w = aWs.map(v => q >= 1 ? v : v * q); hg.setP(aGibbs(w)); wb.set(q > 0 ? w : aWs.map(() => 0)); };
+    setQ(0); prog(setQ, ts + .3, 3);
+    aRow(p, [['inf_{w}   '], ['λ‖w‖_{1}', HUE.cx], ['  −  (1/m) ∑_{i ≤ m} log '], ['p_{w}[x_{i}]', HUE.p], ['        (12.12), del cap. 25', COL.dim, UI, 22]], RX, 250, .5, { size: 28, weight: 600 });
+    aRow(p, [['Φ_{j}(x)  =  1  si x = j,    0  si no'], ['        j = 1, …, 6:   N = 6,  r = 1', COL.dim, UI, 22]], RX, 340, tf, { size: 28, weight: 600 });
+    aRow(p, [['| p(j) − D̂(j) |  ≤  λ', HUE.cx], ['    en cada cara j', COL.chalk, UI, 24], ['        (12.6), con estos indicadores', COL.dim, UI, 22]], RX, 430, tb, { size: 28, weight: 700 });
+    aRow(p, [['p_{w}[x]', HUE.p], ['  ∝  exp( w_{x} )'], ['        (12.9), con previa uniforme:  un peso por cara', COL.dim, UI, 22]], RX, 520, tq, { size: 28, weight: 600 });
+    aRow(p, [['ŵ  =  ' + aVec(aWs), HUE.p]], RX, 630, ts + 3.2, { size: 28, weight: 700 });
+    aRow(p, [[`${aNul(aWs)} de los ${aN} pesos son exactamente nulos`, COL.chalk, UI, 24]], RX, 680, ts + 4.2, { size: 24, weight: 600 });
+  }],
+
+  ['cota', 'La garantía', (m) => {
+    const p = panel(0), tlo = m('loss'), tt = m('thm'), tsm = m('small'), tbg = m('big'), tmd = m('mid'), tlt = m('lamt'), trt = m('rate'), GX = RX + 80;
+    aNote(p, `datos ilustrativos · la página conoce D; el aprendiz, no · δ = ${aDelta} · ℜ_{m}(H): simulación con ${aRadR} muestras, H = {±Φ_{j}} · sin la demostración`);
+    aTitle(p, 'La garantía: qué tan lejos queda de la mejor distribución');
+    const hg = aHg(p, HX, 480, { sc: 560 }), wb = aWB(p, hg, 615, { sc: 70 }), dial = aDialW(p, HX, 790, hg.W, .4, 0, aLmax, [0, .1, .2, .3, .4]);
+    hg.setE(aDh); [hg.ge, hg.gb, hg.gp].forEach(e => put(e, { o: 1 }));
+    aSq(hg.g, HX, 196, HUE.emp, 'empírica'); aSq(hg.g, HX + 160, 196, HUE.cx, 'a distancia ≤ λ'); aSq(hg.g, HX + 370, 196, HUE.p, 'p y sus pesos');
+    const mkT = put(mk('path', { d: `M${dial.DX(aLamT).toFixed(1)} 808l-9 16h18Z`, fill: HUE.cx }, dial.gm), { o: 0 }); show(mkT, tlt);
+    const gp = aGPl(p, GX, 470, 590, 210, 0, aLmax, 1.66, 1.83, tsm - .6, [0, .1, .2, .3, .4], [1.7, 1.75, 1.8]);
+    mk('path', { d: `M${GX} ${gp.VY(aHD).toFixed(1)}h590`, stroke: HUE.emp, 'stroke-width': 2.5, 'stroke-dasharray': '4 7' }, gp.gl);
+    mk('path', { d: `M${GX} ${gp.VY(aLDu).toFixed(1)}h590`, stroke: HUE.pri, 'stroke-width': 3, 'stroke-dasharray': '9 6' }, gp.gl);
+    aHalo(aTx(gp.g, `la mejor posible:  ${aF2(aHD)}`, GX + 580, gp.VY(aHD) - 10, null, { size: 22, fill: HUE.emp, anchor: 'end', font: UI }));
+    aHalo(aTx(gp.g, `previa uniforme:  ${aF2(aLDu)}`, GX + 580, gp.VY(aLDu) - 10, null, { size: 22, fill: HUE.pri, anchor: 'end', font: UI }));
+    const cv = mk('path', { d: aCurve.map(([l, v], k) => (k ? 'L' : 'M') + gp.WX(l).toFixed(1) + ' ' + gp.VY(v).toFixed(1)).join(''), fill: 'none', stroke: HUE.p, 'stroke-width': 5, 'stroke-linejoin': 'round' }, gp.gl);
+    const dt = mk('circle', { r: 11, fill: HUE.p, stroke: COL.board, 'stroke-width': 3 }, gp.g), lv = aTx(gp.g, '', GX, 450, null, { size: 26, fill: HUE.p, weight: 700 });
+    const setL = lam => { const run = aAt(lam), v = aLoss(run.w); hg.setP(run.p); hg.setB(aDh, lam); wb.set(run.w); dial.set(lam); aSetA(dt, { cx: gp.WX(lam), cy: gp.VY(v) }); lv._set(`λ = ${aF2(lam)}:      L_{D}(ŵ)  =  ${aF2(v)}`); };
+    setL(aLam);
+    [[aLam, aLlo, tsm + .2, 1.8], [aLlo, aLhi, tbg + .2, 2.2], [aLhi, aLam, tmd + .2, 2], [aLam, aLamT, tlt + .4, 2.2], [aLamT, aLam, trt + 4.4, 2]].forEach(([u, v, t0, du]) => prog(q => setL(q >= 1 ? v : u + (v - u) * q), t0, du));
+    aRow(p, [['L_{D}(w)  =  E_{x∼D}[ −log '], ['p_{w}[x]', HUE.p], [' ]'], ['        pérdida logarítmica, bajo la D real', COL.dim, UI, 22]], RX, 250, tlo, { size: 28, weight: 600 });
+    aRow(p, [['ŵ:  solución de (12.12) con   ', COL.chalk, UI, 24], ['λ  =  2ℜ_{m}(H)  +  r √( log(2/δ) / 2m )', HUE.cx]], RX, 320, tt + 3.4, { size: 26, weight: 600 });
+    aRow(p, [['L_{D}(ŵ)  ≤  inf_{w} L_{D}(w)  +  2‖w‖_{1} '], ['[ 2ℜ_{m}(H)  +  r √( log(2/δ) / 2m ) ]', HUE.cx]], RX, 372, tt + 9, { size: 25, weight: 700 });
+    aTx(p, 'teorema 12.3 · con probabilidad ≥ 1 − δ', RX, 408, tt + 9, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [[`m = ${aMs}:    `, COL.chalk, UI, 24], [`λ  =  2 · ${aF3(aRad)}  +  ${aF3(aConf)}  =  ${aF2(aLamT)}`, HUE.cx], ['      el del teorema', COL.dim, UI, 22]], RX, 770, tlt, { size: 26, weight: 700 });
+    aRow(p, [['ℜ_{m}(H) = O(1/√m)    ⟹    L_{D}(ŵ)  ≤  inf_{w} L_{D}(w)  +  O( ‖w*‖_{1} / √m )']], RX, 826, trt + 1.6, { size: 24, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], W = 420, HH = 390, Y0q = 252;
+    T(p, 'Tres soluciones de (12.12), con tres valores de λ', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aSq(p, 100, 200, HUE.emp, 'distribución empírica de la muestra (la misma en los tres recuadros)'); aSq(p, 880, 200, HUE.p, 'la solución p de cada λ');
+    S.q1 = aQ1.map(([, lam], j) => { const g = aCard(p, BX[j], Y0q, W, HH, j + 1), hg = aHg(g, 36, 330, { slot: 58, sc: 600, we: 42, wp: 20, t0: null, size: 22, tag: false }); hg.setE(aDh); hg.setP(aCD(lam).p); put(hg.ge, { o: 1 }); put(hg.gp, { o: 1 }); return g; });
+    S.q1B = BX.map(bx => [bx, Y0q, W, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-lam', prompt: ['¿Cuál de las tres soluciones usa el lambda más grande?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'solución ' + (j + 1) })), aQ1r,
+      'Con lambda grande la restricción no ata: la solución es la previa, uniforme.',
+      j => aQ1why[aQ1[j][0]]),
+  }], done) }],
+
+  ['dir', 'Qué peso mover', (m) => {
+    const p = panel(0), tob = m('obj'), tpl = m('plane'), tk = m('kink'), tcd = m('cd'), te = m('eps'), td = m('der'), tpk = m('pick'), CX = 660, e0 = aEps(Array(aN).fill(0)), d0 = aDJ(Array(aN).fill(0), e0, aLam), j0 = aRun.steps[0].j;
+    aNote(p, `datos ilustrativos:  λ = ${aLam} · plano de los pesos de las caras 2 y 6: los otros cuatro valen 0 en todo el recorrido · se omite el índice t − 1`);
+    aTitle(p, 'Descenso por coordenadas: qué peso mover');
+    aRow(p, [['J(w)  =  '], ['λ‖w‖_{1}', HUE.cx], ['  −  w · E_{x∼D̂}[Φ(x)]  +  log ∑_{x} p_{0}[x] exp( w · Φ(x) )'], ['        §12.7: el objetivo de (12.12), sin su constante', COL.dim, UI, 22]], 100, 196, tob, { size: 26, weight: 600 });
+    const wp = aJPlane(p, tpl), kk = put(mk('path', { d: `M${PX0} ${wp.WY(0).toFixed(1)}h${PSZ}M${wp.WX(0).toFixed(1)} ${PY0}v${PSZ}`, stroke: HUE.cx, 'stroke-width': 5, fill: 'none' }, wp.gl), { o: 0 });
+    tw(kk, { o: .9 }, tk + 2.6, .5); tw(kk, { o: .3 }, tcd, .6);
+    aHalo(aTx(wp.g, 'mínimo de J', wp.WX(aWs[aA]) + 18, wp.WY(aWs[aB]) - 14, tpl + .4, { size: 22, fill: HUE.p, font: UI, weight: 600 }));
+    const st0 = put(mk('circle', { r: 9, fill: HUE.emp, stroke: COL.board, 'stroke-width': 3 }, wp.g), { x: wp.WX(0), y: wp.WY(0), o: 0 }); show(st0, tcd + .4);
+    aHalo(aTx(wp.g, 'inicio:  w = 0', wp.WX(0) - 14, wp.WY(0) + 34, tcd + .4, { size: 22, fill: HUE.emp, font: UI, weight: 600, anchor: 'end' }));
+    const ar = put(mk('path', { d: `M${wp.WX(0).toFixed(1)} ${(wp.WY(0) - 14).toFixed(1)}v-92m-12 18l12 -18l12 18`, stroke: HUE.p, 'stroke-width': 6, fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, wp.g), { o: 0 }); show(ar, tpk + 4.3);
+    aTx(p, 'curvas de nivel de J:  una esquina sobre cada eje', PX0, PY0 + PSZ + 44, tk + 2.6, { size: 22, fill: HUE.cx, font: UI });
+    aRow(p, [['ε_{j}  =  E_{x∼p}[Φ_{j}(x)]  −  E_{x∼D̂}[Φ_{j}(x)]'], ['        p = p_{w}:  la distribución actual', COL.dim, UI, 22]], CX, 266, te, { size: 27, weight: 600 });
+    const gc = G(p, { o: 0 }); show(gc, td + 1.2);
+    aTx(gc, 'δJ(w, e_{j})  =', CX, 372, null, { size: 27, weight: 600 });
+    [['0', 'si  w_{j} = 0   y   |ε_{j}| ≤ λ'], ['−λ sgn(ε_{j}) + ε_{j}', 'si  w_{j} = 0   y   |ε_{j}| > λ'], ['λ sgn(w_{j}) + ε_{j}', 'si  w_{j} ≠ 0']].forEach(([a, b], k) => { aTx(gc, a, CX + 210, 330 + k * 42, null, { size: 26, weight: 600, fill: k ? HUE.p : COL.chalk }); aTx(gc, b, CX + 500, 330 + k * 42, null, { size: 24, fill: COL.dim }); });
+    const ch = aCols(p, CX + 40, 610, { low: 128 }); ch.eps(e0); ch.band(aLam); ch.exc(e0, aLam); put(ch.g, { o: 0 }); show(ch.g, te + 2.4); show(ch.ge, te + 2.4); show(ch.gb, td + 1.2); show(ch.gd, td + 3.4);
+    const gl = G(p, { o: 0 }), gl2 = G(p, { o: 0 }), gl3 = G(p, { o: 0 }); aSq(gl, CX + 40, 496, HUE.emp, 'ε_{j} en w = 0'); aSq(gl2, CX + 250, 496, HUE.cx, 'franja ±λ'); aSq(gl3, CX + 420, 496, HUE.p, 'δJ(w, e_{j})'); show(gl, te + 2.4); show(gl2, td + 1.2); show(gl3, td + 3.4);
+    const rg = put(mk('rect', { x: ch.cx(j0) - 36, y: 524, width: 72, height: 238, fill: 'none', stroke: HUE.p, 'stroke-width': 4 }, p), { o: 0 }); show(rg, tpk + 4.3);
+    aRow(p, [['j  =  argmax_{j} |δJ(w, e_{j})|']], CX + 570, 570, tpk, { size: 24, weight: 600 });
+    aRow(p, [['al inicio:   ', COL.chalk, UI, 24], [`j = ${j0 + 1}`, HUE.p]], CX + 570, 632, tpk + 4.3, { size: 28, weight: 700 });
+    aRow(p, [[`δJ = ${aF3(d0[j0])}`, HUE.p]], CX + 570, 676, tpk + 4.3, { size: 26, weight: 700 });
+    aTx(p, 'negativa:  J baja al subir w_{6}', CX + 570, 714, tpk + 4.3, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['paso', 'El tamaño del paso', (m) => {
+    const p = panel(0), tli = m('line'), tcl = m('closed'), tca = m('cases'), tru = m('run'), tfi = m('first'), tsr = m('stair'), ten = m('end'), tot = m('other'), CX = 660, nS = aShow;
+    aNote(p, `datos ilustrativos:  λ = ${aLam},  r = ${aR} · cada paso se calcula en la página con la fórmula de la figura 12.2 · sin la demostración de la cota`);
+    aTitle(p, 'Descenso por coordenadas: cuánto avanzar');
+    const wp = aJPlane(p, .4), gs = G(wp.gl), tail = put(mk('path', { d: 'M' + aPath.slice(nS - 1).map(q => wp.WX(q[0]).toFixed(1) + ' ' + wp.WY(q[1]).toFixed(1)).join('L'), fill: 'none', stroke: HUE.emp, 'stroke-width': 3, 'stroke-linejoin': 'round' }, gs), { o: 0 });
+    const tr = mk('path', { fill: 'none', stroke: HUE.emp, 'stroke-width': 4.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, gs), pts = [[0, 0], ...aPath], XY = q => [wp.WX(q[0]), wp.WY(q[1])];
+    const dots = pts.slice(0, nS + 1).map(q => put(mk('circle', { r: 4.5, fill: HUE.emp }, gs), { x: XY(q)[0], y: XY(q)[1], o: 0 }));
+    const cur = put(mk('circle', { r: 9, fill: HUE.emp, stroke: COL.board, 'stroke-width': 3 }, wp.g), { x: wp.WX(0), y: wp.WY(0) });
+    // el histograma de la misma solución, a la derecha
+    const hg = aHg(p, 1200, 500, { slot: 58, sc: 480, we: 40, wp: 20, t0: tru, size: 22 }); hg.setE(aDh); hg.setB(aDh, aLam); [hg.ge, hg.gb, hg.gp].forEach(e => put(e, { o: 1 }));
+    const gq = G(p, { o: 0 }); show(gq, tru); aSq(gq, 1200, 262, HUE.p, 'p_{w} en cada paso');
+    const ro = aTx(p, '', CX, 620, tfi, { size: 26, fill: HUE.emp, weight: 700 }), rw = aTx(p, '', PX0, PY0 + PSZ + 44, .5, { size: 24, fill: HUE.emp, weight: 600 });
+    const setU = u => {
+      const n = Math.min(nS, Math.floor(u)), fr = Math.min(1, u - n), a = pts[n], b = pts[Math.min(nS, n + 1)], q = [a[0] + (b[0] - a[0]) * fr, a[1] + (b[1] - a[1]) * fr], w = Array(aN).fill(0);
+      tr.setAttribute('d', 'M' + [...pts.slice(0, n + 1), q].map(v => XY(v).map(c => c.toFixed(1)).join(' ')).join('L'));
+      dots.forEach((e, k) => put(e, { o: k <= n ? 1 : 0 })); put(cur, { x: XY(q)[0], y: XY(q)[1] });
+      w[aA] = q[0]; w[aB] = q[1]; hg.setP(aGibbs(w));
+      rw._set(`w_{2} = ${aF2(q[0])}        w_{6} = ${aF2(q[1])}`);
+      const s = aRun.steps[Math.max(0, Math.min(nS, Math.ceil(u)) - 1)];
+      ro._set(`t = ${s.t}:      j = ${s.j + 1}      η = ${aF2(s.eta)}      J(w_{t}) = ${aF4(s.J)}`);
+    };
+    setU(0); prog(q => setU(q), tfi + .3, 1.6); prog(q => setU(q >= 1 ? nS : 1 + (nS - 1) * q), tsr + .2, Math.max(3, ten - tsr - .4), lin);
+    show(tail, ten + 2.6, .8); prog(q => { const a = pts[nS], b = [aWs[aA], aWs[aB]], v = [a[0] + (b[0] - a[0]) * q, a[1] + (b[1] - a[1]) * q], w = Array(aN).fill(0); put(cur, { x: XY(v)[0], y: XY(v)[1] }); w[aA] = v[0]; w[aB] = v[1]; hg.setP(aGibbs(w)); rw._set(`w_{2} = ${aF2(v[0])}        w_{6} = ${aF2(v[1])}`); }, ten + 2.6, 1.4);
+    // fase A: el paso
+    const ga = G(p); hide(ga, tru - .5, .4);
+    aRow(ga, [['η  =  argmin_{η}  J( w_{t−1} + η e_{j} )'], ['        el paso ideal:  por búsqueda numérica', COL.dim, UI, 22]], CX, 266, tli, { size: 27, weight: 600 });
+    aRow(ga, [['Φ_{j} ∈ [−r, +r]:      log E_{x∼p}[ exp( η Φ_{j} ) ]  ≤  η E_{x∼p}[Φ_{j}]  +  η^{2} r^{2} / 2']], CX, 350, tcl + 2.2, { size: 25, weight: 600 });
+    aTx(ga, 'lema de Hoeffding:  da una cota superior de J, que se minimiza en forma cerrada', CX, 388, tcl + 6.2, { size: 22, fill: COL.dim, font: UI });
+    [['η  =  −w_{j}', 'si  | w_{j} r^{2} − ε_{j} | ≤ λ', 'el peso queda en 0'], ['η  =  ( −λ − ε_{j} ) / r^{2}', 'si  w_{j} r^{2} − ε_{j} > λ', ''], ['η  =  ( λ − ε_{j} ) / r^{2}', 'en otro caso', '']].forEach(([a, b, c], k) => { aTx(ga, a, CX, 480 + k * 50, tca + k * .5, { size: 27, weight: 700, fill: HUE.p }); aTx(ga, b, CX + 330, 480 + k * 50, tca + k * .5, { size: 24, fill: COL.dim }); if (c) aTx(ga, c, CX + 660, 480 + k * 50, tca + 2.4, { size: 22, fill: HUE.p, font: UI, weight: 600 }); });
+    // fase B: el algoritmo
+    aRow(p, [['CDMaxent(S)', COL.chalk, UI, 26], ['        figura 12.2, resumida', COL.dim, UI, 22]], CX, 266, tru, { size: 26, weight: 700 });
+    [['para t = 1, …, T:', 0, 0], ['d_{j} ← δJ(w_{t−1}, e_{j})    para cada j', 1, 3.8], ['j ← argmax_{j} |d_{j}|', 1, 5.4], ['η ← el paso en forma cerrada', 1, 6.7], ['w_{t} ← w_{t−1} + η e_{j}', 1, 6.7], ['devolver p_{w},  con w = w_{T}', 0, 7.8]].forEach(([str, ind, dt], k) => { aTx(p, String(k + 1), CX, 314 + k * 44, tru + .4, { size: 22, fill: COL.dim, font: UI }); aTx(p, str, CX + 40 + ind * 36, 314 + k * 44, tru + Math.max(.4, dt), { size: 25, weight: 600 }); });
+    aRow(p, [[`t = ${aT3}:      `, COL.chalk, MATH, 26], [`J a menos de 0.001 del mínimo,  ${aF4(aJs)}`, COL.chalk, UI, 24]], CX, 670, ten, { size: 26, weight: 700 });
+    aRow(p, [[`hasta que toda |δJ| baja de 10^{−10}:  ${aRun.T} pasos`, COL.dim, UI, 22]], CX, 710, ten + 2.6, { size: 22 });
+    aRow(p, [['otros métodos:  descenso de gradiente estocástico y técnicas específicas', COL.chalk, UI, 24]], CX, 790, tot, { size: 24, weight: 600 });
+    aRow(p, [['este conviene con un número muy grande de características', COL.dim, UI, 22]], CX, 828, tot + 3.6, { size: 22 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), X0 = 440, SL = 120;
+    T(p, 'Las derivadas de J, coordenada por coordenada', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aRow(p, [[`después de ${aQ2t} pasos:    w = ${aVec(aQ2w)}        λ = ${aLam}`, COL.dim, MATH, 24]], 100, 200, null, { size: 24 });
+    const ch = aCols(p, X0, 440, { slot: SL, sc: 1300, bw: 56, low: 190, size: 26, tag: 'j' }); ch.dj(aQ2d); put(ch.gd, { o: 1 });
+    aTx(p, 'δJ(w, e_{j})', X0 - 18, 448, null, { size: 24, fill: HUE.p, anchor: 'end', weight: 700 });
+    aQ2d.forEach((v, j) => aTx(p, v === 0 ? '0' : aF3(v), ch.cx(j), v > 0 ? 440 - v * 1300 - 14 : v < 0 ? 440 - v * 1300 + 32 : 440 - 22, null, { size: 24, fill: v === 0 ? COL.dim : HUE.p, anchor: 'middle', weight: 700 }));
+    S.q2 = aQ2d.map((_, j) => { const g = G(p); return g; });
+    S.q2B = aQ2d.map((_, j) => [X0 + j * SL + 8, 290, SL - 16, 372]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-dir', prompt: ['¿Qué coordenada mueve el algoritmo en el paso siguiente?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'coordenada ' + (j + 1) })), aQ2r,
+      'Es la de mayor derivada en valor absoluto, aunque sea negativa.',
+      j => aQ2d[j] === 0 ? 'Ahí la derivada es cero: mover ese peso no baja el objetivo.' : 'Es positiva, pero menor en valor absoluto: se elige la mayor.'),
+  }], done) }],
+
+  ['ext', 'Extensiones', (m) => {
+    const p = panel(0), tbr = m('breg'), tno = m('norm'), tt = m('thm'), ti = m('inf'), t2 = m('two'), t1 = m('one'), CY = 590, RB = 120, XA = 380, XB = 880, LX = 1130;
+    aNote(p, 'sin la demostración · divergencias de Bregman: apéndice E del libro · los tres pares de normas son ejemplos: el teorema vale para cualquier norma');
+    aTitle(p, 'Extensiones: otra divergencia, otra norma');
+    aRow(p, [['min_{p ∈ Δ}   '], ['B_{Ψ}', HUE.p], ['(p ‖ p_{0})      sujeto a:    '], ['‖ E_{x∼p}[Φ(x)] − E_{x∼D̂}[Φ(x)] ‖  ≤  λ', HUE.cx], ['        (12.14)', COL.dim, UI, 22]], 100, 200, [tbr, tbr, tbr, tno, tbr], { size: 27, weight: 600 });
+    aRow(p, [['B_{Ψ}', HUE.p, MATH, 22], [':  divergencia de Bregman de una función convexa ', COL.dim, UI, 22], ['Ψ', COL.dim, MATH, 22], [' · la entropía relativa es una de ellas', COL.dim, UI, 22]], 100, 242, tbr + 2.4, { size: 22 });
+    aRow(p, [['=   sup_{w}   −Ψ*( w · Φ + ∇Ψ(p_{0}) )  +  w · E_{x∼D̂}[Φ(x)]  '], ['−  λ‖w‖_{*}', HUE.cx], ['  −  C(p_{0})'], ['        teorema 12.4', COL.dim, UI, 22]], 100, 322, tt, { size: 27, weight: 600 });
+    aRow(p, [['Ψ*', COL.dim, MATH, 22], [':  la conjugada de ', COL.dim, UI, 22], ['Ψ', COL.dim, MATH, 22], [' · ', COL.dim, UI, 22], ['‖·‖_{*}', HUE.cx, MATH, 22], [':  la norma dual de ', COL.dim, UI, 22], ['‖·‖', HUE.cx, MATH, 22]], 100, 364, tt + 3.4, { size: 22 });
+    const ga = G(p, { o: 0 }), gb = G(p, { o: 0 }); show(ga, .5); show(gb, tt + 3.4);
+    [[ga, XA], [gb, XB]].forEach(([g, x]) => mk('path', { d: `M${x - 170} ${CY}h340M${x} ${CY - 150}v300`, stroke: COL.faint, 'stroke-width': 2 }, g));
+    const ba = aBall(ga, XA, CY, RB, { fill: HUE.cx, 'fill-opacity': .3, stroke: HUE.cx, 'stroke-width': 4 }), bb = aBall(gb, XB, CY, RB, { fill: 'none', stroke: HUE.cx, 'stroke-width': 5 });
+    mk('circle', { cx: XA, cy: CY, r: 8, fill: HUE.emp }, ga); mk('circle', { cx: XB, cy: CY, r: 5, fill: COL.dim }, gb);
+    aTx(ga, 'promedios permitidos', XA, CY - 170, null, { size: 24, fill: COL.chalk, anchor: 'middle', font: UI, weight: 600 }); aTx(ga, 'alrededor del empírico, con radio λ', XA, CY + 190, null, { size: 22, fill: COL.dim, anchor: 'middle', font: UI });
+    aTx(gb, 'regularizador del dual', XB, CY - 170, null, { size: 24, fill: COL.chalk, anchor: 'middle', font: UI, weight: 600 }); aTx(gb, 'una curva de nivel, en el plano de w', XB, CY + 190, null, { size: 22, fill: COL.dim, anchor: 'middle', font: UI });
+    aTx(gb, '⟷', (XA + XB) / 2, CY + 12, null, { size: 44, fill: COL.dim, anchor: 'middle' });
+    const setS = s => { ba.set(s); bb.set(1 - s); };
+    setS(0); prog(q => setS(.5 * q), t2 + .2, 1.6); prog(q => setS(.5 + .5 * q), t1 + .3, 1.6);
+    [['‖·‖_{∞}', 'λ‖w‖_{1}', 'Maxent', ti], ['‖·‖_{2}', 'λ‖w‖_{2}', '', t2], ['‖·‖_{1}', 'λ‖w‖_{∞}', '', t1]].forEach(([a, b, c, t0], k) => {
+      const g = G(p, { o: 0 }), y = 520 + k * 74; show(g, t0);
+      aRow(g, [[a, HUE.cx], ['   ⟷   ', COL.dim], [b, HUE.cx], [c ? '      ' + c : '', COL.dim, UI, 22]], LX, y, null, { size: 30, weight: 700 });
+      if (k < 2) tw(g, { o: .45 }, [t2, t1][k], .5);
+    });
+    aTx(p, 'restricción            en el dual', LX, 462, ti, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['l2', 'Regularización L2', (m) => {
+    const p = panel(0), tpr = m('prob'), tn = m('not'), tc = m('cmp'), tdi = m('dial'), XL = [110, 630], DXr = 1150;
+    aNote(p, `datos ilustrativos · un solo dial mueve el λ de los dos problemas · L2 se resuelve en la página por descenso de gradiente · al inicio, λ = ${aLam}`);
+    aTitle(p, 'Regularización L2: la norma dos al cuadrado');
+    aRow(p, [['min_{w}   '], ['λ‖w‖_{2}^{2}', HUE.cx], ['  −  (1/m) ∑_{i ≤ m} log '], ['p_{w}[x_{i}]', HUE.p], ['        (12.16)', COL.dim, UI, 22]], 100, 200, tpr, { size: 27, weight: 600 });
+    aTx(p, 'no es un caso del teorema 12.4:  una norma al cuadrado no es una norma', 100, 240, tn, { size: 22, fill: COL.dim, font: UI });
+    const gs = [G(p, { o: 0 }), G(p, { o: 0 })]; show(gs[0], .4); show(gs[1], tpr + 2);
+    const vw = gs.map((g, k) => { const hg = aHg(g, XL[k], 500, { slot: 72, sc: 520, we: 48, wp: 24, t0: null, size: 22, tag: !k }), wb = aWB(g, hg, 650, { sc: 100, bw: 28, tag: k ? '' : 'w_{j}' }); hg.setE(aDh); put(hg.ge, { o: 1 }); put(hg.gp, { o: 1 }); return { hg, wb }; });
+    aRow(gs[0], [['L1:    ', COL.chalk, UI, 26], ['λ‖w‖_{1}', HUE.cx], ['      (12.12)', COL.dim, UI, 22]], XL[0], 286, null, { size: 28, weight: 700 });
+    aRow(gs[1], [['L2:    ', COL.chalk, UI, 26], ['λ‖w‖_{2}^{2}', HUE.cx], ['      (12.16)', COL.dim, UI, 22]], XL[1], 286, null, { size: 28, weight: 700 });
+    const dial = aDialW(p, DXr, 400, 380, tdi - .6, 0, .25, [0, .05, .1, .15, .2, .25]);
+    aSq(p, DXr, 286, HUE.emp, 'empírica'); aSq(p, DXr + 160, 286, HUE.p, 'p y sus pesos');
+    const n1 = aTx(p, '', DXr, 560, tc + 3, { size: 26, weight: 700, font: UI }), n2 = aTx(p, '', DXr, 612, tc + 8.8, { size: 26, weight: 700, font: UI });
+    const setL = lam => { const a = aCD(lam), b = aL2(lam); vw[0].hg.setP(a.p); vw[0].wb.set(a.w); vw[1].hg.setP(b.p); vw[1].wb.set(b.w); dial.set(lam); n1._set(`L1:   ${aNul(a.w)} de ${aN} pesos nulos`); n2._set(`L2:   ${aNul(b.w)} de ${aN} pesos nulos`); };
+    setL(aLam);
+    [[aLam, .2, tdi + .3, 2.4], [.2, .02, tdi + 3, 3], [.02, aLam, tdi + 6.2, 1.4]].forEach(([u, v, t0, du]) => prog(q => setL(q >= 1 ? v : u + (v - u) * q), t0, du));
+    aRow(p, [['L1:  ', COL.chalk, UI, 24], ['anula pesos;  p queda plana ahí', COL.dim, UI, 22]], DXr, 700, tc + 6, { size: 24, weight: 700 });
+    aRow(p, [['L2:  ', COL.chalk, UI, 24], ['solo los achica:  solución no rala', COL.dim, UI, 22]], DXr, 744, tc + 11, { size: 24, weight: 700 });
+  }],
+
+  ['l2g', 'La garantía de L2', (m) => {
+    const p = panel(0), tt = m('thm'), tb = m('t2'), tpl = m('plot'), tcr = m('cross'), tg = m('grow'), trt = m('rate'), GX = 170, GY = 290, GW = 500, GH = 360;
+    aNote(p, `datos ilustrativos:  r = ${aR},  δ = ${aDelta},  Λ_{2} = ${aF2(aLa2)} (la menor norma entre los w óptimos; la página conoce D) · sin la demostración`);
+    aTitle(p, 'La garantía con regularización L2');
+    const gp = aGPl(p, GX, GY, GW, GH, 0, .2, 0, .25, .4, [0, .05, .1, .15, .2], [0, .1, .2], { fmt: aF1 });
+    const up = gp.fn(l => l * aLa2 * aLa2, { stroke: HUE.cx, 'stroke-width': 5 }), dn = gp.fn(l => aR * aR / (Math.max(1e-4, l) * aMs), { stroke: HUE.emp, 'stroke-width': 5 });
+    show(up, tpl, .5); show(dn, tpl + 1.6, .5);
+    const g1 = G(p, { o: 0 }), g2 = G(p, { o: 0 }); aSq(g1, GX, 250, HUE.cx, 'λ Λ_{2}^{2}', { line: true }); aSq(g2, GX + 170, 250, HUE.emp, 'r^{2} / (λm)', { line: true }); show(g1, tpl, .5); show(g2, tpl + 1.6, .5);
+    const gx = G(gp.g, { o: 0 }), vl = mk('path', { stroke: HUE.p, 'stroke-width': 3, 'stroke-dasharray': '6 6', fill: 'none' }, gx), dt = mk('circle', { r: 11, fill: HUE.p, stroke: COL.board, 'stroke-width': 3 }, gx); show(gx, tcr + 1);
+    const l1 = aTx(p, '', RX, 500, tcr + 6.2, { size: 28, fill: HUE.p, weight: 700 }), l2 = aTx(p, '', RX, 700, trt + 2, { size: 24, fill: COL.dim });
+    const setM = mm => { const lam = aLamB(mm), v = lam * aLa2 * aLa2; dn._f(l => aR * aR / (Math.max(1e-4, l) * mm)); aSetA(dt, { cx: gp.WX(lam), cy: gp.VY(v) }); vl.setAttribute('d', `M${gp.WX(lam).toFixed(1)} ${gp.VY(v).toFixed(1)}V${GY + GH}`); l1._set(`m = ${Math.round(mm)}:      λ  =  ${aF2(lam)}`); l2._set(`m = ${Math.round(mm)},  δ = ${aDelta}:    exceso garantizado  ≤  ${aF2(aExc(mm))}`); };
+    setM(aMs); prog(q => setM(q >= 1 ? aM2 : aMs * Math.pow(aM2 / aMs, q)), tg + .3, 3.2);
+    aRow(p, [['L_{D}(ŵ)  ≤  inf_{w} L_{D}(w)  +  '], ['λ‖w‖_{2}^{2}', HUE.cx]], RX, 250, tt, { size: 27, weight: 700 });
+    aRow(p, [['+  ( r^{2} / λm ) ( 1 + √( log(1/δ) ) )^{2}']], RX + 330, 300, tb, { size: 27, weight: 700 });
+    aTx(p, 'teorema 12.5 · con probabilidad ≥ 1 − δ · ŵ: solución de (12.16)', RX, 344, tt + 1, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['‖w*‖_{2} ≤ Λ_{2}:        '], ['λ  =  r / ( Λ_{2} √m )', HUE.p], ['        iguala los dos términos', COL.dim, UI, 22]], RX, 440, tcr, { size: 28, weight: 700 });
+    aRow(p, [['L_{D}(ŵ)  ≤  inf_{w} L_{D}(w)  +  ( r Λ_{2} / √m ) [ 1 + ( 1 + √( log(1/δ) ) )^{2} ]']], RX, 640, trt, { size: 25, weight: 700 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Garantía (teorema 12.3):  pérdida cerca de la mejor posible, con λ del orden de 1/√m.', 'w1'], ['Descenso por coordenadas:  un peso por iteración, el de mayor |δJ|;  paso en forma cerrada.', 'w2'],
+      ['Extensiones:  otra divergencia de Bregman, otra norma;  el dual usa la norma dual.', 'w3'], ['L2:  λ‖w‖_{2}^{2} en lugar de λ‖w‖_{1};  solución no rala;  garantía del mismo orden.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 28, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['En el teorema 12.3, el margen sobre la pérdida de un w crece con la norma uno de ese w.'], ans: ['v'], why: 'El margen es dos lambda por la norma uno de w.' },
+      { parts: ['El descenso por coordenadas cambia todos los pesos en cada iteración.'], ans: ['f'], why: 'Cambia uno solo: el de mayor derivada en valor absoluto.' },
+      { parts: ['Si un peso vale cero y su épsilon no supera a lambda en valor absoluto, ese peso no se mueve.'], ans: ['v'], why: 'En ese caso la derivada de J en esa coordenada es cero.' },
+      { parts: ['Si la restricción usa la norma uno, el dual se regulariza con la norma uno.'], ans: ['f'], why: 'Usa la norma dual: la de la norma uno es la norma infinito.' },
+      { parts: ['Regularizar con la norma dos al cuadrado suele anular muchos pesos.'], ans: ['f'], why: 'Los achica sin anularlos; la que anula pesos es la norma uno.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

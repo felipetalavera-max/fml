@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garantías con hipótesis finitas</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 3, title: 'Garantías con hipótesis finitas', minutes: 7, language: 'es', next: '../ch04/' };
+
+/* ---------- helpers de dibujo del capítulo ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, err: COL.bad, band: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R(h_{S}) ≤ 4e^{−mε/4}'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    mk('tspan', { dy: dy - prev, ...(k ? { 'font-size': size * .68 } : {}) }, e).textContent = k ? s.slice(2, -1) : s;
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aFmt = v => v.toFixed(2);
+const aNum = v => v < 1e9 ? String(v).replace(/\B(?=(\d{3})+$)/g, ' ') : `≈ ${(v / 10 ** Math.floor(Math.log10(v))).toFixed(1)} × 10^{${Math.floor(Math.log10(v))}}`;
+const aSwatch = (p, x, y, fill, t0) => show(put(mk('rect', { x, y: y - 20, width: 26, height: 22, fill, 'fill-opacity': .6 }, p), { o: 0 }), t0);
+const aFall = (d, t0) => { const y = st(d).y; put(d, { y: y - 46 }); tw(d, { o: 1, y }, t0, .45, out); };   // un punto de la muestra que cae
+const aBar = (p, x, y, w, t0, fill = COL.chalk) => { const e = put(mk('rect', { x, y: y - 20, width: 0, height: 22, fill, 'fill-opacity': .8 }, p), {}); tw(e, { a_width: w }, t0, .7, out); return e; };
+const aNote = (p, str = 'datos ilustrativos · D uniforme sobre [0, 1]') => text(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+
+// Segmento X = [0, 1] con D uniforme (ilustrativa). H: 50 umbrales t = k/50; h_k(x) = 1 si x ≥ k/50.
+// Todo se cuenta en cincuentavos para que los errores sean exactos.
+const aK = 50, aKC = 23, aEK = 5, aEPS = aEK / aK, aDELTA = .05;                 // el concepto c es el umbral 23/50; ε = 0.1
+const aX0 = 100, aXW = 760, aPX = t => aX0 + t * aXW;
+const aAY = 250, aAT = 170, aAB = 330, aBY = 640, aBS = 380;                    // eje, extremos de las líneas de umbral, base y escala de las barras
+const aKs = Array.from({ length: aK }, (_, i) => i + 1);
+const aPred = (k, x) => x >= k / aK ? 1 : 0;
+const aLab = x => aPred(aKC, x);
+const aSamp = (seed, m, lab) => { const r = aRng(seed); return Array.from({ length: m }, () => { const x = r(); return [x, lab(x)]; }); };
+const aCons = pts => aKs.filter(k => pts.every(([x, l]) => aPred(k, x) === l));    // umbrales consistentes con la muestra
+const aRk = k => Math.abs(k - aKC) / aK;                                        // R(h_k) exacto con D uniforme
+const aBadK = k => Math.abs(k - aKC) > aEK;                                     // R(h_k) > ε
+const aNeedC = (logH, e, d) => Math.ceil((logH + Math.log(1 / d)) / e);         // m ≥ (1/ε)(log|H| + log(1/δ)), ecuación (2.8)
+const aS = aSamp(12, 70, aLab), aS10 = aS.slice(0, 10);
+const aC10 = aCons(aS10), aC70 = aCons(aS), aBad10 = aC10.filter(aBadK), aBad70 = aC70.filter(aBadK);
+const aMC = aNeedC(Math.log(aK), aEPS, aDELTA);                                 // tamaño que da la cota: 70, el de la muestra aS
+const aKB = aBad10[0], aKill = aS.findIndex(([x, l]) => aPred(aKB, x) !== l);   // una hipótesis mala que sobrevive a 10 puntos y el punto que la delata
+
+const aDot = (p, x, lab, r = 9, y = aAY, o = 0) => put(mk('circle', { r, fill: lab ? HUE.pos : HUE.neg }, p), { x: aPX(x), y, o });
+const aAxis = (p, y, t0) => {
+  const g = G(p, { o: 0 });
+  mk('path', { d: `M${aPX(0)} ${y}H${aPX(1)}`, stroke: COL.dim, 'stroke-width': 3 }, g);
+  T(g, '0', { x: aPX(0) - 14, y: y + 9, size: 24, fill: COL.dim, anchor: 'end', font: MATH }); T(g, '1', { x: aPX(1) + 14, y: y + 9, size: 24, fill: COL.dim, font: MATH });
+  show(g, t0); return g;
+};
+const aHyp = (p, k, o = 0, y0 = aAT, y1 = aAB) => put(mk('path', { d: `M${aPX(k / aK)} ${y0}V${y1}`, stroke: HUE.hyp, 'stroke-width': 3 }, p), { o });
+const aBarV = (p, k, t0, o, fill = COL.dim) => { const hh = aRk(k) * aBS, e = put(mk('rect', { x: aPX(k / aK) - 4, y: aBY, width: 8, height: 0, fill }, p), { o }); tw(e, { a_y: aBY - hh, a_height: hh }, t0, .6, out); return e; };
+const aEpsLine = (p, t0) => show(put(mk('path', { d: `M${aPX(0) - 10} ${aBY - aEPS * aBS}H${aPX(1) + 10}`, stroke: COL.chalk, 'stroke-width': 2, 'stroke-dasharray': '10 8' }, p), { o: 0 }), t0);
+const aDim = .13;                                                                // opacidad de un umbral descartado
+
+// Caso inconsistente: el concepto vale 1 en [0.46, 0.7) y en [0.8, 1]; ningún umbral lo reproduce.
+const aUnit = u => (u >= 23 && u < 35) || u >= 40 ? 1 : 0;                      // etiqueta en el cincuentavo u
+const aLab2 = x => aUnit(Math.floor(x * aK));
+const aR2 = k => { let e = 0; for (let u = 0; u < aK; u++) if ((u >= k ? 1 : 0) !== aUnit(u)) e++; return e / aK; };   // R(h_k) exacto
+const aT = aSamp(8, 800, aLab2), aMs = [50, 200, 800];
+const aEmp = (k, m) => aT.slice(0, m).filter(([x, l]) => aPred(k, x) !== l).length / m;                     // error empírico
+const aGap = m => Math.sqrt((Math.log(aK) + Math.log(2 / aDELTA)) / (2 * m));                              // término del teorema 2.13
+const aCY = v => aBY - 400 * v;                                                 // escala vertical de la gráfica de errores
+const aInBand = aMs.map(m => aKs.filter(k => Math.abs(aEmp(k, m) - aR2(k)) <= aGap(m)).length);
+const aPick = [12, 23, 40];                                                     // hipótesis marcadas en la comprobación 2
+
+// Conjunciones de literales: muestra de la figura 2.4 del libro (n = 6).
+const aEx = [['011011', 1], ['011111', 1], ['001101', 0], ['011111', 1], ['100110', 0], ['010011', 1]], aN = 6;
+const aConj = (() => {
+  const alive = Array.from({ length: aN }, () => [true, true]), steps = [];        // por variable: [x_i, negación de x_i]
+  aEx.forEach(([bits, lab], r) => {
+    if (!lab) return;
+    const kills = [];
+    [...bits].forEach((b, i) => { const j = b === '1' ? 1 : 0; if (alive[i][j]) { alive[i][j] = false; kills.push([i, j]); } });   // bit 1 descarta la negación; bit 0, la variable
+    steps.push({ r, kills });
+  });
+  const lits = []; alive.forEach((a, i) => a.forEach((on, j) => { if (on) lits.push([i, j]); }));
+  return { steps, lits };
+})();
+const aSat = (bits, lits) => lits.every(([i, neg]) => (bits[i] === '1') !== !!neg);
+const aConjOK = aEx.filter(([bits, lab]) => aSat(bits, aConj.lits) === !!lab).length;                          // ejemplos bien clasificados por h_S
+const aCX = i => 150 + i * 84, aRY = r => 215 + r * 52;
+const aLit = (p, i, neg, x, y, { size = 30, fill = COL.chalk, o = 1 } = {}) => {   // literal x_i, con barra si está negado
+  const g = G(p, { x, y, o });
+  aTx(g, `x_{${i + 1}}`, 0, 0, null, { size, fill, anchor: 'middle' });
+  if (neg) mk('path', { d: `M${-size * .52} ${-size * .68}h${size * .52}`, stroke: fill, 'stroke-width': 2.5 }, g);
+  return g;
+};
+const aChip = (p, i, neg, x, y, o = 1) => { const g = G(p, { x, y, o }); mk('rect', { x: -34, y: -36, width: 68, height: 52, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g); aLit(g, i, neg, 0, 0); return g; };
+const aNewEx = '010101';                                                        // ejemplo positivo de la comprobación 1 (inventado)
+
+// Escenario estocástico (ilustrativo): P[1|x] sube de a a 1 − a entre x1 y x2. Con a = 0 y x1 = x2 es determinista.
+const aPY = v => 560 - 300 * v;
+const aDet = [0, aKC / aK, aKC / aK], aSto = [.1, .26, .66];
+const aP1 = (x, [a, x1, x2]) => x < x1 ? a : x >= x2 ? 1 - a : a + (1 - 2 * a) * (x - x1) / (x2 - x1);
+const aCurve = ([a, x1, x2], flip) => { const v = u => aPY(flip ? 1 - u : u); return `M${aPX(0)} ${v(a)}L${aPX(x1)} ${v(a)}L${aPX(x2)} ${v(1 - a)}L${aPX(1)} ${v(1 - a)}`; };
+const aBayes = (() => { let s = 0; const n = 20000; for (let i = 0; i < n; i++) { const q = aP1((i + .5) / n, aSto); s += Math.min(q, 1 - q); } return s / n; })();   // R* = E[ruido(x)] con D uniforme
+const aU = (() => { const r = aRng(31); return Array.from({ length: 40 }, () => { const x = r(), u = r(); return [x, aLab(x), u < aP1(x, aSto) ? 1 : 0]; }); })();   // puntos con etiqueta determinista y estocástica
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 3', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Garantías con hipótesis finitas', { x: 800, y: 430, size: 80, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Cuando las hipótesis se pueden contar, contarlas basta para obtener una garantía.', 800, 600, m('sub'), { size: 34, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['consistente', 'Cincuenta umbrales', (m) => {
+    const p = panel(0), th = m('hyps'), tc = m('c'), tm = m('more'), kd = 32;
+    aNote(p);
+    const sh = G(p, { o: 0 });                                                 // un umbral de muestra: 0 a su izquierda, 1 a su derecha
+    mk('rect', { x: aPX(0), y: aAT, width: aPX(kd / aK) - aPX(0), height: aAB - aAT, fill: HUE.neg, 'fill-opacity': .22 }, sh);
+    mk('rect', { x: aPX(kd / aK), y: aAT, width: aPX(1) - aPX(kd / aK), height: aAB - aAT, fill: HUE.pos, 'fill-opacity': .22 }, sh);
+    T(sh, '0', { x: (aPX(0) + aPX(kd / aK)) / 2, y: aAT - 16, size: 44, fill: HUE.neg, anchor: 'middle', weight: 700 });
+    T(sh, '1', { x: (aPX(kd / aK) + aPX(1)) / 2, y: aAT - 16, size: 44, fill: HUE.pos, anchor: 'middle', weight: 700 });
+    show(sh, th + 3.4); hide(sh, tc - .5, .4);
+    aAxis(p, aAY, .2);
+    text(p, 'X: el segmento [0, 1]', aX0, 110, m('line'), { size: 26, fill: COL.dim });
+    const lines = {}, bars = {};
+    aKs.forEach((k, i) => { lines[k] = aHyp(p, k); tw(lines[k], { o: .6 }, th + i * .03, .3); });
+    tw(lines[kd], { o: 1, 'a_stroke-width': 6 }, th + 3.4, .3); tw(lines[kd], { o: .6, 'a_stroke-width': 3 }, tc - .5, .4);
+    tw(lines[aKC], { o: 1, 'a_stroke-width': 6, c_stroke: COL.chalk }, tc, .5);
+    text(p, 'c', aPX(aKC / aK), aAT - 14, tc, { size: 34, font: MATH, weight: 600, anchor: 'middle' });
+    const dots = aS.map(([x, l], i) => aDot(p, x, l, i < 10 ? 9 : 5));
+    dots.slice(0, 10).forEach((d, i) => aFall(d, m('sample') + i * .12));
+    aKs.filter(k => !aC10.includes(k)).forEach(k => tw(lines[k], { o: aDim }, m('cross') + Math.abs(k - aKC) * .03, .4));
+    aC10.filter(k => k !== aKC).forEach(k => { tw(lines[k], { o: 1, 'a_stroke-width': 6 }, m('left'), .25, out); tw(lines[k], { 'a_stroke-width': 3 }, m('left', .3), .5); });
+    aKs.forEach((k, i) => { bars[k] = aBarV(p, k, m('bars') + i * .015, aC10.includes(k) ? 1 : .25); tw(bars[k], { c_fill: aBadK(k) ? COL.bad : COL.good }, m('eps'), .4); });
+    text(p, 'error de generalización R(h) de cada umbral', aX0, 404, m('bars'), { size: 22, fill: COL.dim });
+    aEpsLine(p, m('eps')); aTx(p, 'ε', aPX(1) + 18, aBY - aEPS * aBS + 8, m('eps'), { size: 28 });
+    aBad10.forEach(k => tw(lines[k], { c_stroke: COL.bad, 'a_stroke-width': 6 }, m('bad'), .3));
+    dots.slice(10).forEach((d, i) => aFall(d, tm + i * .012));
+    aC10.filter(k => !aC70.includes(k)).forEach(k => { tw(lines[k], { o: aDim }, tm + 1, .5); tw(bars[k], { o: .25 }, tm + 1, .5); });
+    text(p, `H: ${aK} umbrales`, 940, 150, th, { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'cada uno: 1 a su derecha, 0 a su izquierda', 940, 188, th + 3.4, { size: 22, fill: COL.dim });
+    aTx(p, 'c ∈ H: el concepto es uno de ellos', 940, 250, tc, { size: 26 });
+    aTx(p, 'Consistente con S:  R̂_{S}(h) = 0', 940, 320, m('cross'), { size: 26 });
+    text(p, `m = ${aS10.length}:  ${aC10.length} umbrales consistentes`, 940, 366, m('left'), { size: 26, weight: 600 });
+    aTx(p, 'el algoritmo devuelve uno de ellos: h_{S}', 940, 402, m('left', 5), { size: 24, fill: COL.dim });
+    aTx(p, `ε = ${aEPS}`, 940, 480, m('eps'), { size: 36, fill: COL.task, weight: 600 });
+    aSwatch(p, 1110, 478, COL.bad, m('eps')); aTx(p, 'malo: R(h) > ε', 1146, 478, m('eps'), { size: 24 });
+    aSwatch(p, 1350, 478, COL.good, m('eps')); aTx(p, 'bueno: R(h) ≤ ε', 1386, 478, m('eps'), { size: 24 });
+    text(p, `m = ${aS10.length}:  sobreviven ${aBad10.length} umbrales malos`, 940, 550, m('bad'), { size: 26, fill: COL.bad, weight: 600 });
+    text(p, `m = ${aS.length}:  ${aC70.length} consistentes, ${aBad70.length} malos`, 940, 600, tm + 1.2, { size: 26, fill: COL.good, weight: 600 });
+    text(p, 'Con suficientes puntos, toda hipótesis consistente es buena. ¿Cuántos bastan?', 800, 790, tm + 2, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['cota', 'La cota de la unión', (m) => {
+    const p = panel(0), ts = m('surv'), tn = m('num'), mid = aCons(aS.slice(0, aKill + 1)), tk = ts + .3 + (aKill - 10) * .6 + .5;
+    aNote(p);
+    const gap = put(mk('rect', { x: aPX(Math.min(aKB, aKC) / aK), y: aAT, width: Math.abs(aKC - aKB) / aK * aXW, height: aAB - aAT, fill: COL.bad, 'fill-opacity': .35 }, p), { o: 0 });
+    show(gap, m('gap')); hide(gap, tk + .3);
+    aAxis(p, aAY, .2);
+    const lines = {}, bars = {};
+    aKs.forEach(k => {
+      lines[k] = aHyp(p, k); tw(lines[k], { o: k === aKC ? 1 : aC10.includes(k) ? .6 : aDim }, .2, .3);
+      bars[k] = aBarV(p, k, .2, aC10.includes(k) ? 1 : .25, aBadK(k) ? COL.bad : COL.good);
+    });
+    lines[aKC].setAttribute('stroke', COL.chalk); lines[aKC].setAttribute('stroke-width', 6);
+    text(p, 'c', aPX(aKC / aK), aAT - 14, .2, { size: 34, font: MATH, weight: 600, anchor: 'middle' });
+    aEpsLine(p, .3); aTx(p, 'ε', aPX(1) + 18, aBY - aEPS * aBS + 8, .3, { size: 28 });
+    text(p, 'error de generalización R(h) de cada umbral', aX0, 404, .3, { size: 22, fill: COL.dim });
+    tw(lines[aKB], { o: 1, c_stroke: COL.bad, 'a_stroke-width': 6 }, m('one'), .4);
+    const hl = text(p, 'h', aPX(aKB / aK), aAT - 14, m('one'), { size: 34, font: MATH, weight: 600, anchor: 'middle', fill: COL.bad });
+    const dots = aS.map(([x, l], i) => aDot(p, x, l, i < 10 ? 9 : i <= aKill ? 8 : 5));
+    dots.slice(0, 10).forEach((d, i) => show(d, .2 + i * .02, .25));
+    dots.slice(10, aKill + 1).forEach((d, i) => aFall(d, ts + .3 + i * .6));
+    show(put(mk('circle', { r: 19, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, p), { x: aPX(aS[aKill][0]), y: aAY, o: 0 }), tk, .25);
+    aC10.filter(k => !mid.includes(k)).forEach(k => { tw(lines[k], { o: aDim, 'a_stroke-width': 3 }, tk + .3, .5); tw(bars[k], { o: .25 }, tk + .3, .5); });
+    tw(hl, { o: .3 }, tk + .3, .5);
+    dots.slice(aKill + 1).forEach((d, i) => aFall(d, tn + i * .012));
+    mid.filter(k => !aC70.includes(k)).forEach(k => { tw(lines[k], { o: aDim }, tn + 1, .5); tw(bars[k], { o: .25 }, tn + 1, .5); });
+    [text(p, 'Una hipótesis mala h', 940, 150, m('one'), { size: 32, fill: COL.task, weight: 600 }),
+      aTx(p, `R(h) = ${aFmt(aRk(aKB))} > ε = ${aEPS}`, 940, 190, m('one', .6), { size: 26, fill: COL.bad }),
+      text(p, 'cada punto cae en el tramo rojo con probabilidad R(h)', 940, 244, m('gap'), { size: 22 }),
+      text(p, `esquivó ${aKill} puntos; el punto ${aKill + 1} la delata`, 940, 280, tk, { size: 22, fill: COL.dim })].forEach(e => tw(e, { o: .4 }, m('union', 5), .5));
+    aTx(p, 'P[ R̂_{S}(h) = 0 ] ≤ (1 − ε)^{m}', 940, 340, m('pow'), { size: 32 });
+    text(p, 'Para todas las malas a la vez (cota de la unión):', 940, 410, m('union'), { size: 22, fill: COL.dim });
+    aTx(p, 'P[ alguna h mala es consistente ]', 940, 452, m('union', 5.5), { size: 28 });
+    aTx(p, '≤ |H|(1 − ε)^{m} ≤ |H|e^{−mε}', 980, 496, m('union', 9), { size: 28 });
+    aTx(p, '|H|e^{−mε} ≤ δ', 940, 560, m('delta'), { size: 28 });
+    aTx(p, 'm ≥ (1/ε)( log|H| + log(1/δ) )', 940, 630, m('bound'), { size: 38, fill: COL.task, weight: 600 });
+    text(p, 'teorema 2.5 del libro · log: logaritmo natural', 940, 664, m('bound', .6), { size: 22, fill: COL.dim });
+    aTx(p, `|H| = ${aK},  ε = ${aEPS},  δ = ${aDELTA}   →   m ≥ ${aMC}`, 940, 724, tn, { size: 30, weight: 600 });
+    text(p, 'El argumento solo usa que H es finito: no importa la forma de las hipótesis.', 800, 800, m('free'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['conj', 'Conjunciones de literales', (m) => {
+    const p = panel(0), tr = m('result'), s0 = aConj.steps[0];
+    aNote(p, 'muestra de la figura 2.4 del libro');
+    const hi = put(mk('rect', { x: 100, y: -36, width: 600, height: 50, fill: COL.task, 'fill-opacity': .18 }, p), { y: aRY(s0.r), o: 0 });
+    show(hi, m('pos'), .3); hide(hi, m('neg'), .3);
+    for (let i = 0; i < aN; i++) aTx(p, `x_{${i + 1}}`, aCX(i), 158, .3, { size: 26, fill: COL.dim, anchor: 'middle' });
+    const bit = aEx.map(([bits, lab], r) => {
+      const g = G(p, { o: 0 }), cells = [...bits].map((b, i) => T(g, b, { x: aCX(i), y: aRY(r), size: 34, font: MATH, anchor: 'middle' }));
+      T(g, lab ? '+' : '−', { x: 660, y: aRY(r), size: 38, fill: lab ? HUE.pos : HUE.neg, anchor: 'middle', weight: 700 });
+      show(g, .3 + r * .08, .3);
+      if (!lab) { tw(g, { o: .35 }, m('neg'), .4); tw(g, { o: 1 }, tr + 6.3, .4); cells.forEach((c, i) => { if (aConj.lits.some(([j, neg]) => j === i && (bits[i] === '1') === !!neg)) tw(c, { c_fill: COL.bad }, tr + 6.5, .4); }); }
+      return cells;
+    });
+    text(p, 'literales candidatos', 108, 520, m('lits', 3), { size: 22, fill: COL.dim });
+    const chips = Array.from({ length: aN }, (_, i) => [0, 1].map(j => { const g = aChip(p, i, j, aCX(i), 575 + j * 70, 0); show(g, m('lits', 3) + i * .06 + j * .3, .3); return g; }));
+    aConj.steps.forEach(({ r, kills }, s) => {
+      const t = s ? m('rest') + (s - 1) * .9 : m('pos');
+      if (s) tw(hi, { y: aRY(r) }, t, .35);
+      kills.forEach(([i, j]) => {
+        const tk = s ? t + .45 : m('kill', j ? 4.6 : 1.2);
+        tw(chips[i][j], { o: .15 }, tk, .4); tw(bit[r][i], { c_fill: COL.task }, tk - .2, .2); tw(bit[r][i], { c_fill: COL.chalk }, tk + .6, .5);
+      });
+    });
+    aConj.lits.forEach(([i, j]) => pulse(chips[i][j], tr, 1.25));
+    text(p, `Cada ejemplo: ${aN} bits y una etiqueta, + o −`, 790, 150, m('ex'), { size: 26 });
+    text(p, 'Conjunción de literales', 790, 216, m('lits'), { size: 32, fill: COL.task, weight: 600 });
+    text(p, `literal: una variable o su negación · ${2 * aN} candidatos`, 790, 254, m('lits', 3), { size: 22, fill: COL.dim });
+    text(p, 'Un ejemplo positivo cumple todos los literales de c:', 790, 316, m('pos'), { size: 24 });
+    text(p, 'bit 0: se descarta la variable', 820, 356, m('kill', 1), { size: 24 });
+    text(p, 'bit 1: se descarta su negación', 820, 392, m('kill', 4.4), { size: 24 });
+    text(p, 'Los ejemplos negativos no se usan.', 790, 446, m('neg'), { size: 24, fill: COL.dim });
+    aTx(p, 'h_{S} =', 790, 520, tr, { size: 36, fill: COL.task, weight: 600 });
+    aConj.lits.forEach(([i, j], n) => {
+      show(aLit(p, i, j, 950 + n * 110, 520, { size: 36, fill: COL.task, o: 0 }), tr + .9 + n * .9, .3);
+      if (n) aTx(p, '∧', 895 + n * 110, 520, tr + .9 + n * .9, { size: 30, fill: COL.task, anchor: 'middle' });
+    });
+    text(p, `clasifica bien los ${aConjOK} ejemplos: los negativos fallan en los bits rojos`, 790, 562, tr + 6.5, { size: 22, fill: COL.good });
+    aTx(p, '|H| = 3^{n}', 790, 640, m('count', 6.2), { size: 36, weight: 600 });
+    text(p, 'cada variable: tal cual, negada o ausente', 990, 636, m('count', 2), { size: 22, fill: COL.dim });
+    aTx(p, 'm ≥ (1/ε)( (log 3)·n + log(1/δ) )', 790, 716, m('count', 7.6), { size: 30 });
+    aTx(p, `n = 10,  ε = 0.1,  δ = 0.02   →   m ≥ ${aNeedC(10 * Math.log(3), .1, .02)}`, 790, 782, m('num'), { size: 30, fill: COL.task, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    for (let i = 0; i < aN; i++) aTx(p, `x_{${i + 1}}`, aCX(i), 178, null, { size: 26, fill: COL.dim, anchor: 'middle' });
+    [...aNewEx].forEach((b, i) => T(p, b, { x: aCX(i), y: 240, size: 38, font: MATH, anchor: 'middle' }));
+    T(p, '+', { x: 660, y: 240, size: 40, fill: HUE.pos, anchor: 'middle', weight: 700 });
+    T(p, 'nuevo ejemplo positivo', { x: 790, y: 236, size: 28 });
+    T(p, 'literales que siguen en la hipótesis (los demás ya se descartaron)', { x: 790, y: 440, size: 24, fill: COL.dim });
+    const alive = (i, j) => aConj.lits.some(([a, b]) => a === i && b === j);
+    const chips = Array.from({ length: aN }, (_, i) => [0, 1].map(j => aChip(p, i, j, aCX(i), 400 + j * 80, alive(i, j) ? 1 : .15)));
+    S.q1 = aConj.lits.map(([i, j]) => chips[i][j]);
+  }, { ask: done => {
+    const name = ([i, j]) => (j ? 'la negación de x' : 'x') + '₁₂₃₄₅₆'[i], right = aConj.lits.findIndex(([i, j]) => (aNewEx[i] === '1') === !!j), [ri, rj] = aConj.lits[right];
+    return quiz(BAND, [{
+      id: 'c-literal', prompt: ['Con este ejemplo positivo, ¿qué literal se descarta de la hipótesis? Elegirlo en el dibujo.'],
+      build: pickEls(aConj.lits.map(([i, j], n) => ({ el: S.q1[n], box: [aCX(i) - 42, 400 + j * 80 - 44, 84, 68], label: name([i, j]) })), right,
+        `El bit ${ri + 1} del ejemplo vale ${aNewEx[ri]}: una conjunción que incluyera ${name([ri, rj])} lo rechazaría, y el ejemplo es positivo.`,
+        n => `El ejemplo cumple ese literal: su bit ${aConj.lits[n][0] + 1} vale ${aNewEx[aConj.lits[n][0]]}. Solo se descarta un literal que el ejemplo positivo no cumple.`),
+    }], done);
+  } }],
+
+  ['tamano', 'El costo de un H más grande', (m) => {
+    const p = panel(0), e = .1, d = .02, ns = [10, 20, 40], k = .62;
+    const A = ns.map(n => aNeedC(n * Math.log(3), e, d)), B = ns.map(n => aNeedC(2 ** n * Math.log(2), e, d));
+    aTx(p, 'm ≥ (1/ε)( log|H| + log(1/δ) )', 80, 150, .3, { size: 38, fill: COL.task, weight: 600 });
+    text(p, 'el número de hipótesis entra dentro de un logaritmo', 80, 192, m('form'), { size: 24, fill: COL.dim });
+    text(p, 'la misma garantía, como cota del error:', 860, 122, m('form', 2), { size: 22, fill: COL.dim });
+    aTx(p, 'R(h_{S}) ≤ (1/m)( log|H| + log(1/δ) )', 860, 162, m('form', 2), { size: 30 });
+    const group = (y0, head, vals, t0, fill, clip) => {
+      aTx(p, head, 80, y0, t0, { size: 28, weight: 600 });
+      vals.forEach((v, i) => {
+        const y = y0 + 50 + i * 46, t = t0 + .8 + i * .6, w = clip ? clip[i] : v * k;
+        text(p, `n = ${ns[i]}`, 80, y, t, { size: 26 }); aBar(p, 220, y, w, t, fill);
+        if (clip) text(p, '››', 228 + w, y, t + .4, { size: 26, fill, weight: 700 });
+        aTx(p, v < 1e9 ? `m ≥ ${aNum(v)}` : `m ${aNum(v)}`, (clip ? 272 : 234) + w, y, t + .4, { size: 26, weight: 600 });
+      });
+    };
+    group(262, 'Conjunciones de n literales:  |H| = 3^{n}', A, m('conj', -.4), COL.good);
+    text(p, 'el doble de variables: |H| se eleva al cuadrado, y m ni se duplica', 80, 462, m('conj', 4), { size: 24, fill: COL.good, weight: 600 });
+    aTx(p, 'log_{2}|H|: los bits que hacen falta para', 960, 326, m('conj', 6), { size: 24, fill: COL.dim });
+    aTx(p, 'nombrar una hipótesis de H', 960, 358, m('conj', 6), { size: 24, fill: COL.dim });
+    group(540, 'Clase universal, todos los subconjuntos de {0,1}^{n}:  |H| = 2^{2ⁿ}', B, m('univ', 2.4), COL.bad, [700, 800, 900]);
+    text(p, 'barras cortadas: fuera de escala', 1570, 540, m('univ', 4), { size: 22, fill: COL.dim, anchor: 'end' });
+    aTx(p, 'log|H| = (log 2)·2ⁿ: la muestra necesaria crece exponencialmente con n', 80, 740, m('exp'), { size: 24, fill: COL.bad, weight: 600 });
+    text(p, `tamaños para ε = ${e} y δ = ${d}, con la cota del teorema 2.5`, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+    text(p, 'Ahí el teorema no da una garantía útil. De hecho, la clase universal no es PAC-aprendible.', 800, 810, m('not', -1.5), { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['inconsistente', 'Sin hipótesis consistente', (m) => {
+    const p = panel(0), gaps = aMs.map(aGap), emp = aMs.map(n => aKs.map(k => aEmp(k, n))), tb = m('band'), tms = [m('sample'), m('m200'), m('m800')];
+    const AY2 = 200, clamp = v => Math.max(0, Math.min(.86, v));
+    const bandD = g => 'M' + aKs.map(k => `${aPX(k / aK)} ${aCY(clamp(aR2(k) + g))}`).join('L') + 'L' + [...aKs].reverse().map(k => `${aPX(k / aK)} ${aCY(clamp(aR2(k) - g))}`).join('L') + 'Z';
+    aNote(p);
+    const band = put(mk('path', { d: bandD(gaps[0]), fill: HUE.band, 'fill-opacity': .32 }, p), { o: 0 });
+    show(band, tb);
+    [1, 2].forEach(i => prog(q => band.setAttribute('d', bandD(gaps[i - 1] + (gaps[i] - gaps[i - 1]) * q)), tms[i], 1.2));
+    aAxis(p, AY2, .2);
+    aKs.forEach(k => tw(aHyp(p, k, 0, AY2 - 26, AY2 + 26), { o: .5 }, .2 + k * .01, .3));
+    const cg = G(p, { o: 0 });                                                 // el concepto, sobre el eje
+    for (let u = 0; u < aK; u++) mk('rect', { x: aPX(u / aK), y: AY2 - 62, width: aXW / aK + .5, height: 14, fill: aUnit(u) ? HUE.pos : HUE.neg }, cg);
+    T(cg, 'c', { x: aPX(0) - 14, y: AY2 - 48, size: 30, font: MATH, weight: 600, anchor: 'end' });
+    T(cg, '0', { x: aPX(.23), y: AY2 - 72, size: 26, fill: HUE.neg, anchor: 'middle', weight: 700 }); T(cg, '1', { x: aPX(.58), y: AY2 - 72, size: 26, fill: HUE.pos, anchor: 'middle', weight: 700 });
+    T(cg, '0', { x: aPX(.75), y: AY2 - 72, size: 26, fill: HUE.neg, anchor: 'middle', weight: 700 }); T(cg, '1', { x: aPX(.9), y: AY2 - 72, size: 26, fill: HUE.pos, anchor: 'middle', weight: 700 });
+    show(cg, m('c2'));
+    aT.forEach(([x, l], i) => { const j = i < 50 ? 0 : i < 200 ? 1 : 2; aFall(aDot(p, x, l, [6, 4, 3][j], AY2), tms[j] + (i - [0, 50, 200][j]) * [.02, .005, .0015][j]); });
+    const ax = G(p, { o: 0 });                                                 // ejes de la gráfica de errores
+    mk('path', { d: `M${aPX(0)} ${aCY(.86)}V${aBY}H${aPX(1)}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    mk('path', { d: `M${aPX(0)} ${aCY(.5)}H${aPX(1)}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '6 8' }, ax);
+    [0, .5].forEach(v => T(ax, String(v), { x: aPX(0) - 12, y: aCY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+    T(ax, 'error', { x: aPX(0) + 12, y: aCY(.86) + 20, size: 22, fill: COL.dim });
+    T(ax, 'un punto por umbral de H', { x: aPX(.5), y: aBY + 34, size: 22, fill: COL.dim, anchor: 'middle' });
+    show(ax, m('dots', -.6));
+    draw(path(p, 'M' + aKs.map(k => `${aPX(k / aK)} ${aCY(aR2(k))}`).join('L'), { stroke: COL.chalk, 'stroke-width': 3, fill: 'none' }, { d: 0 }), m('true'), 1.4);
+    aKs.forEach((k, i) => {
+      const e = put(mk('circle', { r: 6, fill: HUE.hyp }, p), { x: aPX(k / aK), y: aCY(emp[0][i]), o: 0 });
+      show(e, m('dots') + i * .03, .3); tw(e, { y: aCY(emp[1][i]) }, tms[1], 1.2); tw(e, { y: aCY(emp[2][i]) }, tms[2], 1.2);
+    });
+    text(p, 'El concepto no está en H', 940, 150, m('c2'), { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'c vale 0 en un tramo entre los unos', 940, 188, m('c2', .5), { size: 22, fill: COL.dim });
+    text(p, `Ningún umbral es consistente con S  (m = ${aMs[0]})`, 940, 244, m('sample', 1.2), { size: 24 });
+    show(put(mk('circle', { r: 7, fill: HUE.hyp }, p), { x: 952, y: 292, o: 0 }), m('dots')); aTx(p, 'R̂_{S}(h): error empírico', 976, 300, m('dots'), { size: 24 });
+    show(put(mk('path', { d: 'M940 332h26', stroke: COL.chalk, 'stroke-width': 3 }, p), { o: 0 }), m('true')); aTx(p, 'R(h): error de generalización', 976, 340, m('true'), { size: 24 });
+    [text(p, 'Una hipótesis fija (Hoeffding):', 940, 398, m('hoef'), { size: 22, fill: COL.dim }),
+      aTx(p, 'P[ |R̂_{S}(h) − R(h)| ≥ ε ] ≤ 2e^{−2mε²}', 940, 438, m('hoef', .5), { size: 28 })].forEach(e => tw(e, { o: .4 }, tb, .5));
+    aTx(p, 'Para toda h ∈ H, con probabilidad ≥ 1 − δ  (teorema 2.13):', 940, 498, m('bound'), { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + √[ (log|H| + log(2/δ)) / 2m ]', 940, 544, m('bound', 5), { size: 28, fill: COL.task, weight: 600 });
+    aSwatch(p, 940, 612, HUE.band, tb); text(p, `ancho de la banda en torno a R(h), con |H| = ${aK} y δ = ${aDELTA}:`, 976, 612, tb, { size: 22 });
+    aMs.forEach((n, i) => text(p, `m = ${n}:  ±${aFmt(gaps[i])}`, 940 + i * 212, 656, i ? tms[i] + .6 : tb + .4, { size: 26, weight: 600, fill: HUE.band }));
+    text(p, `puntos dentro de la banda: ${aInBand.join(', ').replace(/, (\d+)$/, ' y $1')} de ${aK}`, 940, 700, tms[2] + 1.4, { size: 22, fill: COL.dim });
+    text(p, 'El precio de no ser consistente: la cota baja como 1/√m, no como 1/m.', 800, 776, m('price'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'A igual error empírico, conviene el conjunto H más pequeño: la navaja de Occam.', 800, 824, m('occam'), { size: 26, anchor: 'middle' });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), n = aMs[1];
+    mk('path', { d: `M${aPX(0)} ${aCY(.86)}V${aBY}H${aPX(1)}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, p);
+    mk('path', { d: `M${aPX(0)} ${aCY(.5)}H${aPX(1)}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '6 8' }, p);
+    [0, .5].forEach(v => T(p, String(v), { x: aPX(0) - 12, y: aCY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+    T(p, 'error empírico de cada umbral de H', { x: aPX(0) + 12, y: aCY(.86) + 20, size: 22, fill: COL.dim });
+    aKs.filter(k => !aPick.includes(k)).forEach(k => put(mk('circle', { r: 6, fill: HUE.hyp, 'fill-opacity': .45 }, p), { x: aPX(k / aK), y: aCY(aEmp(k, n)) }));
+    S.q2 = aPick.map((k, i) => {
+      const g = G(p, { x: aPX(k / aK), y: aCY(aEmp(k, n)) });
+      mk('circle', { r: 11, fill: HUE.hyp, stroke: COL.chalk, 'stroke-width': 3 }, g);
+      T(g, 'ABC'[i], { y: -24, size: 30, anchor: 'middle', weight: 700 });
+      return g;
+    });
+    T(p, `m = ${n}  ·  |H| = ${aK}  ·  δ = ${aDELTA}`, { x: 940, y: 300, size: 28 });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + √[ (log|H| + log(2/δ)) / 2m ]', 940, 370, null, { size: 26, fill: COL.task });
+    T(p, `aquí el segundo término vale ≈ ${aGap(n).toFixed(3)}`, { x: 940, y: 414, size: 24, fill: COL.dim });
+  }, { ask: done => {
+    const n = aMs[1], es = aPick.map(k => aEmp(k, n)), right = es.indexOf(Math.min(...es)), g = aGap(n), f3 = v => v.toFixed(3);
+    return quiz(BAND, [{
+      id: 'c-cota', prompt: ['¿Para cuál de las tres hipótesis marcadas es menor la cota del error de generalización? Elegirla en el dibujo.'],
+      build: pickEls(aPick.map((k, i) => ({ el: S.q2[i], box: [aPX(k / aK) - 34, aCY(es[i]) - 62, 68, 84], label: 'hipótesis ' + 'ABC'[i] })), right,
+        `El segundo término es el mismo para toda hipótesis de H: la cota más baja es la de menor error empírico, ${f3(es[right])} + ${f3(g)} ≈ ${f3(es[right] + g)}.`,
+        i => `Su error empírico es ${f3(es[i])}: su cota, ≈ ${f3(es[i] + g)}, queda por encima de la de otra hipótesis marcada.`),
+    }], done);
+  } }],
+
+  ['escenarios', 'Determinista o estocástico', (m) => {
+    const p = panel(0), ts = m('stoch'), [a, x1, x2] = aSto, mixS = q => aDet.map((v, i) => v + (aSto[i] - v) * q);
+    aNote(p);
+    const noise = put(mk('path', { d: `M${aPX(0)} ${aPY(0)}V${aPY(a)}H${aPX(x1)}L${aPX(aKC / aK)} ${aPY(.5)}L${aPX(x2)} ${aPY(a)}H${aPX(1)}V${aPY(0)}Z`, fill: COL.bad, 'fill-opacity': .5 }, p), { o: 0 });
+    show(noise, m('noise', 2.6));
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${aPX(0)} ${aPY(1) - 20}V${aPY(0)}H${aPX(1)}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    mk('path', { d: `M${aPX(0)} ${aPY(.5)}H${aPX(1)}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '6 8' }, ax);
+    [[0, '0'], [.5, '½'], [1, '1']].forEach(([v, s]) => T(ax, s, { x: aPX(0) - 12, y: aPY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+    T(ax, 'probabilidad de cada etiqueta, según el punto x', { x: aPX(0), y: 190, size: 22, fill: COL.dim });
+    show(ax, .2);
+    const c1 = put(mk('path', { d: aCurve(aDet), fill: 'none', stroke: HUE.pos, 'stroke-width': 5 }, p), { o: 0 }), c0 = put(mk('path', { d: aCurve(aDet, 1), fill: 'none', stroke: HUE.neg, 'stroke-width': 5 }, p), { o: 0 });
+    show(c1, .3); show(c0, .3);
+    prog(q => { c1.setAttribute('d', aCurve(mixS(q))); c0.setAttribute('d', aCurve(mixS(q), 1)); }, ts + .6, 1.6);
+    aTx(p, 'P[ 0 | x ]', aPX(.04), aPY(1) - 16, .4, { size: 26, fill: HUE.neg, weight: 600 });
+    aTx(p, 'P[ 1 | x ]', aPX(.96), aPY(1) - 16, .4, { size: 26, fill: HUE.pos, weight: 600, anchor: 'end' });
+    const bg = G(p, { o: 0 });                                                 // lo que predice el clasificador de Bayes
+    mk('rect', { x: aPX(0), y: 574, width: aPX(aKC / aK) - aPX(0), height: 30, fill: HUE.neg }, bg); mk('rect', { x: aPX(aKC / aK), y: 574, width: aPX(1) - aPX(aKC / aK), height: 30, fill: HUE.pos }, bg);
+    T(bg, 'predice 0', { x: (aPX(0) + aPX(aKC / aK)) / 2, y: 597, size: 22, fill: COL.board, anchor: 'middle', weight: 700 }); T(bg, 'predice 1', { x: (aPX(aKC / aK) + aPX(1)) / 2, y: 597, size: 22, fill: COL.board, anchor: 'middle', weight: 700 });
+    show(bg, m('bayes', 2));
+    aU.forEach(([x, l0, l1], i) => { const d = aDot(p, x, l0, 7, 640); show(d, m('det') + i * .02, .3); if (l0 !== l1) tw(d, { c_fill: l1 ? HUE.pos : HUE.neg }, ts + 1.2 + i * .03, .4); });
+    text(p, 'una muestra: cada punto con la etiqueta que le tocó', aPX(0), 680, m('det'), { size: 22, fill: COL.dim });
+    const h1 = G(p, { o: 0 });
+    T(h1, 'Escenario determinista', { x: 940, y: 150, size: 32, fill: COL.task, weight: 600 }); T(h1, 'cada punto x tiene una sola etiqueta: y = f(x)', { x: 940, y: 188, size: 22, fill: COL.dim });
+    show(h1, m('det')); tw(h1, { o: .4 }, ts, .4);
+    text(p, 'Escenario estocástico', 940, 250, ts, { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'D es una distribución sobre los pares (x, y)', 940, 288, ts + 3, { size: 22, fill: COL.dim });
+    text(p, 'Clasificador de Bayes', 940, 350, m('bayes', 4), { size: 26, weight: 600 });
+    text(p, 'predice la etiqueta más probable en cada x', 940, 386, m('bayes', 4), { size: 22, fill: COL.dim });
+    aSwatch(p, 940, 446, COL.bad, m('noise', 2.6)); aTx(p, 'ruido(x) = min{ P[1|x], P[0|x] }', 976, 446, m('noise', 5), { size: 26 });
+    aTx(p, 'Error de Bayes:  R* = E[ ruido(x) ]', 940, 514, m('rstar'), { size: 28, weight: 600 });
+    aTx(p, `aquí R* = ${aFmt(aBayes)}: el área roja`, 940, 556, m('val'), { size: 26, fill: COL.bad, weight: 600 });
+    text(p, 'en el escenario determinista: R* = 0', 940, 598, m('zero'), { size: 22, fill: COL.dim });
+    text(p, 'PAC agnóstico:', 940, 664, m('agn'), { size: 24, weight: 600 });
+    aTx(p, 'P[ R(h_{S}) − min_{h∈H} R(h) ≤ ε ] ≥ 1 − δ', 940, 708, m('agn', 2), { size: 28, fill: COL.task, weight: 600 });
+    text(p, 'Ninguna hipótesis puede bajar del error de Bayes.', 800, 800, m('rstar', 3), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['H finito y h consistente: basta m ≥ (1/ε)( log|H| + log(1/δ) ).', 'w1'], ['Cota de la unión: la garantía vale para todas las hipótesis a la vez.', 'w2'],
+      ['Sin consistencia: error ≤ error empírico + un término que baja como 1/√m.', 'w3'], ['Con etiquetas aleatorias, ninguna hipótesis baja del error de Bayes.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 200, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 200, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 260, size: 32, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-casos', prompt: ['H es finito. ¿De qué garantía se habla en cada frase: la del caso consistente, la del inconsistente, o de ambas?'],
+    build: grid([
+      { parts: ['La cota del error baja como ', $m('1/m'), '.'], ans: ['con'], why: 'En el caso consistente, el error es a lo sumo (1/m)(log|H| + log(1/δ)).' },
+      { parts: ['La cota suma al error empírico un término que baja como ', $m('1/√m'), '.'], ans: ['inc'], why: 'Es el teorema 2.13: para la misma garantía hace falta una muestra cuadráticamente mayor.' },
+      { parts: ['El tamaño de H entra como ', $m('log|H|'), '.'], ans: ['amb'], why: 'En los dos casos la cota de la unión aporta un factor |H|, que al despejar queda dentro de un logaritmo.' },
+      { parts: ['Supone que el algoritmo devuelve una hipótesis sin errores en la muestra.'], ans: ['con'], why: 'Eso es ser consistente; la cota del caso inconsistente vale para toda hipótesis de H.' },
+    ], [['con', 'consistente', COL.good], ['inc', 'inconsistente', COL.task], ['amb', 'ambas', COL.real]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-bayes', prompt: ['En un problema estocástico el error de Bayes es ', $m('R* = 0.18'), '. Con una muestra tan grande como se quiera, ¿qué error de generalización puede alcanzar la mejor hipótesis posible?'],
+    build: choice([['0: con suficientes datos, el error desaparece.'], ['0.18: ninguna hipótesis baja del error de Bayes.'], ['0.09: el ruido se reparte entre las dos etiquetas.']], 1,
+      'El error de Bayes es el ínfimo del error sobre todas las hipótesis. Lo alcanza el clasificador de Bayes, que predice la etiqueta más probable en cada punto.',
+      ['Eso solo pasa en el escenario determinista, donde R* = 0. Aquí la etiqueta es aleatoria y más datos no quitan el ruido.', null, 'El error de Bayes ya es el mínimo posible: el promedio de min{P[1|x], P[0|x]}.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aprender autómatas con consultas</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 31, title: 'Aprender autómatas con consultas', minutes: 6, language: 'es', next: '../ch32/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 30; aStr y aGraph, adaptados del cap. 13) ---------- */
+// Sin clases en este capítulo. Ámbar = estado o camino activo, y la hipótesis · verde/rojo = acepta/rechaza y respuesta sí/no del maestro ·
+// rosa (local) = contraejemplo · violeta = cadenas distinguidoras del árbol · tiza = el objetivo y las cadenas de acceso.
+const HUE = { act: COL.task, yes: COL.good, no: COL.bad, cex: COL.rat, dis: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'x_{j}', 'a^{*}'. Con t0 = null queda visible desde el inicio. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξχΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯≠])/;                          // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aHideAll = (els, t) => els.forEach(e => hide(e, t, .3));
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSIG = ['a', 'b'];
+// DFA completo: { ini, fin: [¿final?], d: [{ a: destino, b: destino }], lab: [rótulo de cada estado] }.
+// Objetivo: el autómata A de la figura 16.5 del libro (4 estados; inicial 0; finales 1 y 3).
+const aTgt = { ini: 0, fin: [false, true, false, true], d: [{ a: 0, b: 1 }, { a: 2, b: 0 }, { a: 3, b: 2 }, { a: 3, b: 2 }], lab: ['0', '1', '2', '3'] };
+const aGo = (A, x, q = A.ini) => { for (const c of x) q = A.d[q][c]; return q; };            // A(x): estado al que llega x
+const aTrail = (A, x) => { const o = [A.ini]; for (const c of x) o.push(A.d[o[o.length - 1]][c]); return o; };
+const aAcc = (A, x) => A.fin[aGo(A, x)];
+// La cadena más corta en la que difieren dos DFA completos (la primera en orden alfabético entre las más cortas), o null si son equivalentes:
+// búsqueda en anchura sobre el autómata producto.
+const aDiff = (A, B) => {
+  const seen = new Set([A.ini + ',' + B.ini]), qu = [[A.ini, B.ini, '']];
+  for (let k = 0; k < qu.length; k++) {
+    const [p, q, x] = qu[k];
+    if (A.fin[p] !== B.fin[q]) return x;
+    for (const c of aSIG) { const p2 = A.d[p][c], q2 = B.d[q][c], key = p2 + ',' + q2; if (!seen.has(key)) { seen.add(key); qu.push([p2, q2, x + c]); } }
+  }
+  return null;
+};
+// ¿Es mínimo? Todos los estados accesibles y distinguibles dos a dos.
+const aSub = (A, q) => ({ ...A, ini: q });
+const aIsMin = A => { const reach = new Set([A.ini]), qu = [A.ini]; for (let k = 0; k < qu.length; k++) for (const c of aSIG) { const r = A.d[qu[k]][c]; if (!reach.has(r)) { reach.add(r); qu.push(r); } } return reach.size === A.d.length && A.d.every((_, p) => A.d.every((_, q) => p >= q || aDiff(aSub(A, p), aSub(A, q)) != null)); };
+// El maestro: responde las consultas de pertenencia simulando el objetivo y las de equivalencia con aDiff. Lleva la cuenta:
+// nm = cadenas distintas consultadas (el aprendiz anota las respuestas), raw = consultas contando repeticiones, ne = consultas de equivalencia.
+const aTeacher = A => { const tch = { nm: 0, raw: 0, ne: 0, memo: {} }; tch.mq = x => { tch.raw++; if (!(x in tch.memo)) { tch.memo[x] = aAcc(A, x); tch.nm++; } return tch.memo[x]; }; tch.eq = H => { tch.ne++; return aDiff(A, H); }; return tch; };
+// Árbol de clasificación: nodo interno { v, l, r } (v = cadena distinguidora; l = «no», r = «sí»); hoja { u } (u = cadena de acceso, o null para nil).
+const aSift = (root, x, mq) => { let nd = root; const tr = []; while (nd.v != null) { const ans = mq(x + nd.v); tr.push([nd.v, ans]); nd = ans ? nd.r : nd.l; } return { u: nd.u, nd, tr }; };   // T(x)
+const aLeaves = nd => nd.v != null ? [...aLeaves(nd.l), ...aLeaves(nd.r)] : [nd];
+const aSnap = nd => nd.v != null ? { v: nd.v, l: aSnap(nd.l), r: aSnap(nd.r) } : { u: nd.u };
+const aOrd = (p, q) => p.length - q.length || (p < q ? -1 : p > q ? 1 : 0);
+const aLca = (root, u1, u2) => { let nd = root; for (;;) { const inL = aLeaves(nd.l).map(n => n.u), a1 = inL.includes(u1), a2 = inL.includes(u2); if (a1 !== a2) return nd; nd = a1 ? nd.l : nd.r; } };
+// ConstructAutomaton(): un estado por hoja; final si la hoja está bajo la rama «sí» de la raíz; la transición de u con el símbolo c va a T(uc).
+const aBuild = (root, mq) => {
+  const us = aLeaves(root).map(n => n.u).filter(u => u != null).sort(aOrd), yes = aLeaves(root.r).map(n => n.u);
+  return { ini: us.indexOf(''), us, lab: us.map(u => u || 'ε'), fin: us.map(u => yes.includes(u)), d: us.map(u => Object.fromEntries(aSIG.map(c => [c, us.indexOf(aSift(root, u + c, mq).u)]))) };
+};
+// QueryLearnAutomata() (figura 16.3). Devuelve un paso por consulta de equivalencia: el árbol y la hipótesis de ese momento, el contraejemplo x (null = «sí»),
+// la tabla de prefijos de la línea 8 (prefijo, hoja del árbol, estado de la hipótesis), j, la hoja partida y los conteos antes (nm0) y después (nm1) de procesar x.
+const aLearn = A => {
+  const tch = aTeacher(A), mq = tch.mq, steps = [], t = mq('');
+  let root = { v: '', l: { u: t ? null : '' }, r: { u: t ? '' : null } };
+  let H = { ini: 0, us: [''], lab: ['ε'], fin: [t], d: [Object.fromEntries(aSIG.map(c => [c, 0]))] };
+  for (;;) {
+    const sp = { tree: aSnap(root), H, nm0: tch.nm, x: tch.eq(H), ne: tch.ne };
+    steps.push(sp);
+    if (sp.x == null) break;
+    const x = sp.x, nil = aLeaves(root).find(n => n.u == null);
+    if (nil) nil.u = x;
+    else {
+      sp.rows = [];
+      for (let k = 1; k <= x.length && !sp.j; k++) { const pre = x.slice(0, k), tl = aSift(root, pre, mq).u, hl = H.us[aGo(H, pre)]; sp.rows.push([pre, tl, hl]); if (tl !== hl) sp.j = k; }
+      const [, tl, hl] = sp.rows[sp.j - 1], pre = x.slice(0, sp.j - 1), old = H.us[aGo(H, pre)], nv = x[sp.j - 1] + aLca(root, tl, hl).v, leaf = aLeaves(root).find(n => n.u === old), side = mq(pre + nv);
+      sp.split = { leaf: old, node: nv, add: pre, side, other: mq(old + nv) };
+      delete leaf.u; leaf.v = nv; leaf.l = { u: side ? old : pre }; leaf.r = { u: side ? pre : old };
+    }
+    H = aBuild(root, mq);
+    sp.nm1 = tch.nm;
+  }
+  return { steps, tch, H };
+};
+const aRUN = aLearn(aTgt), aST = aRUN.steps;
+// --- Datos de los beats (todo sale del objetivo y de la ejecución de arriba).
+const aW1 = 'baa', aW2 = 'bab';                                                        // las dos cadenas del beat «aut»
+const aQ1x = 'abaab', aQ1tr = aTrail(aTgt, aQ1x), aQ1r = aQ1tr[aQ1x.length];             // comprobación 1
+// Muestra del libro para el escenario pasivo, S = ((a, +1), (b, −1)), y dos DFA parciales consistentes (sin transición = se rechaza).
+const aS = [['a', true], ['b', false]];
+const aP2 = { ini: 0, fin: [false, true], d: [{ a: 1 }, {}], lab: ['0', '1'] }, aP1 = { ini: 0, fin: [true], d: [{ a: 0 }], lab: ['0'] };
+const aAccP = (A, x) => { let q = A.ini; for (const c of x) { q = A.d[q][c]; if (q == null) return false; } return A.fin[q]; };
+const aM1 = 'ba', aM2 = 'b';                                                           // consultas de pertenencia del beat «qry»
+const aMid = aST[2], aSx = 'aba', aSf = aSift(aMid.tree, aSx, x => aAcc(aTgt, x));         // árbol de tres hojas y cadena que se cierne en el beat «tree»
+const aQ2x = 'abb', aQ2f = aSift(aMid.tree, aQ2x, x => aAcc(aTgt, x)), aQ2lv = aLeaves(aMid.tree).map(n => n.u), aQ2r = aQ2lv.indexOf(aQ2f.u);   // comprobación 2
+const aSay = v => v ? 'sí' : 'no', aEps = u => u || 'ε';
+/* aMATH:end */
+
+// Cadena como fila de casillas (la del cap. 13). s.lit(i, col, ta, tb) tiñe la casilla i desde ta y la devuelve a su color en tb.
+const aStr = (p, str, x, y, { cw = 60, t0 = .4, fill = COL.chalk } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), s = { g, x, y, cw, n: str.length, end: x + str.length * cw }, size = cw * .62;
+  s.c = [...str].map((ch, i) => [mk('rect', { x: x + i * cw + 2, y: y + 2, width: cw - 4, height: cw - 4, fill: 'none', stroke: fill === COL.chalk ? COL.faint : fill, 'stroke-width': 2 }, g), T(g, ch, { x: x + i * cw + cw / 2, y: y + cw / 2 + size * .3, size, fill, anchor: 'middle', font: MATH, weight: 600 })]);
+  if (t0 != null) show(g, t0);
+  s.lit = (i, col, ta, tb) => { const [r, t] = s.c[i]; tw(r, { c_stroke: col }, ta, .15); tw(t, { c_fill: col }, ta, .15); if (tb != null) { tw(r, { c_stroke: COL.faint }, tb, .25); tw(t, { c_fill: fill }, tb, .25); } };
+  return s;
+};
+// Autómata determinista como grafo (adaptado del aGraph del cap. 13). A = { ini, fin, d, lab }; pos = [[x, y], …], un lugar por estado, en fila.
+// Estado inicial = círculo grueso; estado final = círculo doble. Las transiciones con el mismo origen y destino comparten flecha (rótulo «a, b»);
+// si hay ida y vuelta entre dos estados, las dos flechas se curvan. col = color de los estados (tiza para el objetivo, ámbar para una hipótesis).
+// gr.of[estado + símbolo] = índice de su flecha · gr.hot tiñe una flecha · gr.mark tiñe un estado · gr.run(ficha, x, …) lee una cadena desde el estado inicial.
+const aGraph = (p, A, pos, { t0 = .4, tE = null, rad = 38, size = 26, col = COL.chalk } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g, { o: tE == null ? 1 : 0 }), gs = G(g), gr = { g, ge, pos, A, rad, ring: [], inner: [], sg: [], ed: [], of: {} };
+  const f = Q => Q.map(v => v.toFixed(1)).join(' '), ext = rad * 2.3, w0 = id => id === A.ini ? 7 : 3;
+  A.d.forEach((row, a) => {
+    const by = {};
+    aSIG.forEach(c => { if (row[c] != null) (by[row[c]] = by[row[c]] || []).push(c); });
+    Object.keys(by).map(Number).sort((u, v) => u - v).forEach(b => {
+      const [x1, y1] = pos[a], [x2, y2] = pos[b], eg = G(ge);
+      let d, P2, C, lx, ly;
+      if (a === b) {
+        const th = -Math.PI / 2, pt = (ang, r) => [x1 + r * Math.cos(ang), y1 + r * Math.sin(ang)], C1 = pt(th - .75, rad + ext);
+        C = pt(th + .75, rad + ext); P2 = pt(th + .5, rad + 13); d = `M${f(pt(th - .5, rad))}C${f(C1)} ${f(C)} ${f(P2)}`;
+        lx = x1; ly = y1 - (.769 * rad + 1.4 + .549 * ext) - 10;
+      } else {
+        const L = Math.hypot(x2 - x1, y2 - y1), bd = aSIG.some(c => A.d[b][c] === a) ? -.2 * L : 0, off = (U, V, r) => { const l = Math.hypot(V[0] - U[0], V[1] - U[1]); return [U[0] + (V[0] - U[0]) * r / l, U[1] + (V[1] - U[1]) * r / l]; };
+        C = [(x1 + x2) / 2 - (y2 - y1) / L * bd, (y1 + y2) / 2 + (x2 - x1) / L * bd]; P2 = off([x2, y2], C, rad + 13);
+        const P0 = off([x1, y1], C, rad), my = (P0[1] + 2 * C[1] + P2[1]) / 4;
+        d = `M${f(P0)}Q${f(C)} ${f(P2)}`; lx = (P0[0] + 2 * C[0] + P2[0]) / 4; ly = C[1] <= (y1 + y2) / 2 ? my - 12 : my + 12 + size * .72;
+      }
+      const ha = Math.atan2(P2[1] - C[1], P2[0] - C[0]), u = [Math.cos(ha), Math.sin(ha)];
+      const pe = mk('path', { d, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round' }, eg);
+      const hd = mk('path', { d: `M${f([P2[0] + 12 * u[0], P2[1] + 12 * u[1]])}L${f([P2[0] - 4 * u[0] - 8 * u[1], P2[1] - 4 * u[1] + 8 * u[0]])}L${f([P2[0] - 4 * u[0] + 8 * u[1], P2[1] - 4 * u[1] - 8 * u[0]])}Z`, fill: COL.dim }, eg);
+      T(eg, by[b].join(', '), { x: lx, y: ly, size, anchor: 'middle', font: MATH, weight: 600 });
+      by[b].forEach(c => { gr.of[a + c] = gr.ed.length; });
+      gr.ed.push({ g: eg, pe, hd, to: b });
+    });
+  });
+  A.d.forEach((_, id) => {
+    const [x, y] = pos[id], sg = G(gs), lab = A.lab[id], fs = lab.length > 2 ? 22 : lab.length > 1 ? 24 : rad < 30 ? 24 : 30;
+    gr.ring[id] = mk('circle', { cx: x, cy: y, r: rad, fill: COL.board, stroke: col, 'stroke-width': w0(id) }, sg);
+    gr.inner[id] = A.fin[id] ? mk('circle', { cx: x, cy: y, r: rad - 8, fill: 'none', stroke: col, 'stroke-width': 2.5 }, sg) : null;
+    T(sg, lab, { x, y: y + fs * .34, size: fs, anchor: 'middle', font: MATH, weight: 600, fill: col });
+    gr.sg[id] = sg;
+  });
+  if (t0 != null) show(g, t0);
+  if (tE != null) show(ge, tE);
+  gr.hot = (k, ta, tb, c = HUE.act) => { const { pe, hd } = gr.ed[k]; tw(pe, { c_stroke: c }, ta, .15); tw(hd, { c_fill: c }, ta, .15); if (tb != null) { tw(pe, { c_stroke: COL.dim }, tb, .3); tw(hd, { c_fill: COL.dim }, tb, .3); } };
+  gr.mark = (id, c, ta, tb) => { const e = gr.ring[id]; tw(e, { c_stroke: c, 'a_stroke-width': w0(id) + 4 }, ta, .25, out); if (tb != null) tw(e, { c_stroke: col, 'a_stroke-width': w0(id) }, tb, .4); };
+  gr.flash = (id, t, c = HUE.act) => gr.mark(id, c, t, t + .8);
+  gr.tok = () => put(mk('circle', { r: Math.max(9, rad * .3), fill: HUE.act, stroke: COL.board, 'stroke-width': 3 }, g), { x: pos[A.ini][0], y: pos[A.ini][1], o: 0 });
+  // La ficha lee x desde el estado inicial, un símbolo cada dt segundos; al terminar, el estado se tiñe de verde (final) o rojo (no final) hasta tb.
+  gr.run = (tok, x, ta, dt, tb, str) => {
+    aAt(() => put(tok, { x: pos[A.ini][0], y: pos[A.ini][1] }), ta - .15); show(tok, ta - .15, .15);
+    let q = A.ini;
+    [...x].forEach((c, j) => {
+      const k = gr.of[q + c], t = ta + j * dt, e = gr.ed[k].pe, to = A.d[q][c];
+      gr.hot(k, t, t + dt + .15); prog(v => { const Q = e.getPointAtLength(v * e.getTotalLength()); put(tok, { x: Q.x, y: Q.y }); }, t, dt * .8); tw(tok, { x: pos[to][0], y: pos[to][1] }, t + dt * .8, dt * .15);
+      if (str) str.lit(j, HUE.act, t, tb);
+      q = to;
+    });
+    gr.mark(q, A.fin[q] ? HUE.yes : HUE.no, ta + x.length * dt - .05, tb);
+    hide(tok, ta + x.length * dt + .5, .3);                                             // la ficha se va: el color del estado ya dice el resultado
+    return q;
+  };
+  return gr;
+};
+// Árbol de clasificación. tree = { v, l, r } (nodo interno: círculo violeta con la cadena distinguidora; rama izquierda «no», derecha «sí») o { u } (hoja: recuadro
+// con la cadena de acceso; nil si u es null). Cada nodo se nombra por su camino desde la raíz: '', 'l', 'r', 'lr'… · tv.leafId[u] = nombre de la hoja u ·
+// tv.hot tiñe un nodo y la rama que llega a él · tv.tok / tv.go: ficha que baja por el árbol.
+const aLH = 26, aLW = 46;
+const aTree = (p, tree, cx, y0, { dx = 130, dy = 130, t0 = .4, rad = 30 } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g), gn = G(g), tv = { g, pos: {}, el: {}, ln: {}, shape: {}, leafId: {}, isLeaf: {} }, x0 = cx - (aLeaves(tree).length - 1) * dx / 2;
+  let n = 0;
+  const place = (nd, id, dep) => { const x = nd.v == null ? x0 + dx * n++ : (place(nd.l, id + 'l', dep + 1) + place(nd.r, id + 'r', dep + 1)) / 2; tv.pos[id] = [x, y0 + dep * dy]; return x; };
+  place(tree, '', 0);
+  const drawNd = (nd, id) => {
+    const [x, y] = tv.pos[id], sg = G(gn), leaf = nd.v == null;
+    tv.isLeaf[id] = leaf;
+    if (leaf) {
+      tv.shape[id] = mk('rect', { x: x - aLW, y: y - aLH, width: 2 * aLW, height: 2 * aLH, fill: COL.board, stroke: nd.u == null ? COL.faint : COL.chalk, 'stroke-width': 3 }, sg);
+      T(sg, nd.u == null ? 'nil' : aEps(nd.u), { x, y: y + 9, size: 26, anchor: 'middle', font: MATH, weight: 600, fill: nd.u == null ? COL.dim : COL.chalk });
+      tv.leafId[nd.u] = id;
+    } else {
+      tv.shape[id] = mk('circle', { cx: x, cy: y, r: rad, fill: COL.board, stroke: HUE.dis, 'stroke-width': 3 }, sg);
+      T(sg, aEps(nd.v), { x, y: y + 9, size: 26, anchor: 'middle', font: MATH, weight: 600, fill: HUE.dis });
+      [['l', 'no', HUE.no], ['r', 'sí', HUE.yes]].forEach(([s, lab, c]) => {
+        const [x2, y2] = tv.pos[id + s], ex = x2, ey = y2 - (nd[s].v == null ? aLH : rad) - 3, l = Math.hypot(ex - x, ey - y), sx = x + (ex - x) * rad / l, sy = y + (ey - y) * rad / l;
+        tv.ln[id + s] = mk('path', { d: `M${sx.toFixed(1)} ${sy.toFixed(1)}L${ex.toFixed(1)} ${ey.toFixed(1)}`, stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round', fill: 'none' }, ge);
+        T(ge, lab, { x: (sx + ex) / 2 + (s === 'l' ? -12 : 12), y: (sy + ey) / 2 + 2, size: 22, fill: c, anchor: s === 'l' ? 'end' : 'start', weight: 600 });
+        drawNd(nd[s], id + s);
+      });
+    }
+    tv.el[id] = sg;
+  };
+  drawNd(tree, '');
+  if (t0 != null) show(g, t0);
+  tv.box = id => [tv.pos[id][0] - aLW - 8, tv.pos[id][1] - aLH - 8, 2 * aLW + 16, 2 * aLH + 16];
+  tv.hot = (id, ta, tb, c = HUE.act) => [tv.shape[id], tv.ln[id]].forEach(e => { if (!e) return; const base = e.getAttribute('stroke'); tw(e, { c_stroke: c, 'a_stroke-width': 6 }, ta, .25, out); if (tb != null) tw(e, { c_stroke: base, 'a_stroke-width': 3 }, tb, .4); });
+  const top = id => [tv.pos[id][0], tv.pos[id][1] - (tv.isLeaf[id] ? aLH : rad) - 18];
+  tv.tok = () => put(mk('circle', { r: 11, fill: HUE.act, stroke: COL.board, 'stroke-width': 3 }, g), { x: top('')[0], y: top('')[1], o: 0 });
+  tv.go = (tok, id, ta, dur = .6) => tw(tok, { x: top(id)[0], y: top(id)[1] }, ta, dur);
+  return tv;
+};
+// Flecha recta horizontal con punta (hacia la derecha si x2 > x1).
+const aArr = (p, x1, y, x2) => { const s = x2 > x1 ? 1 : -1; return mk('path', { d: `M${x1} ${y}H${x2}M${x2 - 12 * s} ${y - 9}L${x2} ${y}L${x2 - 12 * s} ${y + 9}`, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, p); };
+// El maestro: una caja con el autómata objetivo adentro (lo que el aprendiz no ve). Devuelve { g, gr, tok }.
+const aTeach = (p, x, y, w, hh, { t0 = .4, rad = 26 } = {}) => {
+  const g = G(p, { o: 0 }), sp = (w - 2 * rad - 70) / (aTgt.d.length - 1); show(g, t0);
+  mk('rect', { x, y, width: w, height: hh, fill: 'none', stroke: COL.faint, 'stroke-width': 3 }, g);
+  aRow(g, [['maestro', COL.chalk, UI, 26], ['      conoce el objetivo A', COL.dim, UI, 22]], x + 20, y + 38, null, { weight: 700 });
+  const gr = aGraph(g, aTgt, aTgt.d.map((_, i) => [x + 35 + rad + i * sp, y + 152]), { t0: null, rad, size: 22 });
+  return { g, gr, tok: gr.tok() };
+};
+// Contador con rótulo: devuelve set(valor, instante).
+const aCnt = (p, x, y, lab, v0, t0) => {
+  const g = G(p, { o: 0 }); show(g, t0); T(g, lab, { x, y, size: 24, fill: COL.dim });
+  const e = T(g, String(v0), { x: x + 440, y: y + 3, size: 34, weight: 700, anchor: 'end', font: MATH });
+  return (v, t) => { aAt(() => { e.textContent = String(v); }, t); tw(e, { c_fill: HUE.act }, t, .15); tw(e, { c_fill: COL.chalk }, t + .8, .5); };
+};
+// Escenario de la ejecución (beats «run1» y «run2»): árbol a la izquierda, hipótesis al centro, maestro y contadores a la derecha.
+// Se dibujan las cuatro versiones del árbol y de la hipótesis (una por consulta de equivalencia) y se muestra la k0, si se da.
+const aTCX = 255, aTY = 300, aHCX = 772, aHY = 430, aRC = 1090;
+const aHpos = n => Array.from({ length: n }, (_, i) => [aHCX + (i - (n - 1) / 2) * [0, 230, 190, 152][n - 1], aHY]);
+const aStage = (p, k0, nm, ne) => {
+  const sg = {};
+  text(p, 'árbol de clasificación', aTCX, 214, .4, { size: 24, fill: COL.dim, anchor: 'middle' });
+  text(p, 'autómata hipótesis', aHCX, 214, .4, { size: 24, fill: HUE.act, anchor: 'middle', weight: 600 });
+  sg.tr = aST.map((s, k) => { const tv = aTree(p, s.tree, aTCX, aTY, { dx: 112, dy: 118, t0: null }); put(tv.g, { o: 0 }); if (k === k0) show(tv.g, .4); return tv; });
+  sg.hy = aST.map((s, k) => { const gr = aGraph(p, s.H, aHpos(s.H.d.length), { t0: null, rad: 34, size: 24, col: HUE.act }); put(gr.g, { o: 0 }); if (k === k0) show(gr.g, .4); return gr; });
+  sg.tch = aTeach(p, aRC, 170, 470, 250);
+  sg.mq = aCnt(p, aRC, 772, 'consultas de pertenencia', nm, .5); sg.eq = aCnt(p, aRC, 818, 'consultas de equivalencia', ne, .5);
+  sg.swap = (list, a, b, t) => { hide(list[a].g, t, .4); show(list[b].g, t + .25, .5); };
+  sg.ask = (parts, ta, tb) => { const es = aRow(p, parts, aRC, 464, ta, { size: 26, weight: 600 }); if (tb != null) aHideAll(es, tb); return es; };
+  sg.ans = (parts, ta, tb) => { const es = aRow(p, parts, aRC, 514, ta, { size: 30, weight: 700 }); if (tb != null) aHideAll(es, tb); return es; };
+  sg.cap = (str, ta, tb, fill = HUE.act) => { const e = aTx(p, str, aHCX, 600, ta, { size: 24, fill, anchor: 'middle', font: UI, weight: 600 }); if (tb != null) hide(e, tb, .3); return e; };
+  // tabla de prefijos de un contraejemplo: prefijo, hoja del árbol, estado de la hipótesis
+  sg.table = (k, ts, th, tb) => {
+    const sp = aST[k], es = [];
+    [['prefijo', 0], ['árbol', 150], ['hipótesis', 285]].forEach(([s, dx]) => es.push(aTx(p, s, aRC + dx, 558, th, { size: 22, fill: COL.dim, font: UI })));
+    sp.rows.forEach(([pre, tl, hl], i) => {
+      const y = 598 + i * 38, t = ts[i], same = tl === hl;
+      es.push(aTx(p, pre, aRC, y, t, { size: 26, weight: 600 }), aTx(p, aEps(tl), aRC + 150, y, t, { size: 26, weight: 600 }), aTx(p, aEps(hl), aRC + 285, y, t, { size: 26, weight: 600, fill: HUE.act }), aTx(p, same ? '=' : '≠', aRC + 420, y, t + .3, { size: 28, weight: 700, fill: same ? HUE.yes : HUE.no }));
+      sg.tr[k].hot(sg.tr[k].leafId[tl], t, t + 1.2); sg.hy[k].mark(sp.H.us.indexOf(hl), COL.chalk, t, t + 1.2);
+    });
+    aHideAll(es, tb);
+  };
+  return sg;
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const aGX = [160, 370, 580, 790], aGY = 430, aGpos = aGX.map(x => [x, aGY]), RX = 930;
+const aQ4why = ['Ese es el escenario pasivo, y es NP-completo. Aquí se usa el árbol.', null, 'El árbol se conserva: solo se parte una de sus hojas.', 'Así no cambia el número de estados, y cada contraejemplo agrega uno.'];
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 31', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Aprender autómatas con consultas', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Preguntar bien, para aprender exacto.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['aut', 'Autómatas finitos', (m) => {
+    const p = panel(0), tg = m('gr'), ti = m('ini'), tf = m('fin'), tt = m('tr'), t1 = m('s1'), ta = m('acc'), t2 = m('s2'), tr = m('rej'), tl = m('lang'), td = m('dfa'), tm = m('min');
+    aNote(p, 'A: figura 16.5 del libro · ámbar: activo, y la hipótesis · verde/rojo: acepta/rechaza, sí/no · rosa: contraejemplo · violeta: cadenas distinguidoras');
+    aTitle(p, 'Un autómata finito lee una cadena y la acepta o la rechaza');
+    aHideAll([aTx(p, 'aprender un lenguaje  =  aprender el dispositivo que lo genera', 100, 204, .5, { size: 26, font: UI, weight: 600 }),
+      aTx(p, 'lenguajes regulares   ⟷   autómatas finitos', 100, 250, 4.6, { size: 26, font: UI, fill: COL.dim })], t1 - .4);
+    const gr = aGraph(p, aTgt, aGpos, { t0: tg, tE: tt }), tok = gr.tok();
+    // cómo se lee el dibujo
+    const lg = [text(p, 'círculo grueso:  estado inicial', RX, 380, ti, { size: 28 }), text(p, 'círculos dobles:  estados finales', RX, 432, tf, { size: 28 }), text(p, 'flecha:  transición, con su símbolo', RX, 484, tt, { size: 28 })];
+    gr.flash(aTgt.ini, ti); aTgt.fin.forEach((v, id) => { if (v) gr.flash(id, tf); });
+    aHideAll(lg, t1 - .4);
+    // dos cadenas
+    const say = (x, y, t0, dt, tv, tb) => {
+      text(p, 'cadena', RX, y + 40, t0, { size: 26, fill: COL.dim });
+      const sx = aStr(p, x, RX + 120, y, { t0 }), q = gr.run(tok, x, t0 + .6, dt, tb, sx), ok = aTgt.fin[q];
+      aRow(p, [[`termina en el estado ${q}`, COL.chalk, UI], [ok ? ',  final:   ' : ',  no final:   ', COL.dim, UI], [ok ? 'se acepta' : 'se rechaza', ok ? HUE.yes : HUE.no, UI]], RX, y + 106, tv, { size: 26, weight: 600 });
+    };
+    say(aW1, 250, t1, 1.25, ta, t2 - .3); say(aW2, 420, t2, .75, tr, tl + 3);
+    aRow(p, [['L(A)'], [':   el lenguaje aceptado, el conjunto de las cadenas que A acepta', COL.chalk, UI, 26]], 100, 640, tl, { size: 30, weight: 600 });
+    aRow(p, [['determinista (DFA)', HUE.act, UI], [':   un solo estado inicial y, desde cada estado, una sola transición por símbolo', COL.chalk, UI]], 100, 706, td, { size: 26, weight: 600 });
+    aRow(p, [['mínimo', HUE.act, UI], [':   ningún DFA equivalente tiene menos estados', COL.chalk, UI]], 100, 772, tm, { size: 26, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    T(p, 'El mismo autómata, otra cadena', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    const gr = aGraph(p, aTgt, aGpos, { t0: null });
+    T(p, 'cadena', { x: RX, y: 340, size: 28, fill: COL.dim }); aStr(p, aQ1x, RX + 120, 298, { t0: null });
+    aTx(p, 'Se lee desde el estado inicial, el 0.', RX, 450, null, { size: 26, font: UI, fill: COL.dim });
+    S.q1 = gr.sg; S.q1P = aGpos;
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-estado', prompt: [`¿En qué estado termina la cadena ${aQ1x}?`],
+    build: pickEls(S.q1.map((el, k) => ({ el, box: [S.q1P[k][0] - 54, S.q1P[k][1] - 54, 108, 108], label: 'estado ' + k })), aQ1r,
+      `Pasa por los estados ${aQ1tr.join(', ')}. El ${aQ1r} ${aTgt.fin[aQ1r] ? 'es final: la cadena se acepta' : 'no es final: la cadena se rechaza'}.`,
+      k => { const i = aQ1tr.lastIndexOf(k); return i > 0 ? `En el estado ${k} se está tras leer ${aQ1x.slice(0, i)}. Todavía falta leer ${aQ1x.slice(i)}.` : `Por el estado ${k} no se pasa nunca con esta cadena. Hay que seguir las flechas desde el 0.`; }),
+  }], done) }],
+
+  ['pas', 'Aprendizaje pasivo', (m) => {
+    const p = panel(0), te = m('ex'), tn = m('nd'), ts = m('smp'), tsm = m('small'), t2 = m('two'), t1 = m('one'), th1 = m('t1'), th2 = m('t2'), tc = m('cr');
+    aNote(p, 'la muestra S = ((a, +1), (b, −1)) y los dos autómatas son el ejemplo del libro (§16.3.1) · sin flecha para un símbolo: la cadena se rechaza');
+    aTitle(p, 'Aprendizaje exacto eficiente; primero, el escenario pasivo');
+    aHideAll([aRow(p, [['aprendizaje exacto eficiente', HUE.act, UI], [':   identificar el concepto objetivo exactamente, en tiempo polinomial', COL.chalk, UI]], 100, 204, te, { size: 26, weight: 600 }),
+      [aTx(p, 'sin supuesto estocástico: a diferencia del modelo PAC, los ejemplos no salen de una distribución', 100, 248, tn, { size: 22, font: UI, fill: COL.dim })]].flat(), th1 - .4);
+    text(p, 'muestra S', 100, 330, ts, { size: 26, fill: COL.dim });
+    aS.forEach(([x, y], i) => { aStr(p, x, 100, 356 + i * 84, { t0: ts + .4 + i * .9 }); aRow(p, [[y ? '+1' : '−1', y ? HUE.yes : HUE.no], [y ? '    aceptada' : '    rechazada', y ? HUE.yes : HUE.no, UI, 24]], 184, 398 + i * 84, ts + .7 + i * .9, { size: 30, weight: 700 }); });
+    const ga = G(p, { o: 0 }); aArr(ga, 440, 430, 540); show(ga, tsm);
+    text(p, 'el DFA más chico consistente con S', 590, 330, tsm, { size: 26, weight: 600 });
+    const g2 = aGraph(p, aP2, [[650, 470], [850, 470]], { t0: t2 });
+    aTx(p, 'acepta solo la cadena a:   2 estados', 750, 566, t2 + .8, { size: 24, font: UI, anchor: 'middle', fill: COL.dim });
+    const g1 = aGraph(p, aP1, [[1240, 470]], { t0: t1, col: HUE.act });
+    aRow(p, [['acepta  ', HUE.act, UI], ['a*', HUE.act, MATH, 28], [':   1 estado', HUE.act, UI]], 1150, 566, t1 + .8, { size: 24, weight: 600 });
+    aRow(p, [['Teorema 16.2', COL.chalk, UI], [':   hallar el DFA más chico consistente con la muestra es  ', COL.chalk, UI], ['NP-completo', HUE.no, UI]], 100, 664, th1, { size: 26, weight: 600 });
+    aRow(p, [['Teorema 16.3', COL.chalk, UI], [':   si P ≠ NP, ningún algoritmo polinomial garantiza un DFA consistente', COL.chalk, UI]], 100, 730, th2, { size: 26, weight: 600 });
+    aTx(p, 'de tamaño menor que un polinomio en el del más chico, ni siquiera con un alfabeto de dos símbolos', 100, 768, th2 + 3, { size: 24, font: UI });
+    aTx(p, 'y hay otros resultados negativos fuertes, bajo supuestos criptográficos', 100, 830, tc, { size: 24, font: UI, fill: COL.dim });
+  }],
+
+  ['qry', 'Aprender con consultas', (m) => {
+    const p = panel(0), ta = m('act'), tq = m('mq'), tno = m('no'), t2 = m('m2'), ty = m('yes'), te = m('eq'), tc = m('cex'), tr = m('real'), tt = m('thm'), LX = 100, CX = 735, H0 = aST[0].H, cex = aST[0].x;
+    aNote(p, 'el maestro simula el objetivo A (figura 16.5) · el contraejemplo es la cadena más corta en la que difieren, hallada en la página por búsqueda en anchura');
+    aTitle(p, 'Aprender con consultas: el aprendiz pregunta y un maestro responde');
+    const gl = G(p, { o: 0 }); show(gl, .4);
+    mk('rect', { x: LX, y: 300, width: 300, height: 160, fill: 'none', stroke: COL.faint, 'stroke-width': 3 }, gl); T(gl, 'aprendiz', { x: LX + 150, y: 390, size: 30, weight: 700, anchor: 'middle' });
+    const tch = aTeach(p, 1070, 250, 470, 250, { t0: Math.min(ta, .6) });
+    const gw = G(p, { o: 0 }); show(gw, ta); aArr(gw, 420, 330, 1050); aArr(gw, 1050, 430, 420);
+    const kind = (str, t0, t1) => { const e = text(p, str, CX, 180, t0, { size: 28, weight: 700, anchor: 'middle' }); if (t1 != null) hide(e, t1, .3); };
+    kind('consulta de pertenencia', tq, te - .3); kind('consulta de equivalencia', te, null);
+    // una consulta de pertenencia: la cadena viaja al maestro, que la lee en el objetivo y devuelve sí o no
+    const ask = (x, t0, fly, trun, dt, tans, tb) => {
+      const gq = G(p, { o: 0 }), sx = aStr(gq, x, 440, 264, { cw: 46, t0: null }); aTx(gq, '∈ L(A)?', sx.end + 14, 298, null, { size: 28, weight: 600 });
+      show(gq, t0, .3); tw(gq, { x: 1040 - (sx.end + 130) }, t0 + .5, fly); hide(gq, tb, .3);
+      const ok = aTgt.fin[tch.gr.run(tch.tok, x, trun, dt, tb)], e = T(p, aSay(ok), { x: 1030, y: 414, size: 44, fill: ok ? HUE.yes : HUE.no, weight: 700, anchor: 'end', font: UI, o: 0 });
+      show(e, tans, .2); tw(e, { x: 500 }, tans + .2, 1); hide(e, tb, .3);
+    };
+    ask(aM1, tq + 1.4, 1.4, tq + 4.2, .7, tno, t2 - .4); ask(aM2, t2 - .1, .7, t2 + .7, .55, ty, te - .3);
+    // una consulta de equivalencia: viaja la hipótesis entera; vuelve un contraejemplo
+    const gh = G(p, { o: 0 }), hg = aGraph(gh, H0, [[480, 292]], { t0: null, rad: 24, size: 22, col: HUE.act }); aTx(gh, '=  A ?', 530, 302, null, { size: 28, weight: 600 });
+    show(gh, te + .8, .4); tw(gh, { x: 400 }, te + 2.6, 1.5);
+    const gc = G(p, { o: 0 }); aRow(gc, [['contraejemplo:   ', HUE.cex, UI, 28], [cex, HUE.cex, MATH, 40]], 760, 414, null, { weight: 700 });
+    show(gc, tc, .3); tw(gc, { x: -310 }, tc + .3, 1.1);
+    tch.gr.run(tch.tok, cex, tc + 1.6, .7, null);
+    aTx(p, `A ${aAcc(aTgt, cex) ? 'acepta' : 'rechaza'} ${cex};  la hipótesis la ${aAcc(H0, cex) ? 'acepta' : 'rechaza'}`, CX, 478, tc + 2.6, { size: 24, font: UI, fill: COL.dim, anchor: 'middle' });
+    aRow(p, [['consulta de pertenencia', COL.chalk, UI], [':   ¿la cadena x está en el lenguaje?      →      ', COL.chalk, UI], ['sí', HUE.yes, UI], ['  o  ', COL.chalk, UI], ['no', HUE.no, UI]], LX, 610, tno + .6, { size: 26, weight: 600 });
+    aRow(p, [['consulta de equivalencia', COL.chalk, UI], [':   ¿la hipótesis es el objetivo?      →      ', COL.chalk, UI], ['sí', HUE.yes, UI], [',  o un  ', COL.chalk, UI], ['contraejemplo', HUE.cex, UI]], LX, 664, tc + 1.2, { size: 26, weight: 600 });
+    aTx(p, 'modelo poco realista (en la práctica no suele haber un maestro así), pero lleva a resultados positivos', LX, 716, tr, { size: 22, font: UI, fill: COL.dim });
+    aRow(p, [['Teorema 16.4', COL.chalk, UI], [':   si C se aprende de manera exacta y eficiente con consultas de pertenencia y de equivalencia,', COL.chalk, UI]], LX, 790, tt, { size: 26, weight: 600 });
+    aTx(p, 'entonces C es PAC-aprendible con consultas de pertenencia', LX, 830, tt + 4.5, { size: 26, font: UI, weight: 600, fill: HUE.act });
+  }],
+
+  ['tree', 'El árbol de clasificación', (m) => {
+    const p = panel(0), tlf = m('leaf'), tnd = m('node'), tsf = m('sift'), tn1 = m('n1'), tn2 = m('n2'), tre = m('res'), thy = m('hyp'), tst = m('sts'), tfi = m('fins'), ttr = m('trs'), TX = 640, CW = 50, H = aMid.H, mq = x => aAcc(aTgt, x);
+    aNote(p, `el árbol a mitad de la ejecución (tres hojas) · objetivo: el A de la figura 16.5 · las respuestas del maestro se calculan en la página`);
+    aTitle(p, 'El árbol de clasificación, y el autómata que sale de él');
+    const tv = aTree(p, aMid.tree, 290, 260, { dx: 150, dy: 135 }), tok = tv.tok(), ids = Object.keys(tv.isLeaf), lv = ids.filter(id => tv.isLeaf[id]), nds = ids.filter(id => !tv.isLeaf[id]);
+    lv.forEach(id => tv.hot(id, tlf, tlf + 1.4)); nds.forEach(id => tv.hot(id, tnd, tnd + 1.4, COL.chalk));
+    aHideAll([aRow(p, [['hoja', COL.chalk, UI], [':   cadena de acceso u', COL.chalk, UI]], 100, 640, tlf, { size: 26, weight: 600 }), aRow(p, [['nodo interno', HUE.dis, UI], [':   cadena distinguidora v', HUE.dis, UI]], 100, 690, tnd, { size: 26, weight: 600 })].flat(), thy - .5);
+    // cernir una cadena
+    const g1 = G(p);
+    aRow(g1, [['cernir (sift) una cadena x', COL.chalk, UI], [':   en cada nodo v se pregunta si el objetivo acepta x·v', COL.chalk, UI]], TX, 214, tsf, { size: 24, weight: 600 });
+    show(tok, tsf + .6, .3);
+    let id = '';
+    aSf.tr.forEach(([v, ans], i) => {
+      const y = 256 + i * 84, t0 = i ? tn2 - .9 : tn1, tan = i ? tn2 + .3 : tn2 - 2.2, c = ans ? HUE.yes : HUE.no, sx = aStr(g1, aSx, TX, y, { cw: CW, t0 }), sv = aStr(g1, aEps(v), sx.end + 10, y, { cw: CW, t0: t0 + (i ? .2 : 1.4), fill: HUE.dis });
+      aTx(g1, `¿${aSx + v} ∈ L(A)?`, sv.end + 34, y + 36, t0 + (i ? .3 : 3), { size: 26, weight: 600 });
+      aRow(g1, [[aSay(ans), c, UI, 30], [ans ? '   →   derecha' : '   →   izquierda', c, UI, 24]], sv.end + 250, y + 36, tan, { weight: 700 });
+      tv.hot(id, t0, tan + .4); id += ans ? 'r' : 'l'; tv.go(tok, id, tan + .4, .7); tv.hot(id, tan + .5, i === aSf.tr.length - 1 ? thy - .5 : null);
+    });
+    aRow(g1, [[`T(${aSx})  =  ${aEps(aSf.u)}`, HUE.act], ['        la hoja a la que llega', COL.dim, UI, 22]], TX, 470, tre, { size: 34, weight: 700 });
+    hide(g1, thy - .5, .4); hide(tok, thy - .5, .3);
+    // del árbol a la hipótesis
+    text(p, 'el autómata hipótesis que sale del árbol', TX, 214, thy, { size: 26, fill: HUE.act, weight: 600 });
+    const gr = aGraph(p, H, H.us.map((_, i) => [800 + i * 260, 420]), { t0: null, col: HUE.act });
+    gr.sg.forEach((sg, i) => { put(sg, { o: 0 }); show(sg, tst + i * .5, .4); tv.hot(tv.leafId[H.us[i]], tst + i * .5, tst + i * .5 + .8); });
+    gr.inner.forEach((e, i) => { if (!e) return; put(e, { o: 0 }); show(e, tfi + .5, .4); tv.hot(tv.leafId[H.us[i]], tfi, tfi + 1.6, HUE.yes); });
+    gr.ed.forEach(e => put(e.g, { o: 0 }));
+    text(p, 'una hoja   =   un estado', TX, 650, tst, { size: 26, weight: 600 });
+    aRow(p, [['estado final', COL.chalk, UI], [':   hoja del lado «', COL.chalk, UI], ['sí', HUE.yes, UI], ['» de la raíz', COL.chalk, UI]], TX, 704, tfi, { size: 26, weight: 600 });
+    aRow(p, [['transición de u con el símbolo c', COL.chalk, UI], [':   va al estado de la hoja  ', COL.chalk, UI], ['T(u·c)', HUE.act, MATH, 28]], TX, 758, ttr, { size: 26, weight: 600 });
+    const DT = 1.25; let n = 0;
+    H.us.forEach((u, a) => aSIG.forEach(c => {
+      const t0 = ttr + .2 + n * DT, k = gr.of[a + c], to = H.d[a][c], last = ++n === H.us.length * aSIG.length;
+      const es = aRow(p, [[`${aEps(u)}·${c}  =  ${u + c}`], ['       se cierne:       ', COL.dim, UI, 22], [`T(${u + c})  =  ${H.lab[to]}`, HUE.act]], TX, 560, t0, { size: 30, weight: 700 });
+      if (!last) aHideAll(es, t0 + DT - .3);
+      show(gr.ed[k].g, t0 + .3, .3); gr.hot(k, t0 + .3, t0 + DT); tv.hot(tv.leafId[H.us[to]], t0 + .2, t0 + DT - .2);
+    }));
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), tv = aTree(p, aMid.tree, 290, 260, { dx: 150, dy: 135, t0: null }), ids = aQ2lv.map(u => tv.leafId[u]);
+    T(p, 'El mismo árbol, el objetivo A y otra cadena para cernir', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'cadena x', { x: 700, y: 232, size: 28, fill: COL.dim }); aStr(p, aQ2x, 850, 190, { t0: null });
+    aGraph(p, aTgt, [700, 910, 1120, 1330].map(x => [x, 460]), { t0: null });
+    aTx(p, 'objetivo A', 1015, 580, null, { size: 24, font: UI, fill: COL.dim, anchor: 'middle' });
+    aRow(p, [['en cada nodo v:   ¿A acepta x·v?        ', COL.chalk, UI], ['no  →  izquierda', HUE.no, UI], [',      ', COL.chalk, UI], ['sí  →  derecha', HUE.yes, UI]], 100, 640, null, { size: 26, weight: 600 });
+    S.q2 = ids.map(id => tv.el[id]); S.q2B = ids.map(id => tv.box(id));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-cernir', prompt: [`¿A qué hoja del árbol llega la cadena ${aQ2x}?`],
+    build: pickEls(S.q2.map((el, k) => ({ el, box: S.q2B[k], label: 'hoja ' + aEps(aQ2lv[k]) })), aQ2r,
+      aQ2f.tr.map(([v, ans]) => `${aQ2x + v} ${ans ? 'se acepta: derecha' : 'se rechaza: izquierda'}`).join('. ') + `. Llega a la hoja ${aEps(aQ2f.u)}.`,
+      k => { const want = aSift(aMid.tree, aQ2lv[k], x => aAcc(aTgt, x)).tr, i = aQ2f.tr.findIndex(([, ans], j) => !want[j] || want[j][1] !== ans), [v, ans] = aQ2f.tr[i]; return `${aQ2x + v} termina en el estado ${aGo(aTgt, aQ2x + v)}: ${ans ? 'se acepta' : 'se rechaza'}. En ${i ? 'el nodo ' + aEps(v) : 'la raíz'} va a la ${ans ? 'derecha' : 'izquierda'}.`; }),
+  }], done) }],
+
+  ['run1', 'La ejecución', (m) => {
+    const p = panel(0), tq = m('mq'), tt = m('t0'), th = m('h0'), te1 = m('eq1'), tc1 = m('c1'), tn = m('nil'), th1 = m('h1'), te2 = m('eq2'), tc2 = m('c2'), [s0, s1] = aST, e0 = aAcc(aTgt, '');
+    aNote(p, 'objetivo: el A de la figura 16.5 del libro · todo sale de ejecutar el algoritmo en la página · las consultas de pertenencia se cuentan sin repetir cadenas');
+    aTitle(p, 'La ejecución completa: preguntar, recibir un contraejemplo, corregir');
+    const sg = aStage(p, null, 0, 0);
+    sg.ask([['pertenencia:   ', COL.dim, UI], ['¿ε ∈ L(A)?']], tq, te1 - .3); sg.ans([[aSay(e0), e0 ? HUE.yes : HUE.no, UI]], tq + 2.8, te1 - .3);
+    sg.tch.gr.mark(aTgt.ini, e0 ? HUE.yes : HUE.no, tq + 2.4, te1 - .3); sg.mq(1, tq + 2.8);
+    show(sg.tr[0].g, tt); show(sg.hy[0].g, th); const c0 = sg.cap('1 estado', th + .4, tc1 + 1);
+    const eqq = (k, t0, t1, tb) => {
+      const sp = aST[k], x = sp.x;
+      sg.ask([['equivalencia:   ', COL.dim, UI], ['¿hipótesis = A?']], t0, tb); sg.eq(sp.ne, t0 + .9);
+      sg.ans([['contraejemplo:   ', HUE.cex, UI, 26], [`x = ${x}`, HUE.cex, MATH, 32]], t1, tb);
+      sg.tch.gr.run(sg.tch.tok, x, t1 + .5, .5, tb); sg.hy[k].mark(aGo(sp.H, x), aAcc(sp.H, x) ? HUE.yes : HUE.no, t1 + .5 + x.length * .5, tb);
+    };
+    eqq(0, te1, tc1, te2 - .3);
+    sg.cap(`A ${aAcc(aTgt, s0.x) ? 'acepta' : 'rechaza'} ${s0.x};  la hipótesis la ${aAcc(s0.H, s0.x) ? 'acepta' : 'rechaza'}`, tc1 + 1.4, th1 - .2, COL.dim);
+    sg.swap(sg.tr, 0, 1, tn); sg.tr[1].hot(sg.tr[1].leafId[s0.x], tn + .5, tn + 2.2, HUE.cex);
+    sg.swap(sg.hy, 0, 1, th1); sg.mq(s0.nm1, th1 + 1.4); sg.cap(`${s1.H.d.length} estados`, th1 + .6, tc2 + 1.2);
+    eqq(1, te2, tc2, null);
+    sg.cap(`A ${aAcc(aTgt, s1.x) ? 'acepta' : 'rechaza'} ${s1.x};  la hipótesis la ${aAcc(s1.H, s1.x) ? 'acepta' : 'rechaza'}`, tc2 + 1.6, null, COL.dim);
+  }],
+
+  ['run2', 'Partir una hoja', (m) => {
+    const p = panel(0), tp = m('pre'), tr = [m('r1'), m('r2'), m('r3')], tw0 = m('why'), tsp = m('split'), th2 = m('h2'), te3 = m('eq3'), tc3 = m('c3'), ts2 = m('s2'), th3 = m('h3'), te4 = m('eq4'), ty = m('yes'), tcn = m('cnt'), tt = m('thm'), [, s1, s2, s3] = aST, LX = 70;
+    aNote(p, 'la misma ejecución · notación del libro: x[j] es el prefijo de largo j; j es el primer prefijo en que árbol e hipótesis difieren; v distingue esas dos hojas');
+    aTitle(p, 'Cada contraejemplo parte una hoja y agrega un estado');
+    const sg = aStage(p, 1, s1.nm0, s1.ne);
+    const cexL = (sp, ta, tb) => sg.ans([['contraejemplo:   ', HUE.cex, UI, 26], [`x = ${sp.x}`, HUE.cex, MATH, 32]], ta, tb);
+    // qué se hace con un contraejemplo: tabla de prefijos, hoja que se parte, hipótesis nueva
+    const fix = (k, ts, th, twy, tsplit, thyp, tb) => {
+      const sp = aST[k], { leaf, node, add } = sp.split, xj = sp.x[sp.j - 1], tv = sg.tr[k], nv = sg.tr[k + 1];
+      sg.table(k, ts, th, tb);
+      tv.hot(tv.leafId[leaf], twy, null, HUE.cex);
+      if (twy < tsplit - 1) aHideAll([aTx(p, `${add} y ${aEps(leaf)}:  misma hoja del árbol,`, LX, 640, twy, { size: 24, font: UI, weight: 600 }), aTx(p, `pero al leer ${xj} van a hojas distintas`, LX, 676, twy + 1.6, { size: 24, font: UI, weight: 600 })], tsplit - .3);
+      sg.swap(sg.tr, k, k + 1, tsplit);
+      const nid = nv.leafId[add].slice(0, -1); nv.hot(nid, tsplit + .5, tsplit + 2.4, COL.chalk); nv.hot(nv.leafId[add], tsplit + .5, tsplit + 2.4, HUE.cex);
+      aHideAll([aRow(p, [['nodo nuevo:   ', COL.chalk, UI], [`x_{j} v  =  ${node}`, HUE.dis, MATH, 28]], LX, 640, tsplit + .5, { size: 24, weight: 600 }), aRow(p, [['hoja nueva:   ', COL.chalk, UI], [`x[j − 1]  =  ${add}`, COL.chalk, MATH, 28]], LX, 680, tsplit + .9, { size: 24, weight: 600 })].flat(), tb);
+      sg.swap(sg.hy, k, k + 1, thyp); sg.mq(sp.nm1, thyp + .6);
+    };
+    cexL(s1, .4, te3 - .3); const c1 = sg.cap(`${s1.H.d.length} estados`, .4, th2);
+    fix(1, tr, tp, tw0, tsp, th2, te3 - .3); sg.cap(`${s2.H.d.length} estados`, th2 + .5, th3);
+    sg.ask([['equivalencia:   ', COL.dim, UI], ['¿hipótesis = A?']], te3, null); sg.eq(s2.ne, te3 + .8);
+    cexL(s2, tc3, te4 - .2);
+    fix(2, s2.rows.map((_, i) => tc3 + .3 + i * .3), tc3 + .2, ts2 - .3, ts2, th3, te4 - .2); sg.cap(`${s3.H.d.length} estados`, th3 + .5, ty);
+    sg.eq(s3.ne, te4 + .4);
+    sg.ans([[s3.x == null ? 'sí' : 'no', HUE.yes, UI, 40]], ty, null);
+    s3.H.d.forEach((_, i) => sg.hy[3].mark(i, HUE.yes, ty + .2 + i * .12, ty + 2.6));
+    sg.cap('la hipótesis es el objetivo A', ty + .4, null, HUE.yes);
+    sg.mq(aRUN.tch.nm, tcn + 2.6); sg.eq(aRUN.tch.ne, tcn + .6);
+    aRow(p, [['Teorema 16.5', HUE.act, UI], [':   la clase de todos los DFA se aprende de manera exacta y eficiente', COL.chalk, UI]], LX, 762, tt, { size: 24, weight: 600 });
+    aTx(p, 'con consultas de pertenencia y de equivalencia', LX, 800, tt + 4.5, { size: 24, font: UI, weight: 600 });
+    aRow(p, [['costo:   ', COL.dim, UI], ['O(|Σ||A|² + n|A|)', COL.dim, MATH, 24], [',   con n el largo máximo de un contraejemplo', COL.dim, UI]], LX, 842, tt + 6.5, { size: 22 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Un DFA lee la cadena símbolo a símbolo; la acepta si termina en un estado final.', 'w1'], ['Pasivo:  hallar el DFA más chico consistente con una muestra es NP-completo.', 'w2'],
+      ['Con consultas de pertenencia y de equivalencia, se aprende de manera exacta y eficiente.', 'w3'], ['Árbol de clasificación:  cada contraejemplo parte una hoja y agrega un estado.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 28, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['En un DFA pueden salir de un mismo estado dos transiciones con el mismo símbolo.'], ans: ['f'], why: 'Determinista: desde cada estado, una sola transición por símbolo.' },
+      { parts: ['Hallar el DFA más chico consistente con una muestra de cadenas aceptadas y rechazadas es NP-completo.'], ans: ['v'], why: 'Es el teorema 16.2.' },
+      { parts: ['Si la hipótesis no es el objetivo, la consulta de equivalencia devuelve un contraejemplo.'], ans: ['v'], why: 'Una cadena en la que hipótesis y objetivo no coinciden.' },
+      { parts: ['En el árbol de clasificación, las hojas llevan las cadenas distinguidoras.'], ans: ['f'], why: 'Las hojas llevan cadenas de acceso; los nodos internos, las distinguidoras.' },
+      { parts: ['Con consultas de pertenencia y de equivalencia, la clase de todos los DFA se aprende de manera exacta y eficiente.'], ans: ['v'], why: 'Es el teorema 16.5.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-cex', prompt: ['El maestro devuelve un contraejemplo. ¿Qué hace el algoritmo con él?'],
+    build: choice([['lo suma a una muestra y busca el DFA más chico consistente'], ['parte una hoja del árbol: la hipótesis gana un estado'], ['descarta el árbol y empieza de nuevo'], ['cambia de final a no final el estado donde termina']], 1,
+      'Busca el primer prefijo en que árbol e hipótesis difieren, y parte la hoja del prefijo anterior.',
+      aQ4why),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

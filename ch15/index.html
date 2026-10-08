@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Por qué funciona boosting</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 15, title: 'Por qué funciona boosting', minutes: 7, language: 'es', next: '../ch16/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 14) ---------- */
+// salmón = +1, azul = −1 (puntos y regiones) · ámbar = lo elegido: frontera, margen mínimo, valor del juego · rojo = error y fallo ·
+// verde = acierto · violeta = complejidad (dimensión VC, Rademacher) y penalización · blanco = error de prueba del esquema · gris = lo neutro
+// en el beat del juego: rosa (local) = jugador de filas (D y la ventaja γ), blanco = jugador de columnas (α y el margen ρ)
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, un: COL.dim, cx: COL.real, rowp: COL.rat, colp: COL.chalk };
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'D_{t}(i)', 'ε_{t}^{1−ρ}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αεγδφρσλμ‖ℜ√∑∏⟹⟺≈∼∞])/;                                              // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aSg = v => (v < 0 ? '−' : '+') + Math.abs(v).toFixed(2);                       // número con signo
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aCurve = (f, u0, u1, UX, UY, n = 120) => { let d = ''; for (let k = 0; k <= n; k++) { const u = u0 + (u1 - u0) * k / n; d += (k ? 'L' : 'M') + UX(u).toFixed(1) + ' ' + UY(f(u)).toFixed(1); } return d; };
+const aSq = (p, x, y, col, lab, { line = false, dash = null } = {}) => { mk(line ? 'path' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aRing = (g, x, y, t0, r = 27) => { const e = put(mk('circle', { r, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, g), { x, y, o: 0 }); show(e, t0, .3); return e; };   // anillo blanco alrededor de un punto
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+// --- La muestra del cap. 14: 10 puntos ilustrativos en un marco de 10 × 8. [x1, x2, etiqueta].
+const aW = 10, aH = 8;
+const aP = [[1.2, 6.8, 1], [1.4, 2.6, 1], [3.2, 4.4, 1], [4.6, 3.4, 1], [6.6, 4.2, 1], [5.2, 1.4, 1], [2.6, 6, -1], [4.2, 7, -1], [9.2, 2.8, -1], [8.6, 1.2, -1]];
+const aM = aP.length;
+// --- Stumps y AdaBoost, tal como en el cap. 14 (figura 7.1): h(x) = s si x_c < th, y −s si no.
+const aHx = (st, q) => q[st.c] < st.th ? st.s : -st.s;
+const aThr = (pts, c) => { const v = [...new Set(pts.map(q => q[c]))].sort((a, b) => a - b), th = [0]; for (let k = 1; k < v.length; k++) th.push((v[k - 1] + v[k]) / 2); th.push(c ? aH : aW); return th; };
+const aAll = pts => [0, 1].flatMap(c => aThr(pts, c).flatMap(th => [1, -1].map(s => ({ c, th, s }))));
+const aErrW = (st, pts, D) => pts.reduce((e, q, i) => e + (aHx(st, q) !== q[2] ? D[i] : 0), 0);
+const aBest = (pts, D) => aAll(pts).reduce((b, st) => { const e = aErrW(st, pts, D); return !b || e < b.e - 1e-12 ? { st, e } : b; }, null);
+// Por ronda: h, eps, al, Z, D (antes), Dn (después), miss, f (valores de f_t en la muestra), nerr, norm (‖α‖₁ hasta esa ronda).
+const aRun = (pts, n) => {
+  const m = pts.length, out_ = [];
+  let D = pts.map(() => 1 / m), f = pts.map(() => 0), norm = 0;
+  for (let t = 0; t < n; t++) {
+    const { st, e: eps } = aBest(pts, D), al = .5 * Math.log((1 - eps) / eps), Z = 2 * Math.sqrt(eps * (1 - eps));
+    const Dn = pts.map((q, i) => D[i] * Math.exp(-al * q[2] * aHx(st, q)) / Z);
+    f = pts.map((q, i) => f[i] + al * aHx(st, q)); norm += al;
+    const nerr = pts.filter((q, i) => q[2] * f[i] <= 0).length;
+    out_.push({ h: st, eps, al, Z, D, Dn, miss: pts.map((q, i) => i).filter(i => aHx(st, pts[i]) !== pts[i][2]), f, nerr, err: nerr / m, norm });
+    D = Dn;
+  }
+  return out_;
+};
+const aT = 3, aTmax = 30, aR = aRun(aP, aTmax);                                      // rondas del ejemplo del cap. 14 · rondas de este capítulo
+const aFtR = (run, n, q) => run.slice(0, n).reduce((s, r) => s + r.al * aHx(r.h, q), 0);   // f_n en un punto cualquiera del plano
+// Regiones donde f_n es constante, con su valor, y la frontera de sgn(f_n).
+const aCuts = (run, n, c) => [0, ...[...new Set(run.slice(0, n).filter(r => r.h.c === c).map(r => r.h.th))].sort((a, b) => a - b), c ? aH : aW];
+const aCells = (run, n) => { const xs = aCuts(run, n, 0), ys = aCuts(run, n, 1), res = []; for (let i = 0; i + 1 < xs.length; i++) for (let j = 0; j + 1 < ys.length; j++) res.push({ x0: xs[i], x1: xs[i + 1], y0: ys[j], y1: ys[j + 1], v: aFtR(run, n, [(xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2]) }); return res; };
+const aFront = (run, n) => {
+  const xs = aCuts(run, n, 0), ys = aCuts(run, n, 1), sg = (x, y) => aFtR(run, n, [x, y]) > 0, e = 1e-6, res = [];
+  for (let i = 1; i + 1 < xs.length; i++) for (let j = 0; j + 1 < ys.length; j++) { const y = (ys[j] + ys[j + 1]) / 2; if (sg(xs[i] - e, y) !== sg(xs[i] + e, y)) res.push([xs[i], ys[j], xs[i], ys[j + 1]]); }
+  for (let j = 1; j + 1 < ys.length; j++) for (let i = 0; i + 1 < xs.length; i++) { const x = (xs[i] + xs[i + 1]) / 2; if (sg(x, ys[j] - e) !== sg(x, ys[j] + e)) res.push([xs[i], ys[j], xs[i + 1], ys[j]]); }
+  return res;
+};
+const aSpot = (c, pts) => { let b = null; for (let i = 1; i < 12; i++) for (let j = 1; j < 8; j++) { const x = c.x0 + (c.x1 - c.x0) * i / 12, y = c.y0 + (c.y1 - c.y0) * j / 8; if (x - c.x0 < .75 || c.x1 - x < .75 || y - c.y0 < .45 || c.y1 - y < .45) continue; const d = Math.min(...pts.map(q => Math.hypot((q[0] - x) * .55, q[1] - y))); if (!b || d > b.d + 1e-9) b = { x, y, d }; } return b || { x: (c.x0 + c.x1) / 2, y: (c.y0 + c.y1) / 2 }; };
+// --- Cota (7.9) de la dimensión VC de F_n, dividida por d + 1: 2(n + 1) log2((n + 1)e).
+const aVCf = n => 2 * (n + 1) * Math.log2((n + 1) * Math.E);
+// --- Márgenes L1 con signo, y_i f_n(x_i) / ‖α‖₁ ((7.10) y (7.17)), tras n rondas; el mínimo es el margen de f_n sobre la muestra (7.11).
+const aMg = n => aP.map((q, i) => q[2] * aR[n - 1].f[i] / aR[n - 1].norm);
+const aMgAt = r => { const a = Math.floor(r), b = Math.min(aTmax, a + 1), u = r - a, A = aMg(a), B = aMg(b); return A.map((v, i) => v + (B[i] - v) * u); };   // entre dos rondas: interpolación lineal (solo para animar)
+const aMin = n => Math.min(...aMg(n));
+// Cota del teorema 7.7 para la pérdida de margen empírica con margen rho, tras n rondas.
+const aB77 = (n, rho) => aR.slice(0, n).reduce((s, r) => s * 2 * Math.sqrt(r.eps ** (1 - rho) * (1 - r.eps) ** (1 + rho)), 1);
+// --- El juego (§7.3.5): columnas = los clasificadores base distintos que usa la ejecución; M_it = y_i h_t(x_i).
+const aKey = h => h.c + ':' + h.th + ':' + h.s;
+const aBase = aR.map(r => r.h).filter((h, k, all) => all.findIndex(g => aKey(g) === aKey(h)) === k);
+const aMat = aP.map(q => aBase.map(h => q[2] * aHx(h, q)));
+// Filas distintas de M, con los puntos de cada una; primero las que falla h_1, después h_2, …, al final las que nadie falla.
+const aTypes = (() => { const res = []; aMat.forEach((row, i) => { const k = row.join(','), t = res.find(x => x.k === k); if (t) t.idx.push(i); else res.push({ k, row, idx: [i] }); }); const pos = t => { const j = t.row.indexOf(-1); return j < 0 ? 99 : j; }; return res.sort((a, b) => pos(a) - pos(b)); })();
+const aOrd = aTypes.flatMap(t => t.idx);                                             // orden de las filas en pantalla
+// Sistema lineal por eliminación de Gauss con pivoteo (null si es singular).
+const aSolve = (A, b) => {
+  const n = b.length, a = A.map((r, i) => [...r, b[i]]);
+  for (let c = 0; c < n; c++) { let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(a[r][c]) > Math.abs(a[p][c])) p = r; if (Math.abs(a[p][c]) < 1e-10) return null; [a[c], a[p]] = [a[p], a[c]]; for (let r = 0; r < n; r++) if (r !== c) { const k = a[r][c] / a[c][c]; for (let j = c; j <= n; j++) a[r][j] -= k * a[c][j]; } }
+  return a.map((r, i) => r[n] / r[i]);
+};
+const aSubsets = (n, k) => { const res = [], go = (s, cur) => { if (cur.length === k) { res.push(cur); return; } for (let i = s; i < n; i++) go(i + 1, [...cur, i]); }; go(0, []); return res; };
+// max_q min_i (A q)_i con q en el símplex: programa lineal chico, resuelto probando todos los vértices. Devuelve { v, q }.
+const aGame = A => {
+  const n = A[0].length, cons = [...A.map(r => [...r, -1]), ...Array.from({ length: n }, (_, j) => Array.from({ length: n + 1 }, (_, k) => k === j ? 1 : 0))];
+  let best = null;
+  aSubsets(cons.length, n).forEach(idx => { const x = aSolve([[...Array(n).fill(1), 0], ...idx.map(i => cons[i])], [1, ...idx.map(() => 0)]); if (!x) return; const q = x.slice(0, n), v = x[n]; if (q.some(u => u < -1e-9) || A.some(r => r.reduce((s, u, j) => s + u * q[j], 0) < v - 1e-9)) return; if (!best || v > best.v + 1e-9) best = { v, q }; });
+  return best;
+};
+const aTr = A => A[0].map((_, j) => A.map(r => r[j]));
+const aTM = aTypes.map(t => t.row);
+const aCol = aGame(aTM);                                                             // jugador de columnas: mezcla óptima q* y ρ* = max_α min_i (7.19)
+const aRowG = aGame(aTr(aTM).map(r => r.map(v => -v)));                              // jugador de filas, sobre las filas distintas: min_D max_t = −v
+const aRhoMax = aCol.v, aVal = -aRowG.v;                                             // los dos lados de (7.24)
+const aDst = aP.map((q, i) => { const k = aTypes.findIndex(t => t.idx.includes(i)); return aRowG.q[k] / aTypes[k].idx.length; });   // D*(i): la masa de cada fila distinta, repartida por igual entre sus puntos
+const aColSum = aBase.map((h, t) => aP.reduce((s, q, i) => s + aDst[i] * aMat[i][t], 0));   // ∑_i D*(i) M_it = 2 γ_t(D*) (7.20)
+const aRowMg = aMat.map(row => row.reduce((s, v, t) => s + v * aCol.q[t], 0));       // margen de cada punto con la mezcla óptima
+// --- Lema 7.4: signos de Rademacher con semilla y correlación (1/m) ∑ σ_i h(x_i) de cada clasificador base.
+const aRng = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aSigma = (() => { const r = aRng(11); return aP.map(() => r() < .5 ? -1 : 1); })();
+const aCor = aBase.map(h => aP.reduce((s, q, i) => s + aSigma[i] * aHx(h, q), 0) / aM);
+const aCorMax = Math.max(...aCor), aCorBest = aCor.indexOf(aCorMax);
+const aMixPath = [[1 / 3, 1 / 3, 1 / 3], [.2, .2, .6], [.1, .7, .2], [.5, .3, .2], aBase.map((_, k) => k === aCorBest ? 1 : 0)];   // mezclas μ por las que pasa la animación
+const aMixAt = u => { const s = Math.min(aMixPath.length - 1 - 1e-9, Math.max(0, u) * (aMixPath.length - 1)), k = Math.floor(s), v = s - k; return aMixPath[k].map((a, j) => a + (aMixPath[k + 1][j] - a) * v); };
+// --- Ruido (§7.5): la misma muestra con una etiqueta cambiada, y AdaBoost sobre ella.
+const aNz = 5, aNoisy = aP.map((q, i) => i === aNz ? [q[0], q[1], -q[2]] : q), aRn = aRun(aNoisy, aTmax);
+// Comprobación 1: tres puntos de la muestra en regiones con distinto |f_3|; el de menor margen.
+const aQ1 = [1, 3, 8], aQ1f = aQ1.map(i => Math.abs(aR[aT - 1].f[i])), aQ1r = aQ1f.indexOf(Math.min(...aQ1f));
+/* aMATH:end */
+
+// Plano de dos clases; el área de cada punto es proporcional a su peso. pl.bg = regiones, pl.lg = rectas y rótulos, pl.dg = puntos.
+const aPl = (p, ox, oy, sc, { t0 = .4, pts = aP, D = null, ax = false } = {}) => {
+  const X = x => ox + x * sc, Y = y => oy - y * sc, g = G(p, { o: t0 == null ? 1 : 0 }), pl = { X, Y, sc, g, pts, r0: sc > 40 ? 15 : sc * .27 };
+  pl.bg = G(g);
+  mk('rect', { x: ox, y: oy - aH * sc, width: aW * sc, height: aH * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  if (ax) { aTx(g, 'x_{1}', X(aW), Y(0) + 28, null, { size: 22, fill: COL.dim, anchor: 'end' }); aTx(g, 'x_{2}', X(0) - 12, Y(aH) + 20, null, { size: 22, fill: COL.dim, anchor: 'end' }); }
+  pl.lg = G(g); pl.dg = G(g);
+  const sz = (D, i) => Math.sqrt(D[i] * pts.length);
+  pl.dots = pts.map((q, i) => put(mk('circle', { r: pl.r0, fill: aHue(q[2]), stroke: COL.board, 'stroke-width': 2 }, pl.dg), { x: X(q[0]), y: Y(q[1]), s: D ? sz(D, i) : 1 }));
+  if (t0 != null) show(g, t0);
+  pl.size = (D, t, dur = .9) => pl.dots.forEach((e, i) => tw(e, { s: sz(D, i) }, t, dur));
+  return pl;
+};
+// Las regiones de f_n sobre el plano, teñidas con el color de su signo (más intenso = |f| mayor) y, si lab, rotuladas con su valor; fr = frontera de sgn(f_n).
+const aComb = (pl, run, n, { o = 0, lab = true, flat = false } = {}) => {
+  const g = G(pl.bg, { o }), lg = G(pl.lg, { o }), cs = aCells(run, n);
+  cs.forEach(c => { mk('rect', { x: pl.X(c.x0), y: pl.Y(c.y1), width: (c.x1 - c.x0) * pl.sc, height: (c.y1 - c.y0) * pl.sc, fill: aHue(c.v), 'fill-opacity': flat ? .22 : Math.min(.6, .1 + .2 * Math.abs(c.v)).toFixed(2) }, g); if (lab) { const s = aSpot(c, pl.pts); aHalo(aTx(lg, aSg(c.v), pl.X(s.x), pl.Y(s.y) + 8, null, { size: 24, weight: 600, anchor: 'middle' })); } });
+  const fr = path(pl.lg, aFront(run, n).map(([a, b, c, d]) => `M${pl.X(a)} ${pl.Y(b)}L${pl.X(c)} ${pl.Y(d)}`).join(''), { stroke: HUE.hyp, 'stroke-width': 7, 'stroke-linecap': 'round' }, { d: o });
+  return { g, lab: lg, fr, cs };
+};
+const aMain = (p, o = {}) => aPl(p, 100, 686, 62, { ax: true, ...o });
+// Tira de márgenes: eje de −1 a 1 con un punto por elemento de la muestra; los que coinciden se apilan. sp.set(márgenes) los coloca.
+const aStrip = (p, x0, x1, y, { t0 = .4, r = 11 } = {}) => {
+  const SX = v => x0 + (v + 1) / 2 * (x1 - x0), g = G(p, { o: t0 == null ? 1 : 0 }), sp = { SX, g, y };
+  mk('path', { d: `M${x0} ${y}H${x1}` + [-1, -.5, 0, .5, 1].map(v => `M${SX(v)} ${y - 8}v16`).join(''), stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  [[-1, '−1'], [0, '0'], [1, '1']].forEach(([v, s]) => T(g, s, { x: SX(v), y: y + 40, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+  sp.dots = aP.map(q => put(mk('circle', { r, fill: aHue(q[2]), stroke: COL.board, 'stroke-width': 2 }, g), { x: SX(0), y: y - 18 }));
+  sp.set = mg => mg.forEach((v, i) => { const k = mg.filter((u, j) => j < i && Math.abs(u - v) < .06).length; put(sp.dots[i], { x: SX(v), y: y - 18 - k * (2 * r + 1) }); });
+  if (t0 != null) show(g, t0);
+  return sp;
+};
+// Gráfica del margen mínimo por ronda (de la ronda aT a la aTmax, eje vertical de 0 a vmax). mc.upTo(r) dibuja la línea hasta la ronda r.
+const aMinChart = (p, x0, y0, w, h, { t0 = .4, vmax = .4 } = {}) => {
+  const CX = r => x0 + (r - aT) / (aTmax - aT) * w, VY = v => y0 - v / vmax * h, g = G(p, { o: t0 == null ? 1 : 0 }), mc = { CX, VY, g };
+  mk('path', { d: `M${x0 - 16} ${y0 - h - 14}V${y0}H${x0 + w + 16}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  [0, .2, .4].forEach(v => { mk('path', { d: `M${x0 - 24} ${VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, v.toFixed(1), { x: x0 - 32, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  [3, 10, 20, 30].forEach(r => { mk('path', { d: `M${CX(r)} ${y0}v8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(r), { x: CX(r), y: y0 + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  T(g, 'ronda', { x: x0 + w, y: y0 + 66, size: 22, fill: COL.dim, anchor: 'end' });
+  const ln = mk('path', { fill: 'none', stroke: HUE.hyp, 'stroke-width': 4, 'stroke-linejoin': 'round' }, g);
+  mc.upTo = r => { let d = ''; for (let k = aT; k <= Math.floor(r + 1e-9); k++) d += (k > aT ? 'L' : 'M') + CX(k).toFixed(1) + ' ' + VY(aMin(k)).toFixed(1); if (r - Math.floor(r) > 1e-6) d += 'L' + CX(r).toFixed(1) + ' ' + VY(Math.min(...aMgAt(r))).toFixed(1); ln.setAttribute('d', d); };
+  if (t0 != null) show(g, t0);
+  return mc;
+};
+const NOTE = 'la muestra y la ejecución del cap. 14 (ilustrativas) · salmón = +1, azul = −1 · todo se calcula en la página';
+const aBND = [['R(f)   ≤   '], ['R̂_{S,ρ}( f̄ )'], ['   +   '], ['(2/ρ) ℜ_{m}(H)', COL.real], ['   +   '], ['√( log(1/δ) / 2m )']];   // la cota (7.16), por piezas
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 15', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Por qué funciona boosting', { x: 800, y: 450, size: 72, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Más rondas, más complejidad, y aun así generaliza: la clave es el margen.', 800, 580, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['vc', 'La dimensión VC', (m) => {
+    const p = panel(0), tv = m('vc'), tg = m('grow'), tf = m('fig'), tz = m('zero'), tt = m('test'), tq = m('q'), B0 = 720, BH = 300, top = aVCf(8);
+    aNote(p, 'barras: cota (7.9) dividida por d + 1, calculada en la página · derecha: esquema de la figura 7.5, sin datos propios');
+    aTitle(p, 'Primera cuenta: la dimensión VC crece con las rondas');
+    const f0 = aTx(p, 'F_{T}  =  { sgn( ∑_{t ≤ T} α_{t} h_{t} ) :   α_{t} ≥ 0,   h_{t} ∈ H }', 100, 204, .5, { size: 30, weight: 600 });
+    text(p, '(7.8)', 100 + f0.getComputedTextLength() + 24, 202, .5, { size: 22, fill: COL.dim });
+    const f1 = aTx(p, 'VCdim(F_{T})   ≤   2(d + 1)(T + 1) log_{2}( (T + 1)e )', 100, 266, tv, { size: 30, weight: 600 });
+    text(p, '(7.9),   d = VCdim(H)', 100 + f1.getComputedTextLength() + 24, 264, tv, { size: 22, fill: COL.dim });
+    // izquierda: la cota por ronda
+    const BX = t => 170 + t * 60, BY = v => B0 - v / top * BH, ax = G(p, { o: 0 }); show(ax, tv + 1.5);
+    mk('path', { d: `M148 ${B0 - BH - 20}V${B0}H${BX(8) + 50}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, ax);
+    for (let t = 1; t <= 8; t++) T(ax, String(t), { x: BX(t), y: B0 + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH });
+    aTx(ax, 'T', BX(8) + 44, B0 + 32, null, { size: 22, fill: COL.dim });
+    aTx(ax, 'cota (7.9),  en unidades de d + 1', 170, B0 - BH - 2, null, { size: 22, fill: COL.dim, font: UI });
+    for (let t = 1; t <= 8; t++) {
+      const v = aVCf(t), t0 = tg + (t - 1) * .22, e = mk('rect', { x: BX(t) - 16, y: B0, width: 32, height: 0, fill: HUE.cx }, p);
+      tw(e, { a_y: BY(v), a_height: B0 - BY(v) }, t0, .45, out);
+      if (t === 1 || t === 4 || t === 8) aTx(p, v.toFixed(1), BX(t), BY(v) - 12, t0 + .3, { size: 22, fill: HUE.cx, anchor: 'middle', weight: 600 });
+    }
+    aTx(p, 'crece como  T log T', 170, B0 - BH + 44, tg + 3, { size: 26, fill: HUE.cx, weight: 600, font: UI });
+    aTx(p, 'más rondas  ⟹  más complejidad  ⟹  ¿sobreajuste?', 100, 812, tg + 7.4, { size: 26, fill: HUE.cx, weight: 600, font: UI });
+    // derecha: esquema de la figura 7.5 (eje horizontal en escala logarítmica)
+    const UX = u => 900 + u / 3.2 * 560, UY = v => 720 - v * 300, ss = x => { const c = Math.min(1, Math.max(0, x)); return c * c * (3 - 2 * c); }, drop = u => ss((u - .35) / .4);
+    const fTr = u => (.4 + .12 * Math.sin(Math.PI * Math.min(u, .4) / .8)) * (1 - drop(u));
+    const fTe = u => (.8 + .1 * Math.sin(Math.PI * Math.min(u, .4) / .8)) * (1 - drop(u)) + (.14 + .3 * Math.exp(-(Math.max(u, .75) - .75) / .55)) * drop(u);
+    const sx = G(p, { o: 0 }); show(sx, tf);
+    mk('path', { d: `M${UX(0)} ${UY(1) - 14}V${UY(0)}H${UX(3.2) + 10}` + [1, 2, 3].map(u => `M${UX(u)} ${UY(0)}v8`).join(''), stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, sx);
+    [[1, '10'], [2, '100'], [3, '1000']].forEach(([u, s]) => T(sx, s, { x: UX(u), y: UY(0) + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    T(sx, 'rondas (escala log)', { x: UX(3.2), y: UY(0) + 64, size: 22, fill: COL.dim, anchor: 'end' });
+    T(sx, 'error', { x: UX(0) - 14, y: UY(1), size: 22, fill: COL.dim, anchor: 'end' });
+    T(sx, 'lo observado: esquema de la figura 7.5', { x: UX(0), y: UY(1) - 36, size: 24, fill: COL.dim });
+    T(sx, 'AdaBoost con árboles C4.5', { x: UX(0), y: UY(0) + 64, size: 22, fill: COL.dim });
+    const lz = G(p, { o: 0 }); show(lz, tz); aSq(lz, UX(1.3), UY(.92), COL.bad, 'error de entrenamiento', { line: true });
+    draw(path(p, aCurve(fTr, 0, 3.15, UX, UY), { stroke: COL.bad, 'stroke-width': 5, 'stroke-linejoin': 'round' }, { d: 0 }), tz, 2.4);
+    const mz = G(p, { o: 0 }); show(mz, tz + 2.2);
+    mk('path', { d: `M${UX(.75)} ${UY(0)}V${UY(.62)}`, stroke: COL.bad, 'stroke-width': 2, 'stroke-dasharray': '5 6', fill: 'none' }, mz);
+    T(mz, 'llega a 0', { x: UX(.75) + 10, y: UY(.6), size: 22, fill: COL.bad });
+    const lt = G(p, { o: 0 }); show(lt, tt); aSq(lt, UX(1.3), UY(.92) + 36, COL.chalk, 'error de prueba: sigue bajando', { line: true });
+    draw(path(p, aCurve(fTe, 0, 3.15, UX, UY), { stroke: COL.chalk, 'stroke-width': 5, 'stroke-linejoin': 'round' }, { d: 0 }), tt, 3);
+    text(p, '¿por qué no sobreajusta?', UX(0), 812, tq, { size: 28, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['margen', 'El margen L1', (m) => {
+    const p = panel(0), tn = m('norm'), td = m('def'), tp = m('pt'), ta = m('all'), ts = m('svm'), RX = 800, r3 = aR[aT - 1], i0 = aQ1[aQ1r], mg = aMg(aT), mn = aMin(aT), SY = 670;
+    aNote(p, NOTE);
+    aTitle(p, 'El margen L1: la confianza del voto');
+    const pl = aMain(p), cb = aComb(pl, aR, aT);
+    show(cb.g, .6); show(cb.lab, .8); draw(cb.fr, .9, 1);
+    const gA = G(p);
+    aRow(gA, [['f  =  α_{1} h_{1} + α_{2} h_{2} + α_{3} h_{3}'], ['       (cap. 14)', COL.dim, UI]], RX, 236, .6, { size: 30, weight: 600 });
+    aRow(gA, [['‖α‖_{1}  =  ' + aR.slice(0, aT).map(r => aF2(r.al)).join(' + ')], ['  =  ' + aF2(r3.norm), HUE.hyp]], RX, 300, [tn, tn + 3.6], { size: 30, weight: 600 });
+    hide(gA, ta - .5, .4);
+    const f = aRow(p, [['margen L1:   ', COL.dim, UI], ['ρ_{f}(x)  =  |f(x)| / ‖α‖_{1}', HUE.hyp]], RX, 390, td, { size: 34, weight: 600 });
+    text(p, '(7.10)', f.end + 24, 388, td, { size: 22, fill: COL.dim });
+    aRing(pl.dg, pl.X(aP[i0][0]), pl.Y(aP[i0][1]), tp);
+    aRow(p, [['punto del anillo:   ', COL.dim, UI], [`${aF2(Math.abs(r3.f[i0]))} / ${aF2(r3.norm)}`], ['  =  ' + aF2(mg[i0]), HUE.hyp]], RX, 452, [tp, tp + 1.2, tp + 5], { size: 30, weight: 600 });
+    // la tira de márgenes de los diez puntos
+    const sp = aStrip(p, 840, 1480, SY, { t0: ta }); sp.set(mg);
+    aTx(p, 'márgenes de los 10 puntos,  y_{i} f(x_{i}) / ‖α‖_{1}', 840, SY - 156, ta, { size: 24, fill: COL.dim, font: UI });
+    const gm = G(p, { o: 0 }); show(gm, ta + 6.4);
+    mk('path', { d: `M${sp.SX(mn)} ${SY + 12}l-9 18h18Z`, fill: HUE.hyp }, gm);
+    aTx(gm, `el menor:  ${aF2(mn)}  =  margen de f sobre la muestra  (7.11)`, 1500, SY + 76, null, { size: 24, fill: HUE.hyp, weight: 600, font: UI, anchor: 'end' });
+    aTx(p, 'SVM (cap. 9):  la misma cuenta, con ‖w‖_{2} en lugar de ‖α‖_{1}', RX, 806, ts, { size: 26, font: UI });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), pl = aPl(p, 100, 664, 58, { t0: null }), r3 = aR[aT - 1];
+    aComb(pl, aR, aT, { o: 1 });
+    T(p, 'Tres rondas: el voto ponderado f', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'El número de cada región es el valor de f.', 800, 280, null, { size: 28, font: UI });
+    aRow(p, [['margen de un punto:   ', COL.chalk, UI], ['|f(x)| / ‖α‖_{1}']], 800, 350, null, { size: 30 });
+    aRow(p, [['‖α‖_{1}  =  ' + aF2(r3.norm)]], 800, 410, null, { size: 30 });
+    aTx(p, 'Tres puntos llevan un anillo blanco y un número.', 800, 490, null, { size: 26, fill: COL.dim, font: UI });
+    S.q1 = aQ1.map((i, k) => { const g = G(pl.dg, { x: pl.X(aP[i][0]), y: pl.Y(aP[i][1]) }); mk('circle', { r: 27, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, g); aHalo(T(g, String(k + 1), { x: 36, y: -30, size: 28, weight: 700 })); return g; });
+    S.q1P = aQ1.map(i => [pl.X(aP[i][0]), pl.Y(aP[i][1])]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-margen', prompt: ['¿Cuál de los tres puntos marcados tiene el menor margen?'],
+    build: pickEls(S.q1.map((el, k) => ({ el, box: [S.q1P[k][0] - 38, S.q1P[k][1] - 38, 76, 76], label: 'punto ' + (k + 1) })), aQ1r,
+      `Ahí |f| vale ${aF2(aQ1f[aQ1r])}, el menor: margen ${aF2(aQ1f[aQ1r])} / ${aF2(aR[aT - 1].norm)} = ${aF2(aQ1f[aQ1r] / aR[aT - 1].norm)}.`,
+      k => `Ahí |f| vale ${aF2(aQ1f[k])}: su margen es ${aF2(aQ1f[k] / aR[aT - 1].norm)}. Otro punto tiene menos.`),
+  }], done) }],
+
+  ['cota', 'La cota por margen', (m) => {
+    const p = panel(0), ts = m('sig'), tx = m('mix'), tl = m('lem'), tb = m('bnd'), tt = m('terms'), tn = m('not'), RX = 810, CXv = v => 240 + (v + 1) / 2 * 440, RYk = k => 400 + k * 58, MY = RYk(3) + 22;
+    aNote(p, 'signos σ sorteados en la página con semilla fija · correlación de cada clasificador del ejemplo con esos signos');
+    aTitle(p, 'La cota por margen: el número de rondas no aparece');
+    aRow(p, [['f̄  =  f / ‖α‖_{1}'], ['        una combinación convexa de clasificadores base:    ', COL.dim, UI], ['f̄ ∈ conv(H)']], 100, 204, [.5, 2.6, 2.6], { size: 30, weight: 600 });
+    // los signos sorteados y la correlación de cada clasificador base
+    const gs = G(p, { o: 0 }); show(gs, ts + 7);
+    aTx(gs, 'σ  =', 100, 292, null, { size: 28, fill: HUE.cx });
+    aSigma.forEach((s, i) => { mk('circle', { cx: 196 + i * 50, cy: 318, r: 6, fill: aHue(aP[i][2]) }, gs); T(gs, s > 0 ? '+' : '−', { x: 196 + i * 50, y: 294, size: 30, fill: HUE.cx, anchor: 'middle', weight: 700, font: MATH }); });
+    const gb = G(p, { o: 0 }); show(gb, ts + 9.6);
+    aTx(gb, 'correlación con σ:   (1/m) ∑_{i} σ_{i} h(x_{i})', 100, 366, null, { size: 22, fill: COL.dim, font: UI });
+    mk('path', { d: `M${CXv(0)} ${RYk(0) - 26}V${MY + 26}`, stroke: COL.faint, 'stroke-width': 2 }, gb);
+    aCor.forEach((c, k) => {
+      aTx(gb, `h_{${k + 1}}`, 130, RYk(k) + 9, null, { size: 26 });
+      mk('rect', { x: Math.min(CXv(0), CXv(c)), y: RYk(k) - 14, width: Math.abs(CXv(c) - CXv(0)), height: 28, fill: k === aCorBest ? HUE.cx : COL.dim }, gb);
+      aTx(gb, aSg(c), 706, RYk(k) + 8, null, { size: 24, fill: k === aCorBest ? HUE.cx : COL.dim, weight: 600 });
+    });
+    // la mezcla
+    const gx = G(p, { o: 0 }); show(gx, tx);
+    mk('path', { d: `M${CXv(aCorMax)} ${RYk(0) - 26}V${MY + 26}`, stroke: HUE.cx, 'stroke-width': 3, 'stroke-dasharray': '6 7', fill: 'none' }, gx);
+    T(gx, 'mezcla', { x: 100, y: MY + 9, size: 24, fill: HUE.hyp, weight: 600 });
+    const dot = put(mk('circle', { r: 12, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 3 }, gx), { x: CXv(0), y: MY });
+    const ro = aTx(gx, '', 100, MY + 70, null, { size: 24, font: UI });
+    const setU = u => { const mu = aMixAt(u), v = mu.reduce((s, w, k) => s + w * aCor[k], 0); put(dot, { x: CXv(v) }); ro._set(`pesos  μ = (${mu.map(aF2).join(', ')}):    correlación ${aSg(v)}`); };
+    setU(0);
+    prog(q => setU(q), tx + .8, tl - tx - 1.2, lin);
+    aTx(p, 'la mezcla nunca pasa de la barra más alta', 100, MY + 122, tx + 3.4, { size: 24, fill: HUE.cx, weight: 600, font: UI });
+    // derecha: lema y cota
+    const lm = aTx(p, 'ℜ̂_{S}( conv(H) )   =   ℜ̂_{S}(H)', RX, 320, tl + 2, { size: 34, weight: 600, fill: HUE.cx });
+    text(p, '(lema 7.4)', RX + lm.getComputedTextLength() + 24, 318, tl + 2, { size: 22, fill: COL.dim });
+    aTx(p, 'con probabilidad ≥ 1 − δ,  para un ρ > 0 fijo:        (7.16)', RX, 430, tb + 2, { size: 24, fill: COL.dim, font: UI });
+    const bn = aRow(p, aBND, RX, 496, tb + 2, { size: 30, weight: 600 }), mid = k => (bn.xs[k] + (bn.xs[k + 1] || bn.end)) / 2;
+    aTx(p, 'fracción con margen ≤ ρ', mid(1), 546, tt + 2.4, { size: 22, fill: COL.chalk, anchor: 'middle', font: UI });
+    aTx(p, 'complejidad de H', mid(3), 584, tt + 6.4, { size: 22, fill: HUE.cx, anchor: 'middle', font: UI });
+    aTx(p, 'confianza', mid(5), 546, tt + 9.6, { size: 22, fill: COL.dim, anchor: 'middle', font: UI });
+    text(p, 'el número de rondas T no aparece', RX, 690, tn + 1, { size: 30, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['crece', 'Los márgenes crecen', (m) => {
+    const p = panel(0), tz = m('zero'), tr = m('run'), tm = m('min'), tt = m('thm'), te = m('exp'), RX = 860, t0 = tr + .4, dur = tt - 1 - t0;
+    aNote(p, `la ejecución del cap. 14, seguida hasta ${aTmax} rondas · márgenes y error calculados en la página`);
+    aTitle(p, 'Con el error ya en cero, los márgenes siguen creciendo');
+    aTx(p, 'márgenes de los 10 puntos', 140, 204, .4, { size: 24, fill: COL.dim, font: UI });
+    const cnt = aTx(p, '', 140, 256, .4, { size: 30, weight: 600, font: UI });
+    const sp = aStrip(p, 140, 740, 410, { r: 9 });
+    aTx(p, 'margen mínimo, ronda a ronda', 200, 520, tr, { size: 24, fill: COL.dim, font: UI });
+    const mc = aMinChart(p, 200, 770, 520, 210, { t0: tr });
+    const ro = aTx(p, '', RX, 330, tr, { size: 34, weight: 600, fill: HUE.hyp, font: UI });
+    const setR = r => { const k = Math.round(r); sp.set(aMgAt(r)); mc.upTo(r); cnt._set(`ronda  T = ${k}`); ro._set(`margen mínimo:   ${aF2(aMin(k))}`); };
+    setR(aT);
+    prog(q => setR(aT + q * (aTmax - aT)), t0, dur, lin);
+    aTx(p, `desde la ronda ${aR.findIndex(r => r.nerr === 0) + 1}:   error empírico = 0`, RX, 250, tz, { size: 28, weight: 600, font: UI, fill: COL.good });
+    aRow(p, [[`ronda ${aT}:  ${aF2(aMin(aT))}`, COL.chalk, UI], [`          ronda ${aTmax}:  ${aF2(aMin(aTmax))}`, COL.chalk, UI]], RX, 394, [tm + 2.6, t0 + dur], { size: 28 });
+    text(p, 'Teorema 7.7', RX, 510, tt + 1.4, { size: 28, fill: HUE.hyp, weight: 600 });
+    aTx(p, 'R̂_{S,ρ}( f̄ )   ≤   2^{T} ∏_{t ≤ T} √( ε_{t}^{1−ρ} (1 − ε_{t})^{1+ρ} )', RX, 576, tt + 1.8, { size: 30, weight: 600 });
+    aTx(p, 'si  ρ < γ  ≤  ½ − ε_{t}  en todas las rondas:', RX, 668, te, { size: 26, font: UI });
+    aTx(p, 'decrece exponencialmente con T', RX, 716, te + 3.6, { size: 28, weight: 600, font: UI, fill: HUE.hyp });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [330, 690, 1050], BW = [300, 300, 400], terms = [aBND[1][0], aBND[3][0], aBND[5][0]];
+    T(p, 'La cota por margen (7.16)', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Los márgenes crecieron: se puede elegir un ρ mayor, y el primer término sigue en 0.', 100, 216, null, { size: 28, font: UI });
+    aTx(p, 'R(f)   ≤', 100, 432, null, { size: 40, weight: 600 });
+    ['+', '+'].forEach((s, k) => aTx(p, s, BX[k] + BW[k] + 30, 432, null, { size: 40, anchor: 'middle', fill: COL.dim }));
+    S.q2 = terms.map((s, k) => { const g = G(p, { x: BX[k], y: 350 }); mk('rect', { x: 0, y: 0, width: BW[k], height: 130, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); aTx(g, s, BW[k] / 2, 80, null, { size: 36, weight: 600, anchor: 'middle' }); T(g, String(k + 1), { x: 14, y: -14, size: 26, fill: COL.dim, weight: 700 }); return g; });
+    S.q2B = BX.map((x, k) => [x, 350, BW[k], 130]);
+    aTx(p, 'Tres términos, numerados del 1 al 3.', 100, 570, null, { size: 26, fill: COL.dim, font: UI });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-termino', prompt: ['¿Qué término se achica cuando se puede elegir un ρ mayor?'],
+    build: pickEls(S.q2.map((el, k) => ({ el, box: S.q2B[k], label: 'término ' + (k + 1) })), 1,
+      'La complejidad de H va dividida por ρ: con un ρ mayor, ese término baja.',
+      k => k ? 'Ese depende solo de δ y de m: ρ no aparece ahí.' : 'Ese ya vale 0 y no puede bajar más. Buscar dónde aparece ρ dividiendo.'),
+  }], done) }],
+
+  ['max', 'El margen máximo', (m) => {
+    const p = panel(0), ty = m('why'), tl = m('lp'), ts = m('sol'), ta = m('ada'), tn = m('no'), te = m('emp'), CX0 = 960, CY0 = 600;
+    aNote(p, 'margen máximo calculado en la página sobre los tres clasificadores del ejemplo · la misma ejecución');
+    aTitle(p, '¿Llega AdaBoost al margen máximo?');
+    const why = aTx(p, 'margen mayor   ⟹   ρ mayor   ⟹   cota (7.16) menor', 100, 216, ty, { size: 30, fill: HUE.hyp, weight: 600, font: UI });
+    hide(why, ts - .5, .4);
+    // izquierda: el programa lineal
+    aTx(p, 'el margen máximo es un programa lineal (§7.3.4):', 100, 300, tl + 5.6, { size: 24, fill: COL.dim, font: UI });
+    aTx(p, 'max_{α}   ρ', 140, 362, tl + 5.6, { size: 34, weight: 600 });
+    aRow(p, [['sujeto a:    ', COL.dim, UI], ['y_{i} ( α · h(x_{i}) )  ≥  ρ'], ['     para todo i', COL.dim, UI]], 140, 424, tl + 6.2, { size: 28, weight: 600 });
+    aTx(p, '∑_{t} α_{t}  =  1,       α_{t}  ≥  0', 277, 480, tl + 6.6, { size: 28, weight: 600 });
+    aRow(p, [['con h_{1}, h_{2}, h_{3}:    ', COL.dim, UI], [`α  =  (${aCol.q.map(aF2).join(', ')})`], [`       ρ_{max}  =  ${aF2(aRhoMax)}`, HUE.hyp]], 100, 570, [ts, ts + 3, ts + 5.2], { size: 28, weight: 600 });
+    // derecha: el margen mínimo de AdaBoost frente al máximo
+    aTx(p, 'margen mínimo de AdaBoost, ronda a ronda', CX0, CY0 - 300, .5, { size: 24, fill: COL.dim, font: UI });
+    const mc = aMinChart(p, CX0, CY0, 520, 250, { t0: .5 }); mc.upTo(aTmax);
+    const gr = G(p, { o: 0 }); show(gr, ts + 5.2);
+    mk('path', { d: `M${CX0 - 16} ${mc.VY(aRhoMax)}H${CX0 + 536}`, stroke: COL.chalk, 'stroke-width': 3, 'stroke-dasharray': '8 7', fill: 'none' }, gr);
+    aHalo(aTx(gr, `ρ_{max} = ${aF2(aRhoMax)}`, CX0 + 20, mc.VY(aRhoMax) - 14, null, { size: 24, weight: 600 }));
+    const ga = G(p, { o: 0 }); show(ga, ta);
+    mk('circle', { cx: mc.CX(aTmax), cy: mc.VY(aMin(aTmax)), r: 12, fill: 'none', stroke: HUE.hyp, 'stroke-width': 4 }, ga);
+    aHalo(aTx(ga, `T = ${aTmax}:  ${aF2(aMin(aTmax))}`, mc.CX(aTmax) + 8, mc.VY(aMin(aTmax)) + 74, null, { size: 24, weight: 600, fill: HUE.hyp, anchor: 'end', font: UI }));
+    aTx(p, 'en general AdaBoost no llega a ρ_{max};   garantizado:  al menos  ρ_{max} / 2', 100, 730, tn, { size: 28, weight: 600, font: UI });
+    aTx(p, 'y maximizar el margen no siempre generaliza mejor en la práctica', 100, 788, te, { size: 26, fill: COL.dim, font: UI });
+  }],
+
+  ['juego', 'El juego', (m) => {
+    const p = panel(0), tma = m('mat'), tr = m('row'), tc = m('col'), tv = m('vn'), te = m('eq'), tk = m('weak'), RX = 720, CC = [330, 410, 490], RY = r => 268 + r * 38, SY = RY(aM) + 16, AY = SY + 50;
+    aNote(p, 'filas = los 10 puntos, columnas = los tres clasificadores del ejemplo · estrategias óptimas calculadas en la página');
+    aTitle(p, 'Boosting como un juego de suma cero');
+    // la matriz de pagos
+    const gh = G(p, { o: 0 }); show(gh, .5);
+    aBase.forEach((h, t) => aTx(gh, `h_{${t + 1}}`, CC[t], 228, null, { size: 26, anchor: 'middle' }));
+    T(gh, 'punto', { x: 262, y: 228, size: 22, fill: COL.dim, anchor: 'end' });
+    aOrd.forEach((i, r) => {
+      const g = G(p, { o: 0 }); show(g, tma + .4 + r * .12, .3);
+      mk('circle', { cx: 250, cy: RY(r), r: 10, fill: aHue(aP[i][2]) }, gh);
+      aMat[i].forEach((v, t) => { mk('rect', { x: CC[t] - 36, y: RY(r) - 17, width: 72, height: 34, fill: v > 0 ? COL.good : COL.bad, 'fill-opacity': v > 0 ? .16 : .42 }, g); T(g, v > 0 ? '+1' : '−1', { x: CC[t], y: RY(r) + 8, size: 22, fill: v > 0 ? COL.good : COL.bad, anchor: 'middle', weight: 600, font: MATH }); });
+    });
+    // jugador de filas: D*(i) por punto, y lo que le deja a cada columna
+    const gd = G(p, { o: 0 }); show(gd, tr + 2);
+    aTx(gd, 'D(i)', 170, 228, null, { size: 24, anchor: 'middle', fill: HUE.rowp });
+    aOrd.forEach((i, r) => aTx(gd, aF2(aDst[i]), 170, RY(r) + 8, null, { size: 22, anchor: 'middle', fill: HUE.rowp }));
+    const gs = G(p, { o: 0 }); show(gs, tr + 4.2);
+    aTx(gs, '∑_{i} D(i) M_{it}', 284, SY + 8, null, { size: 22, anchor: 'end', fill: HUE.rowp });
+    aColSum.forEach((v, t) => aTx(gs, aF2(v), CC[t], SY + 8, null, { size: 24, anchor: 'middle', fill: HUE.rowp, weight: 600 }));
+    // jugador de columnas: la mezcla, y el margen que le deja a cada fila
+    const ga = G(p, { o: 0 }); show(ga, tc + 2);
+    aTx(ga, 'α_{t} / ‖α‖_{1}', 284, AY + 8, null, { size: 22, anchor: 'end', fill: HUE.colp });
+    aCol.q.forEach((v, t) => aTx(ga, aF2(v), CC[t], AY + 8, null, { size: 24, anchor: 'middle', fill: HUE.colp, weight: 600 }));
+    const gm = G(p, { o: 0 }); show(gm, tc + 4);
+    aTx(gm, 'margen', 590, 228, null, { size: 22, anchor: 'middle', fill: HUE.colp, font: UI });
+    aOrd.forEach((i, r) => aTx(gm, aF2(aRowMg[i]), 590, RY(r) + 8, null, { size: 22, anchor: 'middle', fill: HUE.colp }));
+    // derecha
+    aRow(p, [['M_{it}  =  y_{i} h_{t}(x_{i})'], ['        +1 acierta    ·    −1 falla', COL.dim, UI]], RX, 236, tma + 1, { size: 30, weight: 600 });
+    const gp = G(p);
+    aRow(gp, [['filas:   ', HUE.rowp, UI], ['elige puntos, con una distribución D', COL.chalk, UI]], RX, 316, tr, { size: 26, weight: 600 });
+    aRow(gp, [['columnas:   ', HUE.colp, UI], ['elige clasificadores, con pesos α_{t} / ‖α‖_{1}', COL.chalk, UI]], RX, 366, tc, { size: 26, weight: 600 });
+    hide(gp, tv - .4, .3);
+    text(p, 'Teorema 7.11 (minimax de von Neumann), aplicado a M:', RX, 316, tv, { size: 26, fill: HUE.hyp, weight: 600 });
+    aRow(p, [['min_{D} max_{t} ∑_{i} D(i) M_{it}', HUE.rowp], ['   =   '], ['max_{α} min_{i} ∑_{t} (α_{t} / ‖α‖_{1}) M_{it}', HUE.colp], ['     (7.24)', COL.dim, UI]], RX, 380, tv + 2.6, { size: 25, weight: 600 });
+    const eq = aRow(p, [['2γ*', HUE.rowp], ['   =   '], ['ρ*', HUE.colp], [`   =   ${aF2(aRhoMax)}`, HUE.hyp]], RX, 480, [te, te, te, te + 8], { size: 40, weight: 600 });
+    text(p, '(7.25)', eq.end + 24, 476, te, { size: 22, fill: COL.dim });
+    aTx(p, 'γ*: la mejor ventaja garantizada    ·    ρ*: el margen máximo', RX, 532, te + 2, { size: 22, fill: COL.dim, font: UI });
+    // el valor del juego, marcado en la matriz
+    const hl = G(p, { o: 0 }); show(hl, te + 8);
+    mk('rect', { x: CC[0] - 44, y: SY - 18, width: CC[2] - CC[0] + 88, height: 36, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, hl);
+    mk('rect', { x: 554, y: RY(0) - 19, width: 72, height: RY(aOrd.findIndex(i => aRowMg[i] > aRhoMax + 1e-6)) - RY(0), fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, hl);
+    aTx(p, 'aprendizaje débil  (γ* > 0)    ⟺    margen positivo  (ρ* > 0)', RX, 650, tk + 1, { size: 28, fill: HUE.hyp, weight: 600, font: UI });
+    aTx(p, 'una condición fuerte: la muestra tiene que ser separable', RX, 706, tk + 9, { size: 26, font: UI });
+  }],
+
+  ['ruido', 'Ruido y regularización', (m) => {
+    const p = panel(0), tf = m('flip'), tw_ = m('w'), tfr = m('front'), tst = m('stop'), trg = m('reg'), tpr = m('pros'), tco = m('cons'), RX = 800, rn = aRn[aTmax - 1];
+    aNote(p, `la muestra del cap. 14 con una etiqueta cambiada · ${aTmax} rondas de AdaBoost calculadas en la página · área = peso`);
+    aTitle(p, 'El punto débil: el ruido');
+    const pl = aMain(p), c0 = aComb(pl, aR, aT, { lab: false, flat: true });
+    show(c0.g, .5); draw(c0.fr, .6, .8);
+    aRing(pl.dg, pl.X(aP[aNz][0]), pl.Y(aP[aNz][1]), tf, 30);
+    tw(pl.dots[aNz], { c_fill: aHue(aNoisy[aNz][2]) }, tf + 1, .5);
+    hide(c0.g, tw_, .6); hide(c0.fr, tw_, .6);
+    pl.size(rn.Dn, tw_ + 3, 1.6);
+    const c1 = aComb(pl, aRn, aTmax, { lab: false, flat: true });
+    show(c1.g, tfr, .8); draw(c1.fr, tfr + .2, 1.4);
+    aRow(p, [['una etiqueta cambiada', COL.chalk, UI], [`        peso tras ${aTmax} rondas:   `, COL.dim, UI], [`${aF2(1 / aM)} → ${aF2(rn.Dn[aNz])}`, COL.bad]], RX, 236, [tf, tw_ + 3, tw_ + 3], { size: 26, weight: 600 });
+    aRow(p, [['freno 1:   ', COL.dim, UI], ['detenerse antes  (T por validación cruzada)', COL.chalk, UI]], RX, 340, tst + 2.4, { size: 28, weight: 600 });
+    aRow(p, [['freno 2:   ', COL.dim, UI], ['regularización L1', COL.chalk, UI], ['      (7.26)', COL.dim, UI]], RX, 420, trg, { size: 28, weight: 600 });
+    aRow(p, [['G(ᾱ)  =  (1/m) ∑_{i} exp( −y_{i} f(x_{i}) )'], ['   +   λ ‖ᾱ‖_{1}', HUE.cx]], RX + 40, 486, [trg + 2, trg + 4.4], { size: 30, weight: 600 });
+    aRow(p, [['a favor:   ', COL.good, UI], ['simple  ·  O(mN) por ronda con stumps  ·  con garantías', COL.chalk, UI]], RX, 630, tpr + 1, { size: 26, weight: 600 });
+    aRow(p, [['en contra:   ', COL.bad, UI], ['elegir T y los clasificadores base  ·  sensible al ruido', COL.chalk, UI]], RX, 700, tco, { size: 26, weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['La cota por dimensión VC crece con T; aun así, el error de prueba puede seguir bajando.', 'w1'], ['Margen L1 de un punto:  |f(x)| / ‖α‖_{1},  la confianza del voto normalizado.', 'w2'],
+      ['La cota por margen no depende de T, y AdaBoost agranda los márgenes tras separar la muestra.', 'w3'], ['Minimax: aprendizaje débil  ⟺  margen positivo.  Punto débil: el ruido.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['La cota de la dimensión VC de las combinaciones no cambia con el número de rondas.'], ans: ['f'], why: 'Crece con las rondas, como T por logaritmo de T. Por eso sugiere sobreajuste.' },
+      { parts: ['El margen L1 de un punto es el valor absoluto de f dividido por la suma de los pesos alfa.'], ans: ['v'], why: 'Es el voto normalizado: con clasificadores de valores más o menos uno, queda entre 0 y 1.' },
+      { parts: ['En la cota por margen aparece el número de rondas.'], ans: ['f'], why: 'Aparecen el margen ro, el tamaño de la muestra y la complejidad del conjunto base. T, no.' },
+      { parts: ['Con el error empírico en cero, sumar rondas ya no cambia los márgenes.'], ans: ['f'], why: `En el ejemplo, el margen mínimo sube de ${aF2(aMin(aT))} a ${aF2(aMin(aTmax))} entre las rondas ${aT} y ${aTmax}.` },
+      { parts: ['El aprendizaje débil equivale a que exista una combinación con margen positivo.'], ans: ['v'], why: 'Es el teorema minimax: el margen máximo es el doble de la mejor ventaja garantizada.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maxent condicional y regresión logística</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 27, title: 'Maxent condicional y regresión logística', minutes: 6, language: 'es', next: '../ch28/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 26) ---------- */
+// salmón = clase 1 o +1 · azul = clase 2 o −1 · verde menta = clase 3 · ámbar = el modelo: p_w, sus pesos, la frontera y lo que se elige ·
+// violeta = la restricción (λ), la regularización y los términos de complejidad · rojo = error o restricción que no se cumple. No se usa verde para aciertos.
+const HUE = { c: [COL.nat, COL.whole, COL.irr], pos: COL.nat, neg: COL.whole, hyp: COL.task, cx: COL.real, bad: COL.bad };
+const aHue = y => HUE.c[y], aHue2 = v => v > 0 ? HUE.pos : HUE.neg;
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'p_{w}', 'D^{m}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃→←↦′″⌊⌋½∇∝])/;                                // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aSetA = (e, o) => { Object.entries(o).forEach(([k, v]) => e.setAttribute(k, typeof v === 'number' ? v.toFixed(1) : v)); return e; };
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aDot = (u, v) => u.reduce((s, a, i) => s + a * v[i], 0);
+const aArg = v => v.reduce((b, u, i) => u > v[b] ? i : b, 0);
+const aN1 = w => aSum(w.map(Math.abs)), aN2q = w => aSum(w.map(v => v * v)), aNul = w => w.filter(v => v === 0).length;
+const aSoft = s => { const mx = Math.max(...s), e = s.map(v => Math.exp(v - mx)), z = aSum(e); return e.map(v => v / z); };   // exponencial y normalización
+const aLam = .05;                                                                        // el λ de todo el capítulo
+// Residuo de optimalidad de min_w λ‖w‖₁ + L(w) (o λ‖w‖₂² + L(w)), con g = ∇L(w): el subgradiente de menor norma, coordenada por coordenada.
+// L1: g_j + λ sgn(w_j) si w_j ≠ 0; lo que |g_j| sobresale de λ si w_j = 0. L2: g_j + 2λ w_j.
+const aRes = (w, g, lam, l2) => Math.max(...w.map((v, j) => Math.abs(l2 ? g[j] + 2 * lam * v : v !== 0 ? g[j] + lam * Math.sign(v) : Math.max(0, Math.abs(g[j]) - lam))));
+// Descenso de gradiente con paso fijo eta desde w = 0, hasta que el residuo baja de tol. Con L1, cada paso termina con el umbral suave (gradiente proximal).
+// path guarda algunos iterados [t, w] (índices en progresión geométrica) y el último.
+const aProx = (gf, n, lam, eta, { l2 = false, tol = 1e-11, max = 400000 } = {}) => {
+  let w = Array(n).fill(0), it = 0, res = Infinity, next = 1; const path = [[0, w]];
+  for (; it < max; it++) {
+    const g = gf(w);
+    res = aRes(w, g, lam, l2);
+    if (res < tol) break;
+    w = l2 ? w.map((v, j) => v - eta * (g[j] + 2 * lam * v)) : w.map((v, j) => { const u = v - eta * g[j]; return Math.abs(u) <= eta * lam ? 0 : u - Math.sign(u) * eta * lam; });
+    if (it + 1 === next) { path.push([it + 1, w]); next = Math.max(next + 1, Math.ceil(next * 1.15)); }
+  }
+  if (path[path.length - 1][0] !== it) path.push([it, w]);
+  return { w, it, res, path };
+};
+// Estado en la fracción q (0 a 1) de un recorrido guardado: interpola entre iterados vecinos.
+const aAtQ = (path, q) => { const u = Math.max(0, Math.min(1, q)) * (path.length - 1), k = Math.min(path.length - 2, Math.floor(u)), f = u - k, a = path[k], b = path[k + 1]; return { t: Math.round(a[0] + (b[0] - a[0]) * f), w: a[1].map((v, j) => v + (b[1][j] - v) * f) }; };
+
+// --- Tres clases: la muestra del cap. 19, 18 puntos ilustrativos en un marco de 10 × 8. [x1, x2, clase], con las clases 0, 1, 2 (en pantalla: 1, 2, 3).
+const aW = 10, aH = 8, aKc = 3;
+const aP = [[1, 1.6, 0], [1.8, 3.4, 0], [2.6, .9, 0], [3.2, 2.4, 0], [4.2, 3.6, 0], [3.9, 1.3, 0], [7.6, 2.3, 0],
+  [6.2, 1, 1], [6.6, 3.3, 1], [8.6, 1.2, 1], [9, 3, 1], [8.3, 3.9, 1], [6.9, .8, 1],
+  [1.6, 6.6, 2], [3.4, 5.6, 2], [4.8, 7, 2], [6.2, 6, 2], [8.2, 6.8, 2]];
+const aM = aP.length;
+// Características por clase (§13.5.2): Φ(x, y) tiene c bloques y solo el de la clase y es no nulo e igual a Γ(x). Aquí Γ(x) = (x1 − 5, x2 − 4, 1): N = 9.
+// w se guarda como un vector de 9 pesos, w = (w_1, w_2, w_3); aBlk lo parte en sus tres bloques. w · Φ(x, y) = w_y · Γ(x).
+const aNw = 9, aGam = q => [q[0] - aW / 2, q[1] - aH / 2, 1];
+const aBlk = w => [0, 1, 2].map(y => w.slice(3 * y, 3 * y + 3));
+const aSc = (w, q) => { const f = aGam(q); return aBlk(w).map(b => aDot(b, f)); };       // las tres puntuaciones w · Φ(x, y)
+const aPr = (w, q) => aSoft(aSc(w, q));                                                  // p_w[·|x] (13.9)
+// Pérdida logarítmica media: −(1/m) Σ log p_w[y_i|x_i] = (1/m) Σ log Σ_y exp(w·Φ(x_i, y) − w·Φ(x_i, y_i)), el segundo término de (13.10).
+const aNll = (w, pts = aP) => -aSum(pts.map(q => Math.log(aPr(w, q)[q[2]]))) / pts.length;
+// Su gradiente es la diferencia de promedios de la restricción (13.2): E_{x∼D̂₁, y∼p_w[·|x]}[Φ(x, y)] − E_{(x,y)∼D̂}[Φ(x, y)], coordenada por coordenada.
+const aDev = (w, pts = aP) => { const g = Array(aNw).fill(0); pts.forEach(q => { const pr = aPr(w, q), f = aGam(q); for (let y = 0; y < aKc; y++) for (let j = 0; j < 3; j++) g[3 * y + j] += (pr[y] - (q[2] === y ? 1 : 0)) * f[j] / pts.length; }); return g; };
+const aDevMax = w => Math.max(...aDev(w).map(Math.abs));                                // la norma infinito de esa diferencia
+const aEntC = w => aSum(aP.map(q => -aSum(aPr(w, q).map(v => v > 0 ? v * Math.log(v) : 0)))) / aM;   // entropía condicional respecto de D̂₁
+const aJ3 = (w, lam = aLam) => lam * aN1(w) + aNll(w);                                   // el objetivo (13.10)
+const aErr3 = w => aP.filter(q => aArg(aSc(w, q)) !== q[2]).length;                      // errores de la predicción (13.13) en la muestra
+// Paso: 1/L con L ≥ ½ max‖Γ(x)‖² en el marco (la hessiana de log Σ exp tiene valores propios ≤ ½).
+const aL3 = (aW * aW / 4 + aH * aH / 4 + 1) / 2;
+const aRun = aProx(aDev, aNw, aLam, 1 / aL3), aWs = aRun.w;                               // solución L1 de (13.10)
+const aRun2 = aProx(aDev, aNw, aLam, 1 / (aL3 + 2 * aLam), { l2: true }), aW2s = aRun2.w; // solución con λ‖w‖₂² (§13.8)
+const aZ0 = Array(aNw).fill(0), aDev0 = aDevMax(aZ0), aDevS = aDevMax(aWs), aEnt0 = aEntC(aZ0), aEntS = aEntC(aWs);
+const aGap = aEntS - aJ3(aWs);                                                           // dualidad (teorema 13.1): con previa uniforme, H̄(p*) = λ‖ŵ‖₁ + pérdida
+// Punto de prueba que se pasea por el plano (beat del problema) y dos puntos de la muestra para ver exponencial y normalización.
+const aTour = [[2, 1.5], [5.4, 2], [4.9, 3.9]], aShowI = [3, 16];
+// Comprobación 1: tres puntos y sus puntuaciones; la mayor probabilidad de la clase 1 no está donde su puntuación es mayor.
+const aQ1 = [[0, 4.5], [5, 2], [2, 1]], aQ1s = aQ1.map(q => aSc(aWs, q)), aQ1p = aQ1.map(q => aPr(aWs, q)[0]), aQ1r = aArg(aQ1p), aQ1top = aArg(aQ1s.map(s => s[0]));
+// Cotas (§13.6): de qué depende el término de complejidad. Teorema 13.2: factor c. Teorema 13.3: c √(2 log(2cN)).
+const aCs = [3, 6, 12], aNs = [9, 900, 90000], aLogT = (c, n) => Math.sqrt(2 * Math.log(2 * c * n));
+const aRatC = aCs.map(c => c / aCs[0]), aRatN = aNs.map(n => aLogT(aKc, n) / aLogT(aKc, aNs[0]));
+
+// --- Dos clases: la muestra no separable del cap. 10, 14 puntos ilustrativos en un marco de 10.5 × 8. [x1, x2, etiqueta ±1].
+const aBW = 10.5, aBH = 8;
+const aB = [[5, 6, 1], [9.5, 5.5, 1], [3, 6.5, 1], [9.5, 2.5, 1], [6.5, 7, 1], [6.5, 5.5, 1], [1, 4.5, -1], [1.5, 2.5, -1], [7.5, .5, -1], [2.5, 4.5, -1], [4, 3, -1], [6.5, 1.5, -1], [1, 5.5, 1], [7.5, 3.5, -1]];
+const aMb = aB.length;
+// Ψ(x) = Φ(x, +1) − Φ(x, −1) (§13.7.1). Aquí Ψ(x) = (x1 − 5.25, x2 − 4, 1).
+const aPsi = q => [q[0] - aBW / 2, q[1] - aBH / 2, 1];
+const aU = (w, q) => aDot(w, aPsi(q));                                                   // la puntuación w · Ψ(x)
+const aSig = u => 1 / (1 + Math.exp(-u));                                                // función logística (figura 13.1)
+const aLg = u => Math.log(1 + Math.exp(-u)), aLg2 = u => Math.log2(1 + Math.exp(-u));    // pérdida logística, natural y en base 2
+const aLossB = w => aSum(aB.map(q => aLg(q[2] * aU(w, q)))) / aMb;                       // el segundo término de (13.16)
+const aGrB = w => { const g = [0, 0, 0]; aB.forEach(q => { const f = aPsi(q), s = aSig(-q[2] * aU(w, q)); f.forEach((v, j) => g[j] -= q[2] * v * s / aMb); }); return g; };
+const aJB = (w, lam = aLam) => lam * aN1(w) + aLossB(w);                                 // el objetivo (13.16)
+const aErrB = w => aB.filter(q => q[2] * aU(w, q) <= 0).length;
+const aLB = (aBW * aBW / 4 + aBH * aBH / 4 + 1) / 4;                                     // L ≥ ¼ max‖Ψ(x)‖²
+const aRunB = aProx(aGrB, 3, aLam, 1 / aLB), aWb = aRunB.w;                              // regresión logística con L1 (13.16)
+const aUs = aB.map(q => q[2] * aU(aWb, q));                                              // y_i · w · Ψ(x_i) en la solución
+const aLossB0 = aLossB([0, 0, 0]), aLossBs = aLossB(aWb);
+// Comprobación 2: tres puntos de la muestra: uno bien clasificado y cerca de la recta, el de peor puntuación, y el más lejano bien clasificado.
+const aIdxB = aB.map((_, i) => i);
+const aQ2 = [aIdxB.filter(i => aUs[i] >= .5).reduce((b, i) => aUs[i] < aUs[b] ? i : b), aIdxB.reduce((b, i) => aUs[i] < aUs[b] ? i : b), aIdxB.reduce((b, i) => aUs[i] > aUs[b] ? i : b)];
+const aQ2l = aQ2.map(i => aLg(aUs[i])), aQ2r = aArg(aQ2l);
+const aF1 = v => String(Math.round(v * 10) / 10).replace('-', '−');
+const aF2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2).replace('-', '−');
+const aF3 = v => (Math.abs(v) < .0005 ? 0 : v).toFixed(3).replace('-', '−');
+const aVec = w => '( ' + w.map(v => v === 0 ? '0' : aF2(v)).join(',  ') + ' )';
+const aInt = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');
+/* aMATH:end */
+
+// Región del argmax de la clase y (cap. 19): el marco recortado por los semiplanos w_y · Γ(x) ≥ w_l · Γ(x). Devuelve el polígono; aInner, sus lados interiores.
+const aClip = (poly, a, b, c) => { const res = [], v = q => a * q[0] + b * q[1] + c; poly.forEach((p0, i) => { const q = poly[(i + 1) % poly.length], vp = v(p0), vq = v(q); if (vp >= 0) res.push(p0); if ((vp >= 0) !== (vq >= 0)) { const t = vp / (vp - vq); res.push([p0[0] + t * (q[0] - p0[0]), p0[1] + t * (q[1] - p0[1])]); } }); return res; };
+const aRegion = (Wb, y) => Wb.reduce((poly, w, l) => l === y ? poly : aClip(poly, Wb[y][0] - w[0], Wb[y][1] - w[1], (Wb[y][2] - w[2]) - (Wb[y][0] - w[0]) * aW / 2 - (Wb[y][1] - w[1]) * aH / 2), [[0, 0], [aW, 0], [aW, aH], [0, aH]]);
+const aInner = poly => poly.map((p0, i) => [p0, poly[(i + 1) % poly.length]]).filter(([a, b]) => !((Math.abs(a[0] - b[0]) < 1e-9 && (a[0] < 1e-9 || a[0] > aW - 1e-9)) || (Math.abs(a[1] - b[1]) < 1e-9 && (a[1] < 1e-9 || a[1] > aH - 1e-9))));
+
+let aClipN = 0;
+// Plano de tres clases (cap. 19), en un marco de aW × aH. pl.bg = regiones, pl.lg = fronteras, pl.dg = puntos, pl.tg = marcas sobre los puntos.
+const aPl3 = (p, ox, oy, sc, { t0 = .4, ax = true, r = sc > 50 ? 11 : 6 } = {}) => {
+  const X = x => ox + x * sc, Y = y => oy - y * sc, g = G(p, { o: t0 == null ? 1 : 0 }), pl = { X, Y, sc, g };
+  pl.bg = G(g);
+  mk('rect', { x: ox, y: oy - aH * sc, width: aW * sc, height: aH * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  if (ax) { aTx(g, 'x_{1}', X(aW), Y(0) + 28, null, { size: 22, fill: COL.dim, anchor: 'end' }); aTx(g, 'x_{2}', X(0) - 12, Y(aH) + 20, null, { size: 22, fill: COL.dim, anchor: 'end' }); }
+  pl.lg = G(g); pl.dg = G(g); pl.tg = G(g);
+  pl.dots = aP.map(q => put(mk('circle', { r, fill: aHue(q[2]), stroke: COL.board, 'stroke-width': 2 }, pl.dg), { x: X(q[0]), y: Y(q[1]) }));
+  if (t0 != null) show(g, t0);
+  return pl;
+};
+const aLeg = (p, x, y, t0 = .5) => { const g = G(p, { o: 0 }); [0, 1, 2].forEach(l => aSq(g, x + l * 150, y, aHue(l), `clase ${l + 1}`, { dot: true })); show(g, t0); return g; };   // leyenda de las tres clases
+// Regiones de la predicción argmax_y w_y · Γ(x), redibujables: rg.set(bloques). Cada región con el color de su clase; las fronteras, en ámbar. Con w = 0 no dibuja nada.
+const aRegs = (pl, { tint = .2, sw = 4 } = {}) => {
+  const fs = [0, 1, 2].map(y => mk('path', { fill: aHue(y), 'fill-opacity': tint }, pl.bg)), bd = mk('path', { stroke: HUE.hyp, 'stroke-width': sw, 'stroke-linecap': 'round', fill: 'none' }, pl.lg);
+  const pt = q => pl.X(q[0]).toFixed(1) + ' ' + pl.Y(q[1]).toFixed(1);
+  const set = Wb => { const zero = Wb.every(w => w.every(v => v === 0)); let d = ''; Wb.forEach((_, y) => { const poly = zero ? [] : aRegion(Wb, y); fs[y].setAttribute('d', poly.length < 3 ? '' : 'M' + poly.map(pt).join('L') + 'Z'); if (poly.length >= 3) aInner(poly).forEach(([a, b]) => { d += `M${pt(a)}L${pt(b)}`; }); }); bd.setAttribute('d', d); };
+  return { fs, bd, set };
+};
+// Tres barras, una por clase, sobre una línea de base: hacia arriba si el valor es positivo y hacia abajo si es negativo, con su número.
+// bs.set(v, u): fija los valores, con u pixeles por unidad · labs: rótulo de cada barra, a labY bajo la base.
+const aBarsV = (p, x0, y0, { bw = 60, gap = 24, u = 100, size = 24, labs = null, labY = 36, t0 = null } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), bx = l => x0 + l * (bw + gap), xe = bx(aKc - 1) + bw;
+  mk('path', { d: `M${x0 - 12} ${y0}H${xe + 12}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  const rs = [0, 1, 2].map(l => mk('rect', { x: bx(l), y: y0, width: bw, height: 0, fill: aHue(l) }, g));
+  const ns = [0, 1, 2].map(l => aTx(g, '', bx(l) + bw / 2, y0, null, { size, anchor: 'middle', weight: 600 }));
+  if (labs) labs.forEach((s, l) => aTx(g, s, bx(l) + bw / 2, y0 + labY, null, { size: 22, fill: aHue(l), anchor: 'middle' }));
+  if (t0 != null) show(g, t0);
+  return { g, bx, xe, set: (v, uu = u, fmt = aF2) => v.forEach((s, l) => { const hh = Math.abs(s) * uu; aSetA(rs[l], { y: s >= 0 ? y0 - hh : y0, height: hh }); ns[l]._set(fmt(s)); put(ns[l], { y: s >= 0 ? y0 - hh - 10 : y0 + hh + size + 2 }); }) };
+};
+// Una distribución chica por punto de la muestra: tres barras angostas y, arriba, un punto del color de la clase verdadera. Una fila por clase.
+// mn.dots = los puntos (visibles desde el inicio), mn.cells = los recuadros con sus barras (ocultos). mn.set(lista de distribuciones).
+const aMinis = (p, x0, y0, { dx = 80, dy = 150, u = 100, bw = 16 } = {}) => {
+  const seen = [0, 0, 0], mn = { dots: [], cells: [], bars: [] };
+  aP.forEach(q => {
+    const k = q[2], x = x0 + (seen[k]++) * dx, y = y0 + k * dy, g = G(p, { o: 0 });
+    mn.dots.push(mk('circle', { cx: x + 28, cy: y - u - 18, r: 8, fill: aHue(k) }, p));
+    mk('rect', { x: x - 6, y: y - u - 4, width: 68, height: u + 4, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+    mn.bars.push([0, 1, 2].map(l => mk('rect', { x: x + l * (bw + 4), width: bw, fill: aHue(l) }, g)));
+    mn.cells.push(g);
+  });
+  mn.set = ps => ps.forEach((pr, i) => pr.forEach((v, l) => aSetA(mn.bars[i][l], { y: y0 + aP[i][2] * dy - v * u, height: v * u })));
+  return mn;
+};
+// Plano de dos clases (cap. 10) en un marco de aBW × aBH, con el mapa de calor de p_w[+1|x] por debajo (salmón sobre ½, azul bajo ½; más intenso = más
+// lejos de ½) y la recta w · Ψ(x) = 0 en ámbar. pl.set(w) redibuja el mapa y la recta; pl.hg y pl.lg son sus grupos (empiezan visibles). pl.tg = marcas.
+const aPl2 = (p, ox, oy, sc, { t0 = .4, nx = 42, ny = 32 } = {}) => {
+  const X = x => ox + x * sc, Y = y => oy - y * sc, id = 'aclip' + (aClipN++), pl = { X, Y, sc }, cw = aBW * sc / nx, chh = aBH * sc / ny, cs = [], ctr = [];
+  mk('rect', { x: ox, y: oy - aBH * sc, width: aBW * sc, height: aBH * sc }, mk('clipPath', { id }, mk('defs', {}, p)));
+  pl.hg = G(p);
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) { cs.push(mk('rect', { x: (ox + j * cw).toFixed(1), y: (oy - aBH * sc + i * chh).toFixed(1), width: cw.toFixed(1), height: chh.toFixed(1), 'fill-opacity': 0, 'shape-rendering': 'crispEdges' }, pl.hg)); ctr.push([(j + .5) * aBW / nx, aBH - (i + .5) * aBH / ny]); }
+  const fr = put(mk('rect', { x: ox, y: oy - aBH * sc, width: aBW * sc, height: aBH * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, p), { o: t0 == null ? 1 : 0 });
+  const cg = mk('g', { 'clip-path': `url(#${id})` }, p); pl.lg = G(cg);
+  const ln = mk('path', { stroke: HUE.hyp, 'stroke-width': 4.5, fill: 'none' }, pl.lg);
+  pl.dg = G(p, { o: t0 == null ? 1 : 0 }); pl.tg = G(p);
+  pl.dots = aB.map(q => mk('circle', { cx: X(q[0]), cy: Y(q[1]), r: sc > 50 ? 10 : 7, fill: aHue2(q[2]), stroke: COL.board, 'stroke-width': 2 }, pl.dg));
+  if (t0 != null) { show(fr, t0); show(pl.dg, t0); }
+  pl.set = w => {
+    cs.forEach((c, k) => { const v = 2 * aSig(aU(w, ctr[k])) - 1; c.setAttribute('fill', v > 0 ? HUE.pos : HUE.neg); c.setAttribute('fill-opacity', Math.min(.6, Math.abs(v) * .6).toFixed(3)); });
+    const n2 = w[0] * w[0] + w[1] * w[1];
+    if (n2 < 1e-12) { ln.setAttribute('d', ''); return; }
+    const cx = aBW / 2 - w[2] * w[0] / n2, cy = aBH / 2 - w[2] * w[1] / n2, k = 30 / Math.sqrt(n2);
+    ln.setAttribute('d', `M${X(cx - w[1] * k).toFixed(1)} ${Y(cy + w[0] * k).toFixed(1)}L${X(cx + w[1] * k).toFixed(1)} ${Y(cy - w[0] * k).toFixed(1)}`);
+  };
+  return pl;
+};
+const aLeg2 = (p, x, y, t0 = .5) => { const g = G(p, { o: 0 }); aSq(g, x, y, HUE.pos, 'y = +1', { dot: true }); aSq(g, x + 140, y, HUE.neg, 'y = −1', { dot: true }); show(g, t0); return g; };
+// Gráfica de funciones de una variable (cap. 26): marco con esquina superior izquierda en (x0, y0) y curvas recortadas al marco (gp.gl).
+// gp.fn(f, attrs) traza u ↦ f(u) · xl: rótulo del eje horizontal.
+const aGPl = (p, x0, y0, W, HH, w0, w1, v0, v1, t0, wt, vt, { xl = 'u', fmt = aF1 } = {}) => {
+  const g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), WX = w => x0 + (w - w0) / (w1 - w0) * W, VY = v => y0 + HH - (v - v0) / (v1 - v0) * HH;
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: W, height: HH, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  mk('path', { d: `M${WX(0).toFixed(1)} ${y0}v${HH}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  wt.forEach(v => T(g, String(v).replace('-', '−'), { x: WX(v), y: y0 + HH + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+  vt.forEach(v => T(g, fmt(v), { x: x0 - 12, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+  aTx(g, xl, x0 + W, y0 + HH + 68, null, { size: 24, fill: COL.dim, anchor: 'end' });
+  mk('rect', { x: x0, y: y0, width: W, height: HH }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  const fn = (f, attrs) => { let d = ''; for (let k = 0; k <= 240; k++) { const w = w0 + (w1 - w0) * k / 240; d += (k ? 'L' : 'M') + WX(w).toFixed(1) + ' ' + VY(Math.min(v1 + 1, f(w))).toFixed(1); } return put(mk('path', { d, fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round', ...attrs }, gl), { o: 0 }); };
+  return { g, gl, WX, VY, fn };
+};
+// Los nueve pesos como barras, en tres bloques (uno por clase, con su color): hacia arriba si el peso es positivo. Un peso exactamente nulo va con un aro.
+const aWRow = (p, x0, yb, { u = 50, bw = 22, gap = 6, blk = 26 } = {}) => {
+  const bx = k => x0 + k * (bw + gap) + Math.floor(k / 3) * blk, g = G(p);
+  mk('path', { d: `M${x0 - 8} ${yb}H${bx(8) + bw + 8}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  const bs = aZ0.map((_, k) => mk('rect', { x: bx(k), width: bw, fill: aHue(Math.floor(k / 3)) }, g));
+  const zs = aZ0.map((_, k) => mk('circle', { cx: bx(k) + bw / 2, cy: yb, r: 8, fill: COL.board, stroke: COL.chalk, 'stroke-width': 3 }, g));
+  return { g, bx, bw, set: w => w.forEach((v, k) => { const hh = v === 0 ? 0 : Math.max(4, Math.abs(v) * u); aSetA(bs[k], { y: v > 0 ? yb - hh : yb, height: hh }); zs[k].style.display = v === 0 ? '' : 'none'; }) };
+};
+// Barra que crece desde la base hasta la altura hh, con un rótulo arriba y otro abajo.
+const aUp = (p, x, yb, bw, hh, col, top, low, t0) => {
+  const e = mk('rect', { x, y: yb, width: bw, height: 0, fill: col }, p);
+  prog(q => aSetA(e, { y: yb - hh * q, height: hh * q }), t0, .7);
+  aTx(p, top, x + bw / 2, yb - hh - 10, t0 + .5, { size: 24, fill: col, anchor: 'middle', weight: 700 });
+  aTx(p, low, x + bw / 2, yb + 30, t0, { size: 22, fill: COL.dim, anchor: 'middle' });
+};
+// Recuadro numerado de una comprobación (los tres mosaicos de pickEls).
+const aCard = (p, x, y, w, hh, n) => { const g = G(p, { x, y }); mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); mk('circle', { cx: w - 40, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(n), { x: w - 40, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' }); return g; };
+const aLerp = (a, b, q) => a.map((v, j) => v + (b[j] - v) * q);
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 790;
+const NOTE3 = `datos ilustrativos: muestra del cap. 19 (m = ${aM}) · Γ(x) = (x_{1} − 5, x_{2} − 4, 1) · λ = ${aLam} · todo se calcula en la página`;
+const NOTE2 = `datos ilustrativos: muestra del cap. 10 (m = ${aMb}) · Ψ(x) = (x_{1} − 5.25, x_{2} − 4, 1) · λ = ${aLam} · todo se calcula en la página`;
+const aQ1why = ['Tiene la mayor puntuación, pero la clase 3 le queda cerca: se reparte.', 'La clase 2 le queda muy cerca: la probabilidad se reparte entre las dos.', ''];
+const aQ2why = ['Está bien clasificado: su pérdida es menor que la de un error.', '', 'Está bien clasificado y lejos de la recta: su pérdida es casi nula.'];
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 3 · Capítulo 27', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Maxent condicional y regresión logística', { x: 800, y: 450, size: 56, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Cómo aprender, además de la clase, la probabilidad de cada clase.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['prob', 'El problema', (m) => {
+    const p = panel(0), tc = m('conf'), tp = m('p'), tm = m('move'), tf = m('feat');
+    aNote(p, `datos ilustrativos: la muestra de tres clases del cap. 19 (m = ${aM}) · el modelo es el que se ajusta en este capítulo, con λ = ${aLam} · todo se calcula en la página`);
+    aTitle(p, 'El problema: una probabilidad por clase');
+    const pl = aPl3(p, 100, 700, 62), rg = aRegs(pl); rg.set(aBlk(aWs)); aLeg(p, 100, 186);
+    aRow(p, [['un clasificador:    ', COL.chalk, UI, 26], ['x  ↦  ŷ(x)'], ['      una clase', COL.dim, UI, 24]], RX, 250, .5, { size: 30, weight: 600 });
+    aRow(p, [['ahora:    ', COL.chalk, UI, 26], ['x  ↦  p[·|x]', HUE.hyp], ['      una probabilidad por clase', COL.dim, UI, 24]], RX, 310, tp, { size: 30, weight: 600 });
+    const bs = aBarsV(p, RX + 40, 650, { bw: 70, gap: 30, u: 250, labs: ['p[1|x]', 'p[2|x]', 'p[3|x]'], t0: tp });
+    const ring = mk('circle', { r: 18, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, pl.tg);
+    const lab = aTx(p, '', RX + 400, 470, .5, { size: 28, weight: 700, font: UI }), ask = aTx(p, '¿con cuánta confianza?', RX + 400, 520, tc, { size: 26, fill: COL.dim, font: UI }), cf = aTx(p, '', RX + 400, 520, tp, { size: 26, font: UI });
+    hide(ask, tp - .3, .3);
+    const setX = q => { aSetA(ring, { cx: pl.X(q[0]), cy: pl.Y(q[1]) }); const pr = aPr(aWs, q), b = aArg(pr); bs.set(pr); lab._set(`predicción:  clase ${b + 1}`); lab.setAttribute('fill', aHue(b)); cf._set(`su probabilidad:  ${aF2(pr[b])}`); };
+    setX(aTour[0]);
+    prog(q => setX(aLerp(aTour[0], aTour[1], q)), tm + 3, 2.4); prog(q => setX(q >= 1 ? aTour[2] : aLerp(aTour[1], aTour[2], q)), tm + 5.6, 1.6);
+    aRow(p, [['Φ : X × Y → ℝ^{N},    ‖Φ‖_{∞} ≤ r'], ['        características del par (punto, clase)', COL.dim, UI, 22]], RX, 760, tf, { size: 28, weight: 600 });
+    aRow(p, [['S = ( (x_{1}, y_{1}), …, (x_{m}, y_{m}) ),    Y = {1, …, c}'], ['        §13.1', COL.dim, UI, 22]], RX, 812, tf + 2, { size: 26, weight: 600 });
+  }],
+
+  ['princ', 'El principio', (m) => {
+    const p = panel(0), te = m('each'), tu = m('unif'), tc = m('cons'), to = m('obj'), ts = m('sol'), CX = 720;
+    aNote(p, `datos ilustrativos: una distribución por punto de la muestra del cap. 19, ${aM} en total · previa uniforme · λ = ${aLam} · todo se calcula en la página`);
+    aTitle(p, 'El principio de Maxent, ahora condicional');
+    aLeg(p, 100, 190); aTx(p, 'arriba de cada recuadro:  la clase de ese punto', 100, 700, te, { size: 22, fill: COL.dim, font: UI });
+    const mn = aMinis(p, 110, 350); mn.cells.forEach((g, i) => show(g, te + .3 + i * .06, .3));
+    aRow(p, [['p[·|x_{i}]', HUE.hyp], [':  una distribución sobre las clases por cada x_{i} de la muestra', COL.chalk, UI, 24]], CX, 250, te, { size: 28, weight: 700 });
+    aRow(p, [['‖ E_{x∼D̂₁, y∼p[·|x]}[Φ(x, y)]  −  E_{(x,y)∼D̂}[Φ(x, y)] ‖_{∞}  ≤  λ', HUE.cx], ['      (13.2)', COL.dim, UI, 22]], CX, 340, tc, { size: 27, weight: 700 });
+    aTx(p, 'x: de la muestra · y: según p[·|x] · contra el promedio empírico de la muestra', CX, 380, tc + 3, { size: 22, fill: COL.dim, font: UI });
+    const dv = aTx(p, '', CX, 460, tc + 9.5, { size: 27, weight: 700 }), en = aTx(p, '', CX, 620, to + 3.4, { size: 27, weight: 700 });
+    aRow(p, [['min   ∑_{x} D̂₁(x) · D( '], ['p[·|x]', HUE.hyp], [' ‖ p_{0}[·|x] )'], ['      (13.3): la más cercana a la previa', COL.dim, UI, 22]], CX, 540, to, { size: 27, weight: 700 });
+    aTx(p, 'con previa uniforme, es maximizar la entropía condicional', CX, 580, to + 3.4, { size: 22, fill: COL.dim, font: UI });
+    const sol = aTx(p, 'solución:  las más parejas que cumplen la restricción', CX, 700, ts + 3.6, { size: 24, fill: HUE.hyp, font: UI, weight: 600 });
+    const setQ = q => { const w = aWs.map(v => q >= 1 ? v : v * q), d = aDevMax(w), ok = d <= aLam + 5e-4; mn.set(aP.map(pt => aPr(w, pt))); dv._set(`desvío de los promedios:   ${aF3(d)}   ${ok ? '=' : '>'}   λ = ${aLam}        ${ok ? 'cumple' : 'no cumple'}`); dv.setAttribute('fill', ok ? COL.chalk : HUE.bad); en._set(`entropía condicional:   ${aF2(aEntC(w))}` + (q <= 0 ? '      la máxima:  log 3' : '')); };
+    setQ(0); prog(setQ, ts + .3, 3.2);
+  }],
+
+  ['model', 'El modelo', (m) => {
+    const p = panel(0), tt = m('thm'), td = m('dual'), tf = m('form'), te = m('exp'), tn = m('norm'), to = m('other'), ta = m('all'), CX = [130, 340, 550], q0 = aP[aShowI[0]], q1 = aP[aShowI[1]];
+    aNote(p, `datos ilustrativos: dos puntos de la muestra del cap. 19 y el w de la solución · λ = ${aLam} · todo se calcula en la página · sin la demostración`);
+    aTitle(p, 'El modelo: la exponencial de una puntuación, normalizada');
+    const hd = aTx(p, '', 130, 250, .4, { size: 26, font: UI, weight: 600 });
+    const b1 = aBarsV(p, CX[0], 450, { bw: 44, gap: 12, u: 34, size: 22, t0: tf }), b2 = aBarsV(p, CX[1], 560, { bw: 44, gap: 12, size: 22, t0: te }), b3 = aBarsV(p, CX[2], 560, { bw: 44, gap: 12, u: 170, size: 22, t0: tn });
+    const zt = aTx(p, '', CX[1] + 78, 612, tn, { size: 24, anchor: 'middle', weight: 600 });
+    [['w · Φ(x, y)', 'la puntuación de cada clase', tf], ['exp( · )', '', te], ['p_{w}[y|x]', 'dividido por Z(x)', tn]].forEach(([a, b, t0], k) => { aTx(p, a, CX[k] + 78, 690, t0, { size: 26, anchor: 'middle', weight: 700, fill: k === 2 ? HUE.hyp : COL.chalk }); if (b) aTx(p, b, CX[k] + 78, 726, t0, { size: 22, anchor: 'middle', fill: COL.dim, font: UI }); });
+    aTx(p, '→', 311, 500, te, { size: 34, fill: COL.dim, anchor: 'middle' }); aTx(p, '→', 521, 500, tn, { size: 34, fill: COL.dim, anchor: 'middle' });
+    let last = -1;
+    const setP = q => { const pt = aLerp(q0, q1, q), s = aSc(aWs, pt), ex = s.map(Math.exp), z = aSum(ex), k = q < .5 ? 0 : 1, src = k ? q1 : q0; b1.set(s); b2.set(ex, 190 / Math.max(...ex)); b3.set(ex.map(v => v / z)); zt._set(`Z(x) = ${aF2(z)}`); if (k !== last) { last = k; hd._set(`x = (${src[0]}, ${src[1]}),  un punto de clase ${src[2] + 1}`); hd.setAttribute('fill', aHue(src[2])); } };
+    setP(0); prog(q => setP(q >= 1 ? 1 : q), to + .3, 2.4);
+    aRow(p, [['teorema 13.1:    ', COL.chalk, UI, 26], ['el problema (13.3) equivale a su dual', COL.chalk, UI, 26]], RX, 250, tt, { size: 26, weight: 600 });
+    aRow(p, [['inf_{w}   '], ['λ‖w‖_{1}', HUE.cx], ['  −  (1/m) ∑_{i ≤ m} log '], ['p_{w}[y_{i}|x_{i}]', HUE.hyp], ['        (13.8)', COL.dim, UI, 22]], RX, 320, td, { size: 28, weight: 700 });
+    aTx(p, 'máxima verosimilitud condicional, con regularización L1 · previa uniforme', RX, 360, td + 1, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['p_{w}[y|x]', HUE.hyp], ['  =  exp( w · Φ(x, y) ) / Z(x)'], ['        (13.9)', COL.dim, UI, 22]], RX, 470, tf, { size: 30, weight: 700 });
+    aRow(p, [['Z(x)  =  ∑_{y} exp( w · Φ(x, y) )'], ['        la función de partición de ese x', COL.dim, UI, 22]], RX, 530, tn, { size: 28, weight: 600 });
+    aTx(p, 'una distribución de Gibbs por punto · también llamada softmax', RX, 572, tn + 1.5, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['el mismo w para todo x:   ', COL.chalk, UI, 26], ['vale también fuera de la muestra', COL.chalk, UI, 26]], RX, 690, ta, { size: 26, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], WW = 420, HH = 390, Y0q = 252;
+    T(p, 'Tres puntos, y las puntuaciones que les da el modelo', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aRow(p, [['p_{w}[y|x]', HUE.hyp, MATH, 24], ['  =  exp( w · Φ(x, y) ) / Z(x)', COL.chalk, MATH, 24], [`        en cada recuadro: las tres puntuaciones w · Φ(x, y) de un punto · el modelo ajustado, λ = ${aLam}`, COL.dim, UI, 22]], 100, 200, null, { size: 24 });
+    S.q1 = aQ1.map((q, j) => { const g = aCard(p, BX[j], Y0q, WW, HH, j + 1), bs = aBarsV(g, 60, 110, { bw: 70, gap: 40, u: 28, labs: ['clase 1', 'clase 2', 'clase 3'], labY: 250 }); bs.set(aQ1s[j]); return g; });
+    S.q1B = BX.map(bx => [bx, Y0q, WW, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-soft', prompt: ['¿En cuál de los tres puntos es mayor la probabilidad de la clase 1?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'punto ' + (j + 1) })), aQ1r,
+      'Cuenta la ventaja sobre las otras clases: ahí las dos quedan muy abajo.',
+      j => aQ1why[j]),
+  }], done) }],
+
+  ['opt', 'Propiedades', (m) => {
+    const p = panel(0), tl = m('loss'), tfi = m('fit'), tb = m('blk'), tpr = m('pred'), CX = 760;
+    aNote(p, NOTE3 + ' · gradiente proximal desde w = 0');
+    aTitle(p, 'Propiedades: un problema convexo, un clasificador lineal');
+    const pl = aPl3(p, 100, 650, 56), rg = aRegs(pl); aLeg(p, 100, 186);
+    const ws = [0, 1, 2].map(y => aTx(p, '', 100, 722 + y * 38, tfi, { size: 24, fill: aHue(y), weight: 700 }));
+    const live = aTx(p, '', CX, 372, tfi, { size: 26, weight: 700 }), fin = aTx(p, `residuo de optimalidad < 10^{−11}:  el subgradiente de menor norma es casi nulo`, CX, 412, tfi + 7.4, { size: 22, fill: COL.dim, font: UI });
+    const setQ = q => { const st = q >= 1 ? { t: aRun.it, w: aWs } : aAtQ(aRun.path, q), Wb = aBlk(st.w); rg.set(Wb); Wb.forEach((b, y) => ws[y]._set(`w_{${y + 1}} = ${aVec(b)}`)); live._set(`iteración ${aInt(st.t)}:      objetivo = ${aF3(aJ3(st.w))}      errores en la muestra:  ${st.t ? aErr3(st.w) : '—'}`); };
+    setQ(0); prog(setQ, tfi + .4, 6.6, lin);
+    aRow(p, [['min_{w}   '], ['λ‖w‖_{1}', HUE.cx], ['  +  (1/m) ∑_{i ≤ m} log [ ∑_{y} exp( w · Φ(x_{i}, y) − w · Φ(x_{i}, y_{i}) ) ]']], CX, 250, [.5, .5, tl], { size: 24, weight: 700 });
+    aTx(p, '(13.10) · convexo y sin restricciones', CX, 290, .5, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['w · Φ(x, y)  =  w_{y} · Γ(x)'], ['        §13.5.2: un vector de pesos por clase', COL.dim, UI, 22]], CX, 520, tb, { size: 28, weight: 700 });
+    aRow(p, [['ŷ(x)  =  argmax_{y} '], ['p_{w}[y|x]', HUE.hyp], ['  =  argmax_{y}  w · Φ(x, y)'], ['        (13.13)', COL.dim, UI, 22]], CX, 630, tpr, { size: 27, weight: 700 });
+    aTx(p, 'un clasificador lineal:  las fronteras son rectas', CX, 672, tpr + 4.4, { size: 24, fill: HUE.hyp, font: UI, weight: 600 });
+  }],
+
+  ['gen', 'Garantías', (m) => {
+    const p = panel(0), tt = m('thm'), tx = m('cx'), tcf = m('conf'), tc = m('c'), tn = m('n'), ta = m('alg'), YB = 700, U = 50;
+    aNote(p, 'sin las demostraciones · log_{u₀}: el logaritmo dividido por u₀ = log(1 + 1/e) · las barras comparan factores: no son valores de la cota');
+    aTitle(p, 'Garantías por margen');
+    aRow(p, [['R(f)  ≤  (1/m) ∑_{i ≤ m} log_{u₀} ( ∑_{y} exp( [ f(x_{i}, y) − f(x_{i}, y_{i}) ] / ρ ) )'], ['  +  ', COL.chalk], ['(8c / ρ) ℜ_{m}(Π_{1}(H))', HUE.cx]], 100, 206, [tt, tx, tx], { size: 26, weight: 700 });
+    aRow(p, [['+  √( log log_{2}(4r/ρ) / m )  +  √( log(2/δ) / 2m )']], 172, 256, tcf, { size: 26, weight: 700 });
+    aTx(p, 'teorema 13.2 · con probabilidad ≥ 1 − δ, para todo ρ > 0 y toda f = w · Φ con ‖w‖_{1} ≤ 1', 100, 300, tt + 1, { size: 22, fill: COL.dim });
+    // de qué depende el término de complejidad
+    aRow(p, [['factor ', COL.chalk, UI, 24], ['8c / ρ', HUE.cx], [':  lineal en c', COL.chalk, UI, 24]], 110, 390, tc, { size: 26, weight: 700 });
+    aCs.forEach((c, k) => aUp(p, 130 + k * 110, YB, 64, aRatC[k] * U, HUE.cx, '×' + aF1(aRatC[k]), `c = ${c}`, tc + .4 + k * .5));
+    aRow(p, [['factor ', COL.chalk, UI, 24], ['√( 2 log(2cN) )', HUE.cx]], 540, 390, tn + 6, { size: 26, weight: 700 });
+    aNs.forEach((n, k) => aUp(p, 560 + k * 130, YB, 64, aRatN[k] * U, HUE.cx, '×' + aF1(aRatN[k]), `N = ${aInt(n)}`, tn + 7 + k * .5));
+    aTx(p, `(con c = ${aKc})`, 560, YB + 66, tn + 7, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'teorema 13.3, con N finito:', 980, 390, tn + 3, { size: 24, font: UI, weight: 600 });
+    aTx(p, '4cr √( 2 log(2cN) ) / ρ', 980, 436, tn + 3, { size: 28, fill: HUE.cx, weight: 700 });
+    aTx(p, 'en lugar de (8c / ρ) ℜ_{m}(Π_{1}(H)) · así lo imprime el libro;', 980, 474, tn + 3, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'su demostración deja además un factor 1/√m', 980, 504, tn + 3, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['min_{‖w‖₁ ≤ 1/ρ}   (1/m) ∑_{i ≤ m} log [ ∑_{y} exp( … ) ]'], ['    (13.14)', COL.dim, UI, 22]], 980, 590, ta, { size: 24, weight: 700 });
+    aRow(p, [['⟺   min_{w}   '], ['λ‖w‖_{1}', HUE.cx], ['  +  (1/m) ∑_{i ≤ m} log [ … ]'], ['    (13.15)', COL.dim, UI, 22]], 980, 644, ta + 2.4, { size: 24, weight: 700 });
+    aTx(p, 'el mismo problema:  Maxent condicional', 980, 700, ta + 4.6, { size: 24, fill: HUE.hyp, font: UI, weight: 600 });
+    aTx(p, 'λ se elige por validación cruzada', 980, 738, ta + 4.6, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['logi', 'Regresión logística', (m) => {
+    const p = panel(0), tsu = m('sum'), tsg = m('sig'), th = m('heat'), tpb = m('probe'), tod = m('odds'), GX = 820, A = [2, 1.5], Bq = [8.5, 6.5];
+    aNote(p, NOTE2);
+    aTitle(p, 'Dos clases: regresión logística');
+    const pl = aPl2(p, 100, 690, 56); pl.set(aWb); put(pl.hg, { o: 0 }); put(pl.lg, { o: 0 }); show(pl.hg, th, .8); show(pl.lg, th + .4, .6);
+    aLeg2(p, 100, 216); const g0 = G(p, { o: 0 }); aSq(g0, 400, 216, HUE.hyp, 'p_{w}[+1|x] = 1/2', { line: true }); show(g0, th + .4);
+    aRow(p, [['∑_{y} exp( w · Φ(x_{i}, y) − w · Φ(x_{i}, y_{i}) )  =  1 + exp( −y_{i} w · Ψ(x_{i}) )']], 740, 210, tsu, { size: 25, weight: 700 });
+    aTx(p, 'c = 2,  y ∈ {−1, +1} · Ψ(x) = Φ(x, +1) − Φ(x, −1)', 740, 250, tsu + 1, { size: 22, fill: COL.dim });
+    aRow(p, [['p_{w}[+1|x]', HUE.hyp], ['  =  1 / ( 1 + exp( −w · Ψ(x) ) )'], ['        función logística · figura 13.1', COL.dim, UI, 22]], 740, 330, tsg, { size: 28, weight: 700 });
+    const gp = aGPl(p, GX, 390, 600, 240, -7, 7, 0, 1, tsg + .6, [-6, -3, 0, 3, 6], [0, .5, 1], { xl: 'w · Ψ(x)' });
+    mk('path', { d: `M${GX} ${gp.VY(.5).toFixed(1)}h600`, stroke: COL.faint, 'stroke-width': 2, 'stroke-dasharray': '6 7' }, gp.gl);
+    draw(path(gp.gl, (() => { let d = ''; for (let k = 0; k <= 200; k++) { const u = -7 + 14 * k / 200; d += (k ? 'L' : 'M') + gp.WX(u).toFixed(1) + ' ' + gp.VY(aSig(u)).toFixed(1); } return d; })(), { stroke: HUE.hyp, 'stroke-width': 5, 'stroke-linecap': 'round' }, { d: 0 }), tsg + 1, 1.4);
+    const gq = G(p, { o: 0 }); show(gq, tpb - .4, .4);
+    const ring = mk('circle', { r: 17, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, gq), gd = mk('path', { stroke: COL.chalk, 'stroke-width': 2, 'stroke-dasharray': '5 6', fill: 'none' }, gq), dt = mk('circle', { r: 11, fill: COL.chalk, stroke: COL.board, 'stroke-width': 3 }, gq);
+    const lv = aTx(gq, '', 740, 742, null, { size: 27, weight: 700 });
+    const setQ = q => { const pt = aLerp(A, Bq, q), u = aU(aWb, pt), pv = aSig(u); aSetA(ring, { cx: pl.X(pt[0]), cy: pl.Y(pt[1]) }); aSetA(dt, { cx: gp.WX(u), cy: gp.VY(pv) }); gd.setAttribute('d', `M${gp.WX(u).toFixed(1)} 630V${gp.VY(pv).toFixed(1)}H${GX}`); lv._set(`w · Ψ(x) = ${aF2(u)}            p_{w}[+1|x] = ${aF2(pv)}`); };
+    setQ(0); prog(q => setQ(q * .5), tpb + 2.6, 3.2); prog(q => setQ(q >= 1 ? 1 : .5 + q * .5), tpb + 6.6, 1.6);
+    aRow(p, [['log( p_{w}[+1|x] / p_{w}[−1|x] )  =  w · Ψ(x)'], ['        se predice por su signo', COL.dim, UI, 22]], 740, 812, tod, { size: 27, weight: 700 });
+  }],
+
+  ['loss', 'La pérdida logística', (m) => {
+    const p = panel(0), tob = m('obj'), tcu = m('curve'), tup = m('up'), tfi = m('fit'), ten = m('end'), tad = m('ada'), GX = 820, GY = 280, GW = 600, GH = 300;
+    aNote(p, NOTE2 + ' · gradiente proximal desde w = 0');
+    aTitle(p, 'La pérdida logística');
+    const pl = aPl2(p, 100, 690, 56); aLeg2(p, 100, 216);
+    aRow(p, [['min_{w}   '], ['λ‖w‖_{1}', HUE.cx], ['  +  (1/m) ∑_{i ≤ m} log[ 1 + exp( −y_{i} w · Ψ(x_{i}) ) ]'], ['        (13.16)', COL.dim, UI, 22]], 740, 210, tob, { size: 26, weight: 700 });
+    const gp = aGPl(p, GX, GY, GW, GH, -3, 7, 0, 3, .4, [-2, 0, 2, 4, 6], [0, 1, 2, 3], { xl: 'u = y · w · Ψ(x)', fmt: v => String(v) });
+    const st = mk('path', { d: `M${GX} ${gp.VY(1).toFixed(1)}H${gp.WX(0).toFixed(1)}V${gp.VY(0).toFixed(1)}H${GX + GW}`, stroke: COL.chalk, 'stroke-width': 6, fill: 'none', 'stroke-linejoin': 'miter' }, gp.gl);
+    const c1 = gp.fn(aLg, { stroke: HUE.hyp, 'stroke-width': 5 }), c2 = gp.fn(aLg2, { stroke: HUE.hyp, 'stroke-width': 3, 'stroke-dasharray': '9 7' }); show(c1, tcu - .4, .8); show(c2, tup, .6);
+    const LX = gp.WX(.75), g1 = G(p, { o: 0 }), g2 = G(p, { o: 0 }), g3 = G(p, { o: 0 }); show(g1, .5); show(g2, tcu - .4); show(g3, tup);
+    aSq(g1, LX, GY + 44, COL.chalk, 'pérdida 0-1:  1_{u ≤ 0}', { line: true }); aSq(g2, LX, GY + 84, HUE.hyp, 'logística:  log( 1 + e^{−u} )', { line: true }); aSq(g3, LX, GY + 124, HUE.hyp, 'en base 2:  log_{2}( 1 + e^{−u} ) ≥ 1_{u ≤ 0}', { line: true, dash: '9 7' });
+    const gdts = G(gp.gl, { o: 0 }), ds = aB.map(q => mk('circle', { r: 8, fill: aHue2(q[2]), stroke: COL.board, 'stroke-width': 2 }, gdts)); show(gdts, tfi - .6, .4);
+    const live = aTx(p, '', 740, 712, tfi - .6, { size: 26, weight: 700 }), wv = aTx(p, '', 740, 756, tfi - .6, { size: 26, weight: 700, fill: HUE.hyp });
+    const setQ = q => { const s = q >= 1 ? { t: aRunB.it, w: aWb } : aAtQ(aRunB.path, q); pl.set(s.w); aB.forEach((pt, i) => { const u = pt[2] * aU(s.w, pt); aSetA(ds[i], { cx: gp.WX(u), cy: gp.VY(aLg(u)) }); }); live._set(`iteración ${aInt(s.t)}:      pérdida media = ${aF2(aLossB(s.w))}      mal clasificados:  ${s.t ? aErrB(s.w) : '—'}`); wv._set(`w = ${aVec(s.w)}`); };
+    setQ(0); prog(setQ, tfi + .3, Math.max(4, ten - tfi - .4), lin);
+    aTx(p, 'por descenso por coordenadas:  la variante de AdaBoost con pérdida logística', 740, 820, tad, { size: 22, fill: COL.chalk, font: UI, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), dN = [[44, -30], [44, -30], [44, 44]];
+    T(p, 'Tres puntos de la muestra, con el modelo ya ajustado', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    const pl = aPl2(p, 120, 664, 56, { t0: null }); pl.set(aWb); aLeg2(p, 120, 192, 0); aSq(p, 420, 192, HUE.hyp, 'p_{w}[+1|x] = 1/2', { line: true });
+    aRow(p, [['pérdida de un punto:    ', COL.chalk, UI, 26], ['log( 1 + exp( −y · w · Ψ(x) ) )']], 780, 300, null, { size: 28, weight: 700 });
+    aTx(p, 'la puntuación w · Ψ(x) es positiva del lado salmón y negativa del lado azul', 780, 350, null, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'el mapa:  la probabilidad que el modelo da a la clase +1', 780, 390, null, { size: 22, fill: COL.dim, font: UI });
+    S.q2 = aQ2.map((i, j) => { const g = G(p), x = pl.X(aB[i][0]), y = pl.Y(aB[i][1]); mk('circle', { cx: x, cy: y, r: 22, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, g); aHalo(T(g, String(j + 1), { x: x + dN[j][0], y: y + dN[j][1], size: 28, weight: 700 })); return g; });
+    S.q2B = aQ2.map(i => [pl.X(aB[i][0]) - 36, pl.Y(aB[i][1]) - 36, 72, 72]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-loss', prompt: ['¿Cuál de los tres puntos marcados tiene la mayor pérdida logística?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'punto ' + (j + 1) })), aQ2r,
+      'Es azul y quedó del lado salmón: su etiqueta por su puntuación es negativa.',
+      j => aQ2why[j]),
+  }], done) }],
+
+  ['l2', 'Regularización L2', (m) => {
+    const p = panel(0), tpr = m('prob'), tc = m('cmp'), tt = m('thm'), td = m('dep'), tb = m('bin'), XL = [100, 480], CX = 880;
+    aNote(p, NOTE3 + ' · L2: por descenso de gradiente');
+    aTitle(p, 'Regularización L2: la norma dos al cuadrado');
+    aRow(p, [['min_{w}   '], ['λ‖w‖_{2}^{2}', HUE.cx], ['  −  (1/m) ∑_{i ≤ m} log '], ['p_{w}[y_{i}|x_{i}]', HUE.hyp], ['        §13.8 · objetivo diferenciable', COL.dim, UI, 22]], 100, 200, [.5, .5, .5, .5, tpr], { size: 27, weight: 700 });
+    [[aWs, 'L1:    ', 'λ‖w‖_{1}', .5], [aW2s, 'L2:    ', 'λ‖w‖_{2}^{2}', .9]].forEach(([w, a, b, t0], k) => {
+      const g = G(p, { o: 0 }), pl = aPl3(g, XL[k], 536, 32, { t0: null, ax: false }), rg = aRegs(pl, { sw: 3 }), wr = aWRow(g, XL[k] + 10, 650, { u: 46 }); show(g, t0);
+      rg.set(aBlk(w)); wr.set(w);
+      aRow(g, [[a, COL.chalk, UI, 26], [b, HUE.cx]], XL[k], 262, null, { size: 28, weight: 700 });
+      [0, 1, 2].forEach(y => aTx(g, `w_{${y + 1}}`, wr.bx(3 * y + 1) + wr.bw / 2, 740, null, { size: 22, fill: aHue(y), anchor: 'middle', weight: 700 }));
+      aTx(p, `${aNul(w)} de ${aNw} pesos nulos`, XL[k], 812, tc + (k ? 3.4 : .2), { size: 26, weight: 700, font: UI });
+    });
+    aRow(p, [['teorema 13.4:    ', COL.chalk, UI, 26], ['la cota del 13.2, ahora con ‖w‖_{2} ≤ 1', COL.chalk, MATH, 26]], CX, 300, tt, { size: 26, weight: 600 });
+    aRow(p, [['y este término de complejidad:    ', COL.chalk, UI, 24], ['4 r_{2} c^{2} / ( ρ √m )', HUE.cx]], CX, 370, tt + 3.4, { size: 30, weight: 700 });
+    aTx(p, 'r_{2} = sup ‖Φ(x, y)‖_{2} · con probabilidad ≥ 1 − δ · sin la demostración', CX, 412, tt + 3.4, { size: 22, fill: COL.dim });
+    aTx(p, 'no depende de la dimensión N', CX, 500, td, { size: 26, font: UI, weight: 600 });
+    aRow(p, [['crece como ', COL.chalk, UI, 26], ['c^{2}', HUE.cx], [':   al duplicar las clases, se multiplica por 4', COL.dim, UI, 24]], CX, 550, td + 2, { size: 28, weight: 700 });
+    aTx(p, 'c = 2:  regresión logística, con L1 o con L2', CX, 660, tb, { size: 26, font: UI, weight: 600 });
+    aTx(p, 'sus garantías son casos particulares de estas (§13.7.2)', CX, 702, tb + 1, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'L1:  solución rala · L2:  no rala', CX, 780, tc + 3.4, { size: 24, fill: COL.dim, font: UI });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Maxent condicional:  una distribución por punto;  promedios de Φ(x, y) a distancia ≤ λ.', 'w1'], ['Dual (teorema 13.1):  verosimilitud condicional con L1;  p_{w}[y|x] = exp( w · Φ(x, y) ) / Z(x).', 'w2'],
+      ['Problema convexo;  se predice por la mayor puntuación;  cotas por margen con factor c.', 'w3'], ['Dos clases:  regresión logística, con la función y la pérdida logísticas.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 28, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['El principio de Maxent condicional exige fijar de antemano una familia de distribuciones.'], ans: ['f'], why: 'No fija ninguna: la forma de Gibbs sale del dual.' },
+      { parts: ['Sumar una misma cantidad a las puntuaciones de todas las clases no cambia las probabilidades.'], ans: ['v'], why: 'Ese factor aparece arriba y en la suma Z(x): se cancela.' },
+      { parts: ['La clase que predice el modelo es la de mayor puntuación.'], ans: ['v'], why: 'La exponencial es creciente: la más probable es la de mayor puntuación.' },
+      { parts: ['En la regresión logística, la probabilidad de la clase positiva vale un medio donde la puntuación vale uno.'], ans: ['f'], why: 'Vale un medio donde la puntuación es cero: sobre la recta.' },
+      { parts: ['En el teorema 13.2, el término de complejidad no depende del número de clases.'], ans: ['f'], why: 'Lleva el factor 8c sobre ro: es lineal en el número de clases.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

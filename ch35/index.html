@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aprender sin modelo: TD y Q-learning</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 35, title: 'Aprender sin modelo: TD y Q-learning', minutes: 6, language: 'es' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 34) ---------- */
+// Ámbar = el agente, la acción elegida y la política · verde = recompensa (rojo si es negativa) · violeta = el valor (V y Q) ·
+// rosa = probabilidades, descuento y la diferencia temporal (la corrección de cada paso) · tiza = estados y lo demás.
+const HUE = { act: COL.task, rew: COL.good, neg: COL.bad, val: COL.real, pr: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'x_{j}', 'a^{*}'. Con t0 = null queda visible desde el inicio. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξχΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯≠π⊆])/;                        // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aHideAll = (els, t) => els.forEach(e => hide(e, t, .3));
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+// Sistema lineal A·z = c por eliminación de Gauss con pivoteo parcial (el del cap. 24).
+const aSolve = (A, c) => {
+  const n = c.length, a = A.map((r, i) => [...r, c[i]]);
+  for (let k = 0; k < n; k++) {
+    let pv = k; for (let i = k + 1; i < n; i++) if (Math.abs(a[i][k]) > Math.abs(a[pv][k])) pv = i;
+    [a[k], a[pv]] = [a[pv], a[k]];
+    for (let i = k + 1; i < n; i++) { const f = a[i][k] / a[k][k]; for (let j = k; j <= n; j++) a[i][j] -= f * a[k][j]; }
+  }
+  const z = Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) z[i] = (a[i][n] - a[i].slice(i + 1, n).reduce((s, v, j) => s + v * z[i + 1 + j], 0)) / a[i][i];
+  return z;
+};
+// --- El MDP de la figura 17.3 del libro (start, other · search, carry, pickup). El libro deja R1, R2 y R3 sin valor: aquí 0, 1 y 3 (ilustrativos), y γ = 0.8.
+const aST = ['inicio', 'otro'], aAC = ['buscar', 'llevar', 'recoger'], aGAM = .8, aR1 = 0, aR2 = 1, aR3 = 3;
+// Una transición por flecha de la figura: desde s, con la acción a, se llega a «to» con probabilidad p y recompensa r. loop / bend: solo para dibujarla.
+const aED = [{ s: 0, a: 0, to: 0, p: .1, r: aR1, loop: -90 }, { s: 0, a: 0, to: 1, p: .9, r: aR1, bend: -.2 }, { s: 1, a: 1, to: 0, p: .5, r: aR3, bend: -.2 },
+  { s: 1, a: 1, to: 1, p: .5, r: -1, loop: -90 }, { s: 1, a: 2, to: 1, p: 1, r: aR2, loop: 90 }];
+const aMDP = { ini: 0, lab: aST, act: aAC, ed: aED };
+const aOut = (s, a) => aED.map((e, k) => ({ ...e, k })).filter(e => e.s === s && e.a === a);
+const aEr = (s, a) => aOut(s, a).reduce((v, e) => v + e.p * e.r, 0);                                   // E[r(s, a)]
+const aPm = pi => aST.map((_, s) => aST.map((_, t) => aOut(s, pi[s]).filter(e => e.to === t).reduce((v, e) => v + e.p, 0)));   // P de (17.6)
+const aRv = pi => aST.map((_, s) => aEr(s, pi[s]));                                                    // R de (17.6)
+const aV = (pi, gam = aGAM) => aSolve(aPm(pi).map((r, i) => r.map((v, j) => (i === j ? 1 : 0) - gam * v)), aRv(pi));   // (17.7): (I − γP) V = R
+const aQ = (V, s, a, gam = aGAM) => aOut(s, a).reduce((v, e) => v + e.p * (e.r + gam * V[e.to]), 0);       // (17.1), segunda forma
+const aAS = s => [...new Set(aED.filter(e => e.s === s).map(e => e.a))];                               // acciones disponibles en s
+const aRng = seed => () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+// --- Aprendizaje (§17.5): el agente no usa p ni la lista de recompensas; solo sortea una transición con aSamp y mira a dónde llegó y qué recibió.
+const aSamp = (s, a, rnd) => { const es = aOut(s, a); let u = rnd(), e = es[es.length - 1]; for (const c of es) { if (u < c.p) { e = c; break; } u -= c.p; } return e; };
+// Teorema 17.14: μ_{m+1} = (1 − α_m) μ_m + α_m x_m con μ_0 = x_0 y α_m = 1/(m + 1). X = √U, U uniforme en [0, 1] (ilustrativa): E[X] = 2/3. mu[k] = media de los k primeros valores.
+const aMean = (seed, n) => { const rnd = aRng(seed), xs = [], mu = []; for (let k = 0; k < n; k++) { const x = Math.sqrt(rnd()); xs.push(x); if (!k) mu.push(x); mu.push(mu[k] + (x - mu[k]) / (k + 1)); } return { xs, mu }; };
+// TD(0), figura de la p. 398 con una sola época: registro por paso { s, k: flecha, r, to, n: visitas a s, al: α, tgt: muestra r + γV(s′), del: diferencia temporal, old, V: después }.
+const aTD = (pi, seed, n, al, V0 = [0, 0]) => { const rnd = aRng(seed), V = [...V0], cnt = [0, 0], o = []; let s = 0; for (let t = 0; t < n; t++) { const e = aSamp(s, pi[s], rnd), a = al(++cnt[s]), tgt = e.r + aGAM * V[e.to], old = V[s]; V[s] += a * (tgt - old); o.push({ s, k: e.k, r: e.r, to: e.to, n: cnt[s], al: a, tgt, del: tgt - old, old, V: [...V] }); s = e.to; } return o; };
+const aArg = (Q, s) => aAS(s).reduce((b, a) => Q[s][a] > Q[s][b] ? a : b);                               // acción voraz (en un empate, la primera)
+// Política ε-voraz derivada de Q: con probabilidad ε, una acción al azar entre las disponibles (ex = true); si no, la voraz.
+const aPick = (Q, s, eps, rnd) => { const as = aAS(s), ex = rnd() < eps; return ex ? { a: as[Math.floor(rnd() * as.length)], ex } : { a: aArg(Q, s), ex }; };
+// Q-learning (seudocódigo de la p. 399, una época, Q_0 = 0): registro por paso { s, a, ex, k, r, to, al, mx: max_a′ Q(s′, a′), tgt, old, Q: tabla después }.
+const aQL = (seed, n, eps, al) => { const rnd = aRng(seed), Q = aST.map(() => aAC.map(() => 0)), cnt = aST.map(() => aAC.map(() => 0)), o = []; let s = 0;
+  for (let t = 0; t < n; t++) { const { a, ex } = aPick(Q, s, eps, rnd), e = aSamp(s, a, rnd), st = al(++cnt[s][a]), mx = Math.max(...aAS(e.to).map(b => Q[e.to][b])), tgt = e.r + aGAM * mx, old = Q[s][a]; Q[s][a] += st * (tgt - old); o.push({ s, a, ex, k: e.k, r: e.r, to: e.to, al: st, mx, tgt, old, Q: Q.map(r => [...r]) }); s = e.to; } return o; };
+// SARSA (figura 17.7): igual, pero el objetivo usa la acción a′ que la política elige en s′; eps(n) depende de las visitas al estado.
+const aSA = (seed, n, eps, al) => { const rnd = aRng(seed), Q = aST.map(() => aAC.map(() => 0)), cnt = aST.map(() => aAC.map(() => 0)), vis = [0, 0], o = []; let s = 0, c = aPick(Q, s, eps(++vis[s]), rnd);
+  for (let t = 0; t < n; t++) { const a = c.a, e = aSamp(s, a, rnd), nx = aPick(Q, e.to, eps(++vis[e.to]), rnd), st = al(++cnt[s][a]), tgt = e.r + aGAM * Q[e.to][nx.a], old = Q[s][a]; Q[s][a] += st * (tgt - old); o.push({ s, a, ex: c.ex, k: e.k, r: e.r, to: e.to, a2: nx.a, al: st, tgt, old, Q: Q.map(r => [...r]) }); s = e.to; c = nx; } return o; };
+const aUpd = (q, r, nxt, al, gam = aGAM) => q + al * (r + gam * nxt - q);                              // una actualización: (17.22) o (17.23)
+const aLam = (lam, n) => (1 - lam) * Math.pow(lam, n - 1);                                             // peso del retorno de n pasos en TD(λ), con la suma desde n = 1
+// --- Datos: π lleva en «otro» (la del cap. 33); la óptima recoge en «otro».
+const aPI = [0, 1], aPI2 = [0, 2], aV1 = aV(aPI), aV2 = aV(aPI2);                                      // V_π y V* de los caps. 33 y 34
+const aQS = aST.map((_, s) => aAC.map((_, a) => aAS(s).includes(a) ? aQ(aV2, s, a) : 0));               // Q* por (17.1)
+const aPAIR = [[1, 2], [1, 1], [0, 0]];                                                                // los tres pares (s, a) que existen, de mayor a menor Q*
+const aNS = 4000, aEXP = .7, aSTEP = n => 1 / Math.pow(n, aEXP), aEPS = .2;                              // pasos α = 1/n^0.7: ∑α = ∞ y ∑α² < ∞
+const aNM = 120, aMN = aMean(3, aNM), aEX = 2 / 3;
+const aTDR = aTD(aPI, 15, aNS, aSTEP), aTDF = aTDR[aNS - 1].V;
+const aQLR = aQL(32, aNS, aEPS, aSTEP), aQLF = aQLR[aNS - 1].Q, aGRD = aST.map((_, s) => aArg(aQLF, s));
+const aSAR = aSA(2, aNS, n => 1 / Math.sqrt(n), aSTEP), aSAF = aSAR[aNS - 1].Q;
+// El paso de la comprobación 2 y del beat de SARSA: de «inicio» a «otro», y en «otro» la política explora y elige llevar aunque la voraz sea recoger.
+const aKB = aQLR.findIndex((x, t) => t > 100 && t < aNS - 1 && x.s === 0 && x.to === 1 && aQLR[t + 1].ex && aQLR[t + 1].a === 1 && x.Q[1][2] > x.Q[1][1]);
+const aQB = aQLR[aKB - 1].Q, aXB = aQLR[aKB], aSB = { tgt: aXB.r + aGAM * aQB[1][1], nw: aUpd(aXB.old, aXB.r, aQB[1][1], aXB.al) };   // lo que habría hecho SARSA en ese paso
+// Comprobación 1 y práctica final: valores ilustrativos.
+const aC1 = { V: [2, 3], r: 0, al: .5 }, aC1T = aC1.r + aGAM * aC1.V[1], aC1N = aUpd(aC1.V[0], aC1.r, aC1.V[1], aC1.al), aC1W = aUpd(aC1.V[0], aC1.r, 0, aC1.al);
+const aP2 = { q: 2, row: [3, 4], r: 0, al: .5 }, aP2N = aUpd(aP2.q, aP2.r, Math.max(...aP2.row), aP2.al);
+const aF = (v, n = 2) => (Math.abs(v) < 5e-7 ? 0 : v).toFixed(n).replace('-', '−'), aN = v => String(v).replace('-', '−');
+const aD = v => aN(+v.toFixed(4));                                                                  // número calculado, sin ceros de más
+/* aMATH:end */
+
+// MDP como grafo (el del cap. 33): estados en cualquier lugar; una flecha por transición, rotulada «acción / [probabilidad, recompensa]» como en la figura 17.3.
+// M = { ini, lab, act, ed: [{ s, a, to, p, r, loop: ángulo en grados | bend }] }. Estado inicial = círculo grueso. vals: deja lugar para un número dentro del estado.
+// hid: las probabilidades y recompensas quedan tapadas con «?» desde el inicio (el agente no las conoce) · gr.cover(t): las tapa en el instante t.
+// gr.pol(pi, t) tiñe de ámbar las flechas de la política y apaga las otras · gr.hot engrosa una flecha un momento · gr.setV escribe el valor de un estado ·
+// gr.tok / gr.go: ficha del agente que recorre una flecha · gr.ed[k].box = caja del rótulo.
+const aGraph = (p, M, pos, { t0 = .4, rad = 62, size = 24, vals = false, hid = false } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g), gs = G(g), gr = { g, pos, M, rad, ed: [], ring: [], val: [], sg: [] };
+  const f = Q => Q.map(v => v.toFixed(1)).join(' '), ext = rad * 1.8, ap = ((2 * rad + 13) * Math.cos(.42) + 6 * (rad + ext) * Math.cos(.6)) / 8;
+  const off = (U, V, r) => { const l = Math.hypot(V[0] - U[0], V[1] - U[1]); return [U[0] + (V[0] - U[0]) * r / l, U[1] + (V[1] - U[1]) * r / l]; };
+  const head = (Q, C) => { const ha = Math.atan2(Q[1] - C[1], Q[0] - C[0]), u = [Math.cos(ha), Math.sin(ha)]; return `M${f([Q[0] + 12 * u[0], Q[1] + 12 * u[1]])}L${f([Q[0] - 4 * u[0] - 8 * u[1], Q[1] - 4 * u[1] + 8 * u[0]])}L${f([Q[0] - 4 * u[0] + 8 * u[1], Q[1] - 4 * u[1] - 8 * u[0]])}Z`; };
+  M.ed.forEach((e, k) => {
+    const [x1, y1] = pos[e.s], [x2, y2] = pos[e.to], eg = G(ge), ea = G(eg);
+    let d, Q2, C, lx, ly;
+    if (e.s === e.to) {
+      const th = (e.loop ?? -90) * Math.PI / 180, pt = (ang, r) => [x1 + r * Math.cos(ang), y1 + r * Math.sin(ang)];
+      C = pt(th + .6, rad + ext); Q2 = pt(th + .42, rad + 13); d = `M${f(pt(th - .42, rad))}C${f(pt(th - .6, rad + ext))} ${f(C)} ${f(Q2)}`;
+      [lx, ly] = pt(th, ap + 18); if (Math.sin(th) > 0) ly += size * .75;
+    } else {
+      const len = Math.hypot(x2 - x1, y2 - y1), nx = -(y2 - y1) / len, ny = (x2 - x1) / len, bd = (e.bend ?? 0) * len, sd = bd < 0 ? -1 : 1;
+      C = [(x1 + x2) / 2 + nx * bd, (y1 + y2) / 2 + ny * bd]; Q2 = off([x2, y2], C, rad + 13); const Q0 = off([x1, y1], C, rad);
+      const mid = [(Q0[0] + 2 * C[0] + Q2[0]) / 4, (Q0[1] + 2 * C[1] + Q2[1]) / 4];
+      d = `M${f(Q0)}Q${f(C)} ${f(Q2)}`; lx = mid[0] + nx * sd * 22; ly = mid[1] + ny * sd * 22 + (ny * sd > 0 ? size * .75 : 0);
+    }
+    const pe = mk('path', { d, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round' }, ea), hd = mk('path', { d: head(Q2, C), fill: COL.dim }, ea);
+    const lg = G(eg), ls = aRow(lg, [[M.act[e.a], COL.chalk, UI], [' / [', COL.dim], [aN(e.p), HUE.pr], [', ', COL.dim], [aN(e.r), e.r < 0 ? HUE.neg : HUE.rew], [']', COL.dim]], 0, 0, null, { size, weight: 600 });
+    put(lg, { x: lx - ls.end / 2, y: ly });
+    const cv = G(lg, { o: hid ? 1 : 0 }), cx = ls.xs[2] - 5, cw = ls.xs[5] - ls.xs[2] + 8;
+    mk('rect', { x: cx, y: -size + 1, width: cw, height: size + 6, fill: COL.board, stroke: COL.dim, 'stroke-width': 2 }, cv);
+    T(cv, '?', { x: cx + cw / 2, y: 0, size: size - 2, fill: COL.dim, anchor: 'middle', weight: 700 });
+    gr.ed.push({ g: eg, pe, hd, act: ls[0], ls, cv, box: [lx - ls.end / 2 - 10, ly - size - 6, ls.end + 20, size + 18] });
+  });
+  M.lab.forEach((lab, id) => {
+    const [x, y] = pos[id], sg = G(gs);
+    gr.ring[id] = mk('circle', { cx: x, cy: y, r: rad, fill: COL.board, stroke: COL.chalk, 'stroke-width': id === M.ini ? 7 : 3 }, sg);
+    T(sg, lab, { x, y: y + (vals ? -8 : 9), size: 26, anchor: 'middle', weight: 600 });
+    gr.val[id] = aTx(sg, '', x, y + 30, null, { size: 28, fill: HUE.val, anchor: 'middle', weight: 700 });
+    gr.sg[id] = sg;
+  });
+  if (t0 != null) show(g, t0);
+  gr.cover = t => gr.ed.forEach((E, k) => show(E.cv, t + k * .12, .4));
+  gr.pol = (pi, t) => M.ed.forEach((e, k) => {
+    const on = pi[e.s] === e.a, E = gr.ed[k], c = on ? HUE.act : COL.dim;
+    if (t == null) { E.pe.setAttribute('stroke', c); E.hd.setAttribute('fill', c); E.act.setAttribute('fill', on ? HUE.act : COL.chalk); put(E.g, { o: on ? 1 : .3 }); return; }
+    tw(E.pe, { c_stroke: c }, t, .35); tw(E.hd, { c_fill: c }, t, .35); tw(E.act, { c_fill: on ? HUE.act : COL.chalk }, t, .35); tw(E.g, { o: on ? 1 : .3 }, t, .35);
+  });
+  gr.hot = (k, ta, tb) => { const e = gr.ed[k].pe; tw(e, { 'a_stroke-width': 8 }, ta, .15); tw(e, { 'a_stroke-width': 3 }, tb, .3); };
+  gr.setV = (id, str, t, c = HUE.val) => { const e = gr.val[id]; if (t == null) { e._set(str); e.setAttribute('fill', c); return; } aAt(() => e._set(str), t); tw(e, { c_fill: COL.chalk }, t, .1); tw(e, { c_fill: c }, t + .5, .5); };
+  const mx = pos.reduce((v, q) => v + q[0], 0) / pos.length, rest = s => vals ? [pos[s][0] + (pos[s][0] < mx ? -1 : 1) * (rad + 24), pos[s][1]] : [pos[s][0], pos[s][1] + rad * .55];   // con valores dentro del estado, la ficha espera al costado
+  gr.tok = s => put(mk('circle', { r: 13, fill: HUE.act, stroke: COL.board, 'stroke-width': 3 }, g), { x: rest(s)[0], y: rest(s)[1], o: 0 });
+  gr.go = (tok, k, t, dt) => {
+    const e = gr.ed[k].pe, to = M.ed[k].to, L = e.getTotalLength(), P0 = e.getPointAtLength(0);
+    gr.hot(k, t, t + dt * .85); tw(tok, { x: P0.x, y: P0.y }, t, dt * .15);
+    prog(v => { const Q = e.getPointAtLength(v * L); put(tok, { x: Q.x, y: Q.y }); }, t + dt * .15, dt * .55);
+    tw(tok, { x: rest(to)[0], y: rest(to)[1] }, t + dt * .7, dt * .15);
+  };
+  return gr;
+};
+const aPOS = [[240, 430], [700, 430]];
+let aClipN = 0;
+// Gráfica con ejes transformados (la del cap. 34): marco con esquina superior izquierda en (x0, y0). gp.gl: capa recortada al marco · xt, yt: marcas [valor, rótulo].
+const aGPl = (p, x0, y0, W, HH, a0, a1, b0, b1, t0, { fx = v => v, fy = v => v, xt = [], yt = [], xl = '', yl = '' } = {}) => {
+  const g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), WX = v => x0 + (fx(v) - a0) / (a1 - a0) * W, VY = v => y0 + HH - (fy(v) - b0) / (b1 - b0) * HH;
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: W, height: HH, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  xt.forEach(([v, s]) => { mk('path', { d: `M${WX(v).toFixed(1)} ${y0 + HH}v8`, stroke: COL.dim, 'stroke-width': 2 }, g); aTx(g, s, WX(v), y0 + HH + 36, null, { size: 22, fill: COL.dim, anchor: 'middle' }); });
+  yt.forEach(([v, s]) => { mk('path', { d: `M${x0} ${VY(v).toFixed(1)}h-8`, stroke: COL.dim, 'stroke-width': 2 }, g); aTx(g, s, x0 - 14, VY(v) + 8, null, { size: 22, fill: COL.dim, anchor: 'end' }); });
+  if (xl) aTx(g, xl, x0 + W, y0 + HH + 70, null, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+  if (yl) aTx(g, yl, x0, y0 - 16, null, { size: 22, fill: COL.dim, font: UI });
+  mk('rect', { x: x0, y: y0, width: W, height: HH }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  return { g, gl, WX, VY, x0, y0, W, HH };
+};
+// Poligonal sobre una gráfica aGPl; pts = [[n, v], …]. Devuelve k => la deja trazada hasta el índice k (−1: nada). Con r = 0 no dibuja un punto por valor.
+const aLine = (gp, pts, col, { w = 4, r = 5 } = {}) => {
+  const e = mk('path', { d: '', fill: 'none', stroke: col, 'stroke-width': w, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, gp.gl), gd = G(gp.gl);
+  const ds = r ? pts.map(([n, v]) => { const c = mk('circle', { cx: gp.WX(n), cy: gp.VY(v), r, fill: col }, gd); c.style.display = 'none'; return c; }) : [];
+  const ps = pts.map(([n, v]) => `${gp.WX(n).toFixed(1)} ${gp.VY(v).toFixed(1)}`);
+  let cur = -2;
+  return k => { if (k === cur) return; cur = k; e.setAttribute('d', k < 0 ? '' : 'M' + ps.slice(0, k + 1).join('L')); ds.forEach((c, j) => { c.style.display = j <= k ? '' : 'none'; }); };
+};
+// Línea horizontal de trazos a la altura v de una gráfica aGPl.
+const aHLine = (gp, v, col, t0) => { const e = put(mk('path', { d: `M${gp.x0} ${gp.VY(v).toFixed(1)}h${gp.W}`, stroke: col, 'stroke-width': 2, 'stroke-dasharray': '5 9' }, gp.gl), { o: 0 }); show(e, t0); return e; };
+// Regla de valores: eje horizontal de lo a hi. rl.mark(rótulo, color, arriba) devuelve v => mueve esa marca · rl.corr(a, b, m): flecha rosa de a hasta b sobre el eje
+// (la corrección de un paso) y aro en m (la muestra hacia la que se corrige); rl.corr(null) las borra.
+const aRuler = (p, x0, y, W, lo, hi, t0, { ticks = [], ty = 36, fmt = aN } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), PX = v => x0 + (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo) * W;
+  if (t0 != null) show(g, t0);
+  mk('path', { d: `M${x0} ${y}h${W}`, stroke: COL.dim, 'stroke-width': 3 }, g);
+  ticks.forEach(v => { mk('path', { d: `M${PX(v)} ${y - 7}v14`, stroke: COL.dim, 'stroke-width': 2 }, g); T(g, fmt(v), { x: PX(v), y: y + ty, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  const ar = mk('path', { d: '', stroke: HUE.pr, 'stroke-width': 7, fill: 'none' }, g), hd = mk('path', { d: '', fill: HUE.pr }, g);
+  const rg = mk('circle', { cx: x0, cy: y, r: 10, fill: 'none', stroke: HUE.pr, 'stroke-width': 3 }, g); rg.style.display = 'none';
+  const mark = (lab, col, up) => {
+    const mg = mk('g', {}, g), sg = up ? -1 : 1;
+    mk('path', { d: `M0 0v${sg * 26}`, stroke: col, 'stroke-width': 4 }, mg); mk('circle', { cx: 0, cy: sg * 26, r: 7, fill: col }, mg);
+    const tx = mk('text', { x: 0, y: up ? -42 : 60, 'font-size': 22, fill: col, 'text-anchor': 'middle', 'font-family': UI, 'font-weight': 600 }, mg); tx.textContent = lab;
+    const to = v => mg.setAttribute('transform', `translate(${PX(v).toFixed(1)} ${y})`); to(lo);
+    return to;
+  };
+  const corr = (a, b, smp) => {
+    if (a == null) { ar.setAttribute('d', ''); hd.setAttribute('d', ''); rg.style.display = 'none'; return; }
+    const xa = PX(a), xb = PX(b), sg = xb < xa ? -1 : 1, big = Math.abs(xb - xa) > 14;
+    ar.setAttribute('d', Math.abs(xb - xa) < .5 ? '' : `M${xa.toFixed(1)} ${y}H${(xb - (big ? sg * 12 : 0)).toFixed(1)}`);
+    hd.setAttribute('d', big ? `M${xb.toFixed(1)} ${y}l${-sg * 16} -10v20Z` : '');
+    rg.style.display = smp == null ? 'none' : ''; if (smp != null) rg.setAttribute('cx', PX(smp));
+  };
+  return { g, PX, mark, corr };
+};
+// Tabla Q: una fila por estado y una columna por acción; celdas de cw × chh con el número y brillo violeta según el valor; «—» en los pares que no existen.
+// tb.set(Q) · tb.hl(s, a): marco blanco en la celda recién corregida (sin argumentos: lo quita) · tb.box(s, a, color, t0, t1): marco fijo · tb.c[s][a] = { g, box }.
+const aQTab = (p, x, y, cw, chh, t0, { size = 26 } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), tb = { g, x, y, cw, chh, c: [] }; if (t0 != null) show(g, t0);
+  aTx(g, 'Q(s, a)', x - 18, y - 14, null, { size: 24, fill: HUE.val, anchor: 'end', weight: 600 });
+  aAC.forEach((a, j) => T(g, a, { x: x + j * cw + cw / 2, y: y - 14, size: 24, fill: COL.dim, anchor: 'middle', weight: 600 }));
+  aST.forEach((s, i) => T(g, s, { x: x - 18, y: y + i * chh + chh / 2 + 9, size: 24, fill: COL.dim, anchor: 'end', weight: 600 }));
+  aST.forEach((_, i) => { tb.c[i] = aAC.map((_, j) => {
+    const ok = aAS(i).includes(j), cg = G(g), r = mk('rect', { x: x + j * cw + 2, y: y + i * chh + 2, width: cw - 4, height: chh - 4, fill: ok ? HUE.val : COL.board, 'fill-opacity': .06, stroke: COL.faint, 'stroke-width': 2 }, cg);
+    const t = T(cg, ok ? '' : '—', { x: x + j * cw + cw / 2, y: y + i * chh + chh / 2 + size * .35, size, anchor: 'middle', font: MATH, weight: 700, fill: ok ? COL.chalk : COL.faint });
+    return { ok, r, t, g: cg, box: [x + j * cw, y + i * chh, cw, chh] };
+  }); });
+  const hl = mk('rect', { x, y, width: cw, height: chh, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, g); hl.style.display = 'none';
+  tb.set = Q => tb.c.forEach((row, i) => row.forEach((c, j) => { if (!c.ok) return; c.t.textContent = aF(Q[i][j]); c.r.setAttribute('fill-opacity', (.06 + .5 * Math.max(0, Math.min(1, Q[i][j] / 5))).toFixed(3)); }));
+  tb.hl = (i, j) => { hl.style.display = i == null ? 'none' : ''; if (i != null) { hl.setAttribute('x', x + j * cw); hl.setAttribute('y', y + i * chh); } };
+  tb.box = (i, j, col, ta, tz) => { const e = put(mk('rect', { x: x + j * cw - 3, y: y + i * chh - 3, width: cw + 6, height: chh + 6, fill: 'none', stroke: col, 'stroke-width': 5 }, g), { o: 0 }); show(e, ta, .25); if (tz != null) hide(e, tz, .25); return e; };
+  return tb;
+};
+const aVec = V => `( ${V.map(v => aF(v)).join(',  ')} )`;
+const aTri = Q => aPAIR.map(([s, a]) => Q[s][a]).reverse();                              // los tres valores de una tabla, en el orden (inicio, buscar), (otro, llevar), (otro, recoger)
+const aSub = (n, sub, f) => Array.from({ length: Math.floor(n / sub) + 1 }, (_, j) => [j * sub, f(j * sub)]);   // un punto cada «sub» pasos
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 880, SUB = 8;
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 35', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Aprender sin modelo: TD y Q-learning', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Sin conocer las transiciones ni las recompensas: estimar los valores con la experiencia.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['model', 'Modelo desconocido', (m) => {
+    const p = panel(0), th = m('hide'), tk = m('walk'), t2 = m('two'), tmb = m('mb'), tmf = m('mf'), tq = m('ql'), n = 6, dt = (t2 - tk) / n;
+    aNote(p, 'MDP de la figura 17.3 del libro · recompensas (0, 1, 3) y γ = 0.8 ilustrativos, como en los capítulos 33 y 34 · transiciones sorteadas en la página');
+    aTitle(p, 'El modelo del entorno ya no se conoce');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3 }), tok = gr.tok(0);
+    gr.cover(th + .6);
+    const h1 = text(p, 'lo que el agente observa:', RX, 214, tk, { size: 24, fill: COL.dim }), obs = [h1];
+    show(tok, tk - .3, .3);
+    aTDR.slice(0, n).forEach((x, k) => {
+      const t = tk + k * dt;
+      gr.go(tok, x.k, t, dt * .95);
+      obs.push(...aRow(p, [[`${aST[x.s]},  `, COL.chalk, UI], [aAC[aPI[x.s]], HUE.act, UI], [`  →  ${aST[x.to]},     `, COL.chalk, UI], [`recompensa ${aN(x.r)}`, x.r < 0 ? HUE.neg : HUE.rew, UI]], RX, 262 + k * 42, t + dt * .7, { size: 24, weight: 600 }));
+    });
+    aHideAll(obs, tmb - .5);
+    text(p, 'dos enfoques de aprendizaje:', RX, 214, tmb - .1, { size: 24, fill: COL.dim });
+    aRow(p, [['con modelo', COL.chalk, UI], [':   estimar primero el modelo del entorno', COL.chalk, UI]], RX, 270, tmb, { size: 26, weight: 600 });
+    text(p, 'y, con él, aprender una política', RX + 148, 314, tmb + 2.5, { size: 26, weight: 600 });
+    aRow(p, [['sin modelo', HUE.act, UI], [':   aprender una política directamente', COL.chalk, UI]], RX, 390, tmf, { size: 26, weight: 600 });
+    aRow(p, [['Q-learning', HUE.val, UI], [':   de la familia sin modelo', COL.chalk, UI]], RX, 466, tq, { size: 26, weight: 600 });
+    aRow(p, [['desconocidas:   ', COL.chalk, UI, 26], ['P[s′ | s, a]', HUE.pr], ['   y las recompensas   ', COL.chalk, UI, 26], ['r(s, a)', HUE.rew]], 100, 750, th, { size: 30, weight: 600 });
+    text(p, 'información de entrenamiento:  la sucesión de recompensas inmediatas que el agente recibe por sus acciones', 100, 808, tk + 2.5, { size: 24, weight: 600 });
+  }],
+
+  ['sa', 'Aproximación estocástica', (m) => {
+    const p = panel(0), tme = m('mean'), tu = m('upd'), tc = m('cond'), tl = m('lln'), tf = m('fix'), NSL = 5, LX = 820;
+    aNote(p, `X = √U con U uniforme en [0, 1] (ilustrativa), E[X] = 2/3 · ${aNM} valores sorteados en la página · el teorema 17.14 pide X en [0, 1] y valores i.i.d.`);
+    aTitle(p, 'Aproximación estocástica: estimar una esperanza');
+    const gp = aGPl(p, 150, 214, 520, 270, -3, aNM + 3, 0, 1, tme - .3, { xt: [0, 40, 80, 120].map(v => [v, String(v)]), yt: [0, .5, 1].map(v => [v, aN(v)]), xl: 'valores vistos' });
+    const dots = aMN.xs.map((x, k) => { const c = mk('circle', { cx: gp.WX(k + 1), cy: gp.VY(x), r: 4, fill: COL.dim }, gp.gl); c.style.display = 'none'; return c; });
+    const ln = aLine(gp, aMN.mu.slice(1).map((v, k) => [k + 1, v]), HUE.val, { r: 0 });
+    const rl = aRuler(p, 150, 668, 520, 0, 1, tme + .4, { ticks: [0, .25, .5, .75, 1] }), mu = rl.mark('μ', HUE.val, true);
+    const xg = mk('circle', { cx: 0, cy: 668, r: 9, fill: COL.chalk }, rl.g), cnt = aTx(p, '', 150, 600, tme + .6, { size: 24, font: UI, weight: 600 });
+    const setK = k => {                                                              // k valores vistos
+      dots.forEach((c, j) => { c.style.display = j < k ? '' : 'none'; }); ln(k - 1);
+      const x = aMN.xs[k - 1]; mu(aMN.mu[k]); xg.setAttribute('cx', rl.PX(x));
+      rl.corr(k > 1 ? aMN.mu[k - 1] : null, aMN.mu[k]);
+      cnt._set(`valor ${k}:   x = ${aF(x)}      α = 1/${k}      μ = ${aF(aMN.mu[k])}`);
+    };
+    setK(1);
+    const dts = (tc - tu - 1) / NSL;
+    for (let k = 2; k <= NSL + 1; k++) aAt(() => setK(k), tu + .8 + (k - 2) * dts);
+    prog(v => setK(NSL + 1 + Math.round(v * (aNM - NSL - 1))), tc + .5, tl - tc + 1.5, io);
+    aHLine(gp, aEX, COL.chalk, tc + 6); aTx(p, `E[X] = ${aF(aEX)}`, gp.x0 + gp.W + 12, gp.VY(aEX) + 8, tc + 6, { size: 22, weight: 600 });
+    aRow(p, [['(17.14)', COL.dim, UI, 22], ['    μ_{m+1}', HUE.val], ['  =  ', COL.chalk], ['μ_{m}', HUE.val], ['  +  α_{m} ', COL.chalk], ['( x_{m} − μ_{m} )', HUE.pr]], LX, 224, tu, { size: 30, weight: 600 });
+    aRow(p, [['Teorema 17.14', HUE.act, UI, 24], [':   si   ', COL.chalk, UI, 24], ['∑_{m} α_{m} = +∞', COL.chalk], ['   y   ', COL.chalk, UI, 24], ['∑_{m} α_{m}^{2} < +∞', COL.chalk]], LX, 320, [tc, tc, tc + 2.5, tc + 4.5, tc + 4.5], { size: 30, weight: 600 });
+    aRow(p, [['μ_{m}', HUE.val], ['  →  E[X]', COL.chalk], ['     casi seguramente', COL.chalk, UI, 24], ['      (17.15)', COL.dim, UI, 22]], LX + 196, 372, tc + 8, { size: 30, weight: 600 });
+    const ll = aRow(p, [['α_{m} = 1/(m + 1)', COL.chalk], [':   la media de los valores vistos;  ley fuerte de los grandes números', COL.chalk, UI, 22]], LX, 456, tl, { size: 26, weight: 600 });
+    aHideAll(ll, tf - .5);
+    aRow(p, [['punto fijo  ', COL.chalk, UI, 24], ['x = H(x)', COL.chalk], [',  con H observada con ruido ', COL.chalk, UI, 24], ['w', HUE.pr]], LX, 456, tf, { size: 28, weight: 600 });
+    aRow(p, [['(17.18)', COL.dim, UI, 22], ['    x_{t+1}  =  x_{t}  +  α_{t} ', COL.chalk], ['[ H(x_{t}) + w_{t} − x_{t} ]', HUE.pr]], LX, 512, tf + 2, { size: 28, weight: 600 });
+    aRow(p, [['Teorema 17.17', HUE.act, UI, 24], [':   si H es una contracción para ', COL.chalk, UI, 24], ['‖ · ‖_{∞}', COL.chalk], [' con punto fijo ', COL.chalk, UI, 24], ['x^{*}', HUE.val], [',  el ruido tiene media cero', COL.chalk, UI, 24]], 100, 760, tf + 5, { size: 28, weight: 600 });
+    aRow(p, [['y los pasos cumplen las mismas condiciones:     ', COL.chalk, UI, 24], ['x_{t}  →  x^{*}', HUE.val], ['   casi seguramente', COL.chalk, UI, 24], ['      (17.21)', COL.dim, UI, 22]], 100, 812, tf + 7, { size: 28, weight: 600 });
+  }],
+
+  ['td', 'TD(0)', (m) => {
+    const p = panel(0), tbe = m('bel'), tu = m('upd'), te = m('err'), ts = [m('s1'), m('s2'), m('s3')], tm = m('more'), tl = m('lim'), tx = m('ex');
+    aNote(p, `π = (buscar, llevar) · ${aNS} pasos sorteados en la página · según el libro, converge por el teorema 17.17`);
+    aTitle(p, 'TD(0): evaluar una política con pasos observados');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true, hid: true }), tok = gr.tok(0);
+    gr.pol(aPI, .8);
+    aRow(p, [['V_{π}(s)', HUE.val], ['  =  E_{s′} [ ', COL.chalk], ['r(s, π(s))', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' V_{π}(s′)', HUE.val], [' ]', COL.chalk]], RX, 214, tbe, { size: 30, weight: 600 });
+    const up = aRow(p, [['(17.22)', COL.dim, UI, 22], ['   V(s)', HUE.val], ['  ←  ', COL.chalk], ['V(s)', HUE.val], ['  +  α ', COL.chalk], ['[ r + γ V(s′) − V(s) ]', HUE.pr]], RX, 272, tu, { size: 30, weight: 600 });
+    text(p, 'diferencia temporal', up.xs[5] + 14, 310, te, { size: 22, fill: HUE.pr, weight: 600 });
+    const d = [0, 1, 2].map(i => aTx(p, '', RX, 392 + i * 48, ts[0] + [.2, 1.5, 1.5][i], { size: 26, font: UI, weight: 600 }));
+    const det = k => {
+      const x = aTDR[k], vn = x.to === x.s ? x.old : x.V[x.to];
+      d[0]._set(`paso ${k + 1}:   ${aST[x.s]} → ${aST[x.to]},   recompensa ${aN(x.r)}`);
+      d[1]._set(`muestra:   ${aN(x.r)} + ${aN(aGAM)} · ${aF(vn)}  =  ${aF(x.tgt)}`);
+      d[2]._set(`diferencia:   ${aF(x.del)}          α = ${aF(x.al)}`);
+    };
+    aHideAll(d, tm - .7);
+    const gp = aGPl(p, 960, 384, 360, 216, -100, aNS + 100, -.4, 4.9, tm - .3, { xt: [0, 2000, 4000].map(v => [v, String(v)]), yt: [0, 1, 2, 3, 4].map(v => [v, String(v)]), xl: 'paso', yl: 'estimaciones de V' });
+    const lv = aST.map((_, s) => aLine(gp, aSub(aNS, SUB, n => n ? aTDR[n - 1].V[s] : 0), HUE.val, { r: 0 }));
+    const cnt = aTx(p, '', 1336, 420, tm - .3, { size: 24, font: UI, weight: 600 });
+    const rl = aRuler(p, 120, 750, 640, -1.2, 5.2, ts[0] - 1, { ticks: [-1, 0, 1, 2, 3, 4, 5], ty: 94 }), mks = [rl.mark(aST[0], HUE.val, true), rl.mark(aST[1], HUE.val, false)];
+    text(p, 'en rosa:  la corrección  α · diferencia;  el aro, la muestra', 120, 672, ts[0] - 1, { size: 22, fill: COL.dim });
+    const setN = n => {                                                              // estado tras n pasos
+      const V = n ? aTDR[n - 1].V : [0, 0];
+      aST.forEach((_, s) => { gr.val[s]._set(aF(V[s])); mks[s](V[s]); }); lv.forEach(fn => fn(Math.floor(n / SUB))); cnt._set(`paso ${n}`);
+      if (n) { const x = aTDR[n - 1]; rl.corr(x.old, x.V[x.s], x.tgt); } else rl.corr(null);
+    };
+    setN(0);
+    show(tok, ts[0] - .6, .3);
+    ts.forEach((t, k) => {
+      const x = aTDR[k];
+      aAt(() => det(k), t + .15); gr.go(tok, x.k, t + .2, 1.3);
+      aAt(() => rl.corr(x.old, x.old, x.tgt), t + 1.5);
+      aAt(() => setN(k + 1), t + 2.6); tw(gr.val[x.s], { c_fill: COL.chalk }, t + 2.6, .1); tw(gr.val[x.s], { c_fill: HUE.val }, t + 3.1, .5);
+    });
+    hide(tok, tm + .2, .3);
+    prog(v => setN(3 + Math.round(v * v * (aNS - 3))), tm + .5, tl + 1.2 - tm, lin);
+    aRow(p, [['α = 1 / n(s)^{0.7}', COL.chalk], ['      n(s):  visitas al estado s', COL.dim, UI, 22]], RX, 736, ts[0], { size: 26, weight: 600 });
+    aRow(p, [[`tras ${aNS} pasos:    `, COL.chalk, UI, 24], [`V  =  ${aVec(aTDF)}`, HUE.val]], RX, 790, tl + 1.2, { size: 28, weight: 700 });
+    aRow(p, [['valores exactos:    ', COL.chalk, UI, 24], [`V_{π}  =  ${aVec(aV1)}`, HUE.val]], RX, 840, tx, { size: 28, weight: 700 });
+    aST.forEach((_, s) => aHLine(gp, aV1[s], COL.chalk, tx));
+    text(p, 'de trazos:', 1336, 470, tx, { size: 22, fill: COL.dim });
+    [1, 0].forEach((s, i) => aTx(p, `V_{π}(${aST[s]}) = ${aF(aV1[s])}`, 1336, 508 + i * 38, tx, { size: 22, weight: 600 }));
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), Y = 500, rl = aRuler(p, 150, Y, 1300, .7, 3.3, null, { ticks: [1, 1.5, 2, 2.5, 3], ty: 118 });
+    T(p, 'Un paso de TD(0), a mano', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aRow(p, [['paso observado:   ', COL.dim, UI], [`${aST[0]} → ${aST[1]}`, COL.chalk, UI], ['  (buscar),     ', HUE.act, UI], [`recompensa r = ${aN(aC1.r)}`, HUE.rew, UI]], 100, 210, null, { size: 26, weight: 600 });
+    aRow(p, [['γ = ' + aN(aGAM), HUE.pr], ['          α = ' + aN(aC1.al), COL.chalk], ['          valores ilustrativos', COL.dim, UI, 22]], 100, 264, null, { size: 30, weight: 600 });
+    aRow(p, [['(17.22)', COL.dim, UI, 22], ['   V(s)', HUE.val], ['  ←  ', COL.chalk], ['V(s)', HUE.val], ['  +  α ', COL.chalk], ['[ r + γ V(s′) − V(s) ]', HUE.pr]], 100, 330, null, { size: 30, weight: 600 });
+    aST.forEach((st, s) => rl.mark(`V(${st}) = ${aF(aC1.V[s])}`, HUE.val, true)(aC1.V[s]));
+    S.q1 = [aC1W, aC1N, aC1T].map(v => {
+      const x = rl.PX(v), g = G(p); mk('rect', { x: x - 48, y: Y + 22, width: 96, height: 56, fill: COL.board, stroke: COL.chalk, 'stroke-width': 3 }, g);
+      mk('path', { d: `M${x} ${Y}v22`, stroke: COL.chalk, 'stroke-width': 3 }, g); T(g, aF(v), { x, y: Y + 60, size: 28, anchor: 'middle', font: MATH, weight: 700 });
+      return { el: g, box: [x - 54, Y - 6, 108, 90], label: 'valor ' + aF(v) };
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-td', prompt: [`¿Dónde queda V(${aST[0]}) después de este paso de TD(0)?`],
+    build: pickEls(S.q1, 1,
+      `La muestra es ${aN(aC1.r)} + ${aN(aGAM)} · ${aN(aC1.V[1])} = ${aF(aC1T)}. Con alfa = ${aN(aC1.al)} se avanza la mitad: ${aF(aC1N)}.`,
+      k => k === 2 ? `Esa es la muestra, ${aN(aC1.r)} + ${aN(aGAM)} · ${aN(aC1.V[1])}. Con alfa = ${aN(aC1.al)} solo se recorre la mitad del camino.` : `Falta el valor del estado siguiente. La muestra es ${aN(aC1.r)} + ${aN(aGAM)} · ${aN(aC1.V[1])} = ${aF(aC1T)}, mayor que ${aN(aC1.V[0])}.`),
+  }], done) }],
+
+  ['ql', 'Q-learning', (m) => {
+    const p = panel(0), tt = m('tab'), tu = m('upd'), ta = m('act'), trn = m('run'), tl = m('lim'), to = m('opt'), tpo = m('pol'), tth = m('thm'), NSL = 6, dts = (trn - ta - .8) / NSL;
+    aNote(p, `ε = ${aN(aEPS)} · α = 1 / n(s, a)^{0.7} · Q_{0} = 0 · ${aNS} pasos sorteados en la página · el libro supone recompensa determinista`);
+    aTitle(p, 'Q-learning: estimar Q* sin modelo');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, hid: true }), tok = gr.tok(0);
+    const tb = aQTab(p, 1040, 210, 150, 60, tt);
+    const bot = [
+      ...aRow(p, [['Q^{*}(s, a)', HUE.val], ['  =  E_{s′} [ ', COL.chalk], ['r(s, a)', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' max_{a′} Q^{*}(s′, a′)', HUE.val], [' ]', COL.chalk]], 100, 734, tt + 2.5, { size: 28, weight: 600 }),
+      ...aRow(p, [['(17.23)', COL.dim, UI, 22], ['   Q(s, a)', HUE.val], ['  ←  ', COL.chalk], ['Q(s, a)', HUE.val], ['  +  α ', COL.chalk], ['[ r + γ max_{a′} Q(s′, a′) − Q(s, a) ]', HUE.pr]], 100, 788, tu, { size: 28, weight: 600 }),
+      ...aRow(p, [['política ε-voraz', HUE.act, UI], [':   con probabilidad 1 − ε,  la acción de mayor Q(s, a);   con probabilidad ε,  una al azar', COL.chalk, UI]], 100, 840, ta, { size: 24, weight: 600 }),
+    ];
+    aHideAll(bot, tth - .5);
+    const sl = aTx(p, '', RX, 384, ta + .3, { size: 24, font: UI, weight: 600 });
+    const gp = aGPl(p, 960, 430, 360, 196, -100, aNS + 100, -1.3, 5.6, trn - .5, { xt: [0, 2000, 4000].map(v => [v, String(v)]), yt: [0, 2, 4].map(v => [v, String(v)]), xl: 'paso' });
+    const lv = aPAIR.map(([s, a]) => aLine(gp, aSub(aNS, SUB, n => n ? aQLR[n - 1].Q[s][a] : 0), HUE.val, { r: 0, w: 3 }));
+    const setN = n => {
+      tb.set(n ? aQLR[n - 1].Q : aQS.map(r => r.map(() => 0))); lv.forEach(fn => fn(Math.floor(n / SUB)));
+      if (!n) { tb.hl(); return; }
+      const x = aQLR[n - 1]; tb.hl(x.s, x.a);
+      sl._set(`paso ${n}:   ${aST[x.s]}, ${aAC[x.a]}${x.ex ? ' (al azar)' : ''}  →  ${aST[x.to]},   recompensa ${aN(x.r)}`);
+    };
+    setN(0);
+    show(tok, ta, .3);
+    for (let k = 0; k < NSL; k++) { const t = ta + .6 + k * dts; gr.go(tok, aQLR[k].k, t, dts * .8); aAt(() => setN(k + 1), t + dts * .7); }
+    hide(tok, trn + .1, .3);
+    prog(v => setN(NSL + Math.round(v * v * (aNS - NSL))), trn + .3, tl + 1 - trn, lin);
+    aAt(() => tb.hl(), tl + 1.4);
+    aPAIR.forEach(([s, a]) => aHLine(gp, aQS[s][a], COL.chalk, to));
+    text(p, 'de trazos,  Q*:', 1336, 462, to, { size: 22, fill: COL.dim });
+    aPAIR.forEach(([s, a], i) => aTx(p, `${aF(aQS[s][a])}   ${aST[s]}, ${aAC[a]}`, 1336, 500 + i * 36, to + (2 - i) * 1.4, { size: 22, weight: 600 }));
+    hide(sl, tpo - .3, .3);
+    aRow(p, [['π', HUE.act, MATH, 28], [`(${aST[0]}) = ${aAC[aGRD[0]]},     `, HUE.act, UI], ['π', HUE.act, MATH, 28], [`(${aST[1]}) = ${aAC[aGRD[1]]}`, HUE.act, UI], [aGRD[1] === 2 ? '     la óptima' : '', COL.good, UI]], RX, 384, tpo + .2, { size: 24, weight: 600 });
+    aST.forEach((_, s) => tb.box(s, aGRD[s], HUE.act, tpo + .2 + s * .8));
+    gr.pol(aGRD, tpo + 1.2);
+    aRow(p, [['Teorema 17.18', HUE.act, UI, 24], [':   MDP finito;   para todo (s, a),    ', COL.chalk, UI, 24], ['∑_{t} α_{t}(s, a) = +∞', COL.chalk], ['    y    ', COL.chalk, UI, 24], ['∑_{t} α_{t}(s, a)^{2} < +∞', COL.chalk]], 100, 750, tth, { size: 28, weight: 600 });
+    aRow(p, [['Q-learning converge a ', COL.chalk, UI, 24], ['Q^{*}', HUE.val], [' con probabilidad uno', COL.chalk, UI, 24], ['          exige visitar cada par (s, a) infinitas veces', COL.dim, UI, 22]], 100, 808, tth + 6, { size: 28, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), gr = aGraph(p, aMDP, aPOS, { t0: null, hid: true }), tok = gr.tok(1), tb = aQTab(p, 1020, 300, 160, 84, null, { size: 30 });
+    T(p, 'Una actualización de Q-learning', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    put(tok, { o: 1 }); gr.ed[1].pe.setAttribute('stroke', HUE.act); gr.ed[1].hd.setAttribute('fill', HUE.act); gr.ed[1].act.setAttribute('fill', HUE.act);
+    aRow(p, [['paso observado:   ', COL.dim, UI], [`${aST[0]}, ${aAC[0]}  →  ${aST[1]},     `, COL.chalk, UI], [`recompensa ${aN(aXB.r)}`, HUE.rew, UI]], RX, 204, null, { size: 24, weight: 600 });
+    T(p, `la tabla tras ${aKB} pasos, antes de corregirla:`, { x: RX, y: 248, size: 22, fill: COL.dim });
+    tb.set(aQB);
+    aRow(p, [['Q(s, a)', HUE.val], ['  ←  ', COL.chalk], ['Q(s, a)', HUE.val], ['  +  α ', COL.chalk], ['[ r + γ max_{a′} Q(s′, a′) − Q(s, a) ]', HUE.pr]], RX, 540, null, { size: 26, weight: 600 });
+    S.q2 = aPAIR.map(([s, a]) => ({ el: tb.c[s][a].g, box: tb.c[s][a].box, label: `celda ${aST[s]}, ${aAC[a]}` }));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-max', prompt: [`Llegó a «${aST[1]}» desde «${aST[0]}». ¿Qué celda da el máximo de la regla?`],
+    build: pickEls(S.q2, 0,
+      `El máximo se toma en la fila de «${aST[1]}», el estado al que se llegó: ${aF(aQB[1][2])}, en recoger.`,
+      k => k === 2 ? 'Esa es la celda que se corrige. El máximo se busca en la fila del estado al que se llegó.' : `En la fila de «${aST[1]}» hay una celda mayor. La regla toma el máximo, no la acción que vendrá.`),
+  }], done) }],
+
+  ['sarsa', 'Off-policy y on-policy', (m) => {
+    const p = panel(0), tof = m('off'), tsa = m('sarsa'), tex = m('ex'), tq = m('q'), tss = m('s'), tc = m('conv'), tr = m('run'), LX = 820, C = [100, 470, 800, 1090];
+    aNote(p, `paso ${aKB + 1} de la ejecución de Q-learning, α = ${aF(aXB.al)} · SARSA: figura 17.7 del libro, ejecutado en la página con otra semilla`);
+    aTitle(p, 'Off-policy y on-policy: Q-learning y SARSA');
+    const tb = aQTab(p, 260, 236, 150, 60, .4); tb.set(aQB);
+    const two = [...aRow(p, [['política de aprendizaje', HUE.act, UI], [':   elige la acción', COL.chalk, UI]], LX, 256, .6, { size: 26, weight: 600 }),
+      ...aRow(p, [['regla de actualización', HUE.val, UI], [':   da la nueva estimación', COL.chalk, UI]], LX, 312, 3.2, { size: 26, weight: 600 })];
+    aHideAll(two, tex - .5);
+    aRow(p, [['un paso:   ', COL.dim, UI], [`${aST[0]}, ${aAC[0]}  →  ${aST[1]},     `, COL.chalk, UI], [`recompensa r′ = ${aN(aXB.r)}`, HUE.rew, UI]], LX, 256, tex, { size: 24, weight: 600 });
+    aRow(p, [[`en «${aST[1]}», la política ε-voraz elige al azar:   `, COL.chalk, UI], ['a′ = llevar', HUE.act, UI]], LX, 312, tex + 2.4, { size: 24, weight: 600 });
+    tb.box(0, 0, COL.chalk, tex); tb.box(1, 1, HUE.act, tex + 2.4); tb.box(1, 2, HUE.val, tq);
+    text(p, 'a′', tb.x + 1.5 * tb.cw, tb.y + 2 * tb.chh + 34, tex + 2.4, { size: 24, fill: HUE.act, anchor: 'middle', weight: 700, font: MATH });
+    text(p, 'máximo', tb.x + 2.5 * tb.cw, tb.y + 2 * tb.chh + 34, tq, { size: 22, fill: HUE.val, anchor: 'middle', weight: 600 });
+    const row = (y, name, tag, parts, nxt, nw, t0, t1) => {
+      aRow(p, [[name, COL.chalk, UI], [`  ·  ${tag}`, COL.dim, UI]], C[0], y, t0, { size: 26, weight: 700 });
+      aRow(p, parts, C[1], y, t0 + .8, { size: 28, weight: 600 });
+      aTx(p, `=   ${aN(aXB.r)} + ${aN(aGAM)} · ${aF(nxt)}`, C[2], y, t1, { size: 28, weight: 600 });
+      aRow(p, [[`Q(${aST[0]}, ${aAC[0]}):   ${aF(aXB.old)}  →  `, COL.chalk], [aF(nw), HUE.val]], C[3], y, t1 + 1.6, { size: 28, weight: 700 });
+    };
+    row(470, 'Q-learning', 'off-policy', [['r′ + γ ', COL.chalk], ['max_{a′} Q(s′, a′)', HUE.val]], aQB[1][2], aXB.Q[0][0], tof, tq);
+    row(536, 'SARSA', 'on-policy', [['r′ + γ ', COL.chalk], ['Q(s′, a′)', HUE.act]], aQB[1][1], aSB.nw, tsa, tss);
+    aRow(p, [['convergencia de SARSA', HUE.act, UI], [':   depende de la política de aprendizaje', COL.chalk, UI]], 100, 636, tc, { size: 24, weight: 600 });
+    text(p, 'todas las acciones elegidas infinitas veces,  y la política se vuelve voraz en el límite', 100, 684, tc + 3.5, { size: 24, weight: 600 });
+    aRow(p, [[`SARSA con ε = 1/√n(s),  tras ${aNS} pasos:    `, COL.chalk, UI, 24], [`Q  =  ${aVec(aTri(aSAF))}`, HUE.val], ['          Q^{*}  =  ' + aVec(aTri(aQS)), COL.chalk]], 100, 790, tr, { size: 28, weight: 600 });
+    text(p, 'en el orden:  (inicio, buscar),  (otro, llevar),  (otro, recoger)', 100, 836, tr + .5, { size: 22, fill: COL.dim });
+  }],
+
+  ['more', 'Más allá', (m) => {
+    const p = panel(0), tn = m('n', .3), tla = m('lam'), t0 = m('l0'), t1 = m('l1'), te = m('e'), tbg = m('big'), LX = 700, X0 = 150, BW = 44, YB = 560, HB = 300, NB = 10;
+    aNote(p, 'TD(λ): seudocódigo de la p. 404 del libro · la suma se escribe desde n = 1 para que λ = 0 dé TD(0), como dice el texto (el libro la indexa desde n = 0)');
+    aTitle(p, 'Varios pasos, y espacios de estados grandes');
+    const cg = G(p, { o: 0 }); show(cg, tla - .4);
+    mk('path', { d: `M${X0} ${YB - HB}V${YB}H${X0 + NB * BW + 10}`, stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, cg);
+    [0, .5, 1].forEach(v => T(cg, aN(v), { x: X0 - 14, y: YB - v * HB + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+    aTx(cg, 'peso del retorno de n pasos:   (1 − λ) λ^{n−1}', X0, 218, null, { size: 22, fill: COL.dim, font: UI });
+    aTx(cg, 'n', X0 + NB * BW + 26, YB + 34, null, { size: 24, fill: COL.dim });
+    const bars = Array.from({ length: NB }, (_, i) => { T(cg, String(i + 1), { x: X0 + 8 + i * BW + (BW - 8) / 2, y: YB + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); return mk('rect', { x: X0 + 8 + i * BW, y: YB, width: BW - 8, height: 0, fill: HUE.pr }, cg); });
+    const lt = aTx(cg, '', X0 + 270, 300, null, { size: 32, fill: HUE.pr, weight: 700 });
+    const setL = lam => { bars.forEach((b, i) => { const hh = aLam(lam, i + 1) * HB; b.setAttribute('y', YB - hh); b.setAttribute('height', hh); }); lt._set(`λ = ${aF(lam)}`); };
+    setL(.5);
+    const sweep = (a, b, t, dur) => prog(v => setL(a + (b - a) * v), t, dur, io);
+    sweep(.5, .8, tla + 3.5, 2); sweep(.8, 0, t0, 1.2); sweep(0, .9, t1, 1.6);
+    const ns = [...aRow(p, [['n pasos:    ', COL.chalk, UI, 24], ['R_{t}^{n}', HUE.val], ['  =  ', COL.chalk], ['r_{t+1} + γ r_{t+2} + ⋯ + γ^{n−1} r_{t+n}', HUE.rew], ['  +  γ^{n} ', COL.chalk], ['V(s_{t+n})', HUE.val]], LX, 224, tn, { size: 28, weight: 600 }),
+      ...aRow(p, [['V(s)', HUE.val], ['  ←  ', COL.chalk], ['V(s)', HUE.val], ['  +  α ', COL.chalk], ['( R_{t}^{n} − V(s) )', HUE.pr]], LX + 126, 280, tn + 5, { size: 28, weight: 600 })];
+    aHideAll(ns, tbg - .5);
+    aRow(p, [['TD(λ):    ', HUE.act, UI, 24], ['R_{t}^{λ}', HUE.val], ['  =  (1 − λ) ∑_{n ≥ 1} λ^{n−1} ', COL.chalk], ['R_{t}^{n}', HUE.val], [',     λ ∈ [0, 1]', COL.chalk]], LX, 364, tla, { size: 28, weight: 600 });
+    aRow(p, [['λ = 0', HUE.pr], [':   coincide con TD(0)', COL.chalk, UI, 24], ['          λ = 1', HUE.pr], [':   la recompensa futura total', COL.chalk, UI, 24]], LX, 420, [t0, t0, t1, t1], { size: 28, weight: 600 });
+    text(p, 'en el seudocódigo, un peso e(s) por estado:', LX, 500, te, { size: 22, fill: COL.dim });
+    aRow(p, [['e(s) ← λ e(s) + 1', COL.chalk], ['          e(u) ← γλ e(u)', COL.chalk], ['   para u ≠ s', COL.dim, UI, 22]], LX, 548, [te + .4, te + 3, te + 3], { size: 28, weight: 600 });
+    aRow(p, [['V(u) ← V(u) + α δ e(u)', HUE.val], ['     para todo estado u;   δ: la diferencia del paso', COL.dim, UI, 22]], LX, 600, te + 4.5, { size: 28, weight: 600 });
+    aRow(p, [['muchos estados', HUE.act, UI, 24], ['  (backgammon: más de 10^{20}):     ', COL.chalk, UI, 24], ['V_{π}(s) ≈ f_{w}(s)', HUE.val], [',   por ejemplo   ', COL.chalk, UI, 24], ['f_{w}(s) = w · Φ(s)', HUE.val]], 100, 760, tbg, { size: 28, weight: 600 });
+    text(p, 'aproximar el valor con una función de parámetros w, en lugar de una tabla:  un problema de regresión', 100, 812, tbg + 3.5, { size: 24, weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Sin modelo:  las esperanzas de Bellman se estiman con muestras y pasos α que se achican.', 'w1'], ['TD(0) evalúa una política:  V(s) ← V(s) + α [ r + γ V(s′) − V(s) ].', 'w2'],
+      ['Q-learning estima Q^{*} con max_{a′} Q(s′, a′):  off-policy.   SARSA usa Q(s′, a′):  on-policy.', 'w3'], ['TD(λ) mezcla retornos de varios pasos.   Aquí termina el libro.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 26, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['TD(0) necesita conocer las probabilidades de transición de la política que evalúa.'], ans: ['f'], why: 'Solo usa los pasos observados: el estado al que se llega y la recompensa recibida.' },
+      { parts: ['El teorema 17.14 pide que los pasos alfa sumen infinito y que sus cuadrados sumen una cantidad finita.'], ans: ['v'], why: 'Con esas dos condiciones, la estimación converge casi seguramente a la esperanza.' },
+      { parts: ['Q-learning converge a Q* aunque algún par de estado y acción se visite solo un número finito de veces.'], ans: ['f'], why: 'Las condiciones del teorema 17.18 exigen visitar cada par infinitas veces.' },
+      { parts: ['La regla de Q-learning usa la acción que la política de aprendizaje elige en el estado siguiente.'], ans: ['f'], why: 'Esa es la regla de SARSA. Q-learning usa el máximo sobre las acciones del estado siguiente.' },
+      { parts: ['Con lambda igual a cero, TD(lambda) coincide con TD(0).'], ans: ['v'], why: 'Todo el peso queda en el retorno de un solo paso.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-q', prompt: [`Q-learning con descuento ${aN(aGAM)} y paso alfa = ${aN(aP2.al)}. El agente busca desde «inicio», recibe recompensa ${aN(aP2.r)} y llega a «otro». En la tabla, Q(inicio, buscar) = ${aN(aP2.q)}, Q(otro, llevar) = ${aN(aP2.row[0])} y Q(otro, recoger) = ${aN(aP2.row[1])}. ¿Cuánto vale Q(inicio, buscar) después de la actualización?`],
+    build: choice([[aD(aUpd(aP2.q, aP2.r, aP2.row[0], aP2.al))], [aD(aP2N)], [aD(aP2.r + aGAM * aP2.row[1])], [aD(aP2.q + aP2.al * (aP2.r + aGAM * aP2.row[1]))]], 1,
+      `La muestra es ${aN(aP2.r)} + ${aN(aGAM)} · ${aN(aP2.row[1])} = ${aD(aP2.r + aGAM * aP2.row[1])}. La celda avanza la mitad del camino: ${aN(aP2.q)} + ${aN(aP2.al)} · (${aD(aP2.r + aGAM * aP2.row[1])} − ${aN(aP2.q)}) = ${aD(aP2N)}.`,
+      [`El máximo de la fila de «otro» es ${aN(aP2.row[1])}, no ${aN(aP2.row[0])}: la regla no mira qué acción se tomará.`, null, `Esa es la muestra, ${aN(aP2.r)} + ${aN(aGAM)} · ${aN(aP2.row[1])}. Con alfa = ${aN(aP2.al)} solo se recorre la mitad del camino desde ${aN(aP2.q)}.`, `Dentro del corchete falta restar el valor actual: ${aN(aP2.q)} + ${aN(aP2.al)} · (${aD(aP2.r + aGAM * aP2.row[1])} − ${aN(aP2.q)}).`]),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

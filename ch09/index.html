@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SVM: el caso separable</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 9, title: 'SVM: el caso separable', minutes: 6, language: 'es', next: '../ch10/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados de los caps. 1 y 8) ---------- */
+// salmón = +1 · azul = −1 · ámbar = la recta (hipótesis), su franja y lo elegido · verde/rojo = acierto/error
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R_{D}(h_{S})'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    // α, ρ y ‖ se confunden en la fuente de interfaz (con «a», «p» y «II»): van siempre en la fuente matemática
+    (k ? s.slice(2, -1) : s).split(/([αρ‖])/).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(/[αρ‖]/.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill]) => { xs.push(x); const e = aTx(p, str, x, y, t0, { ...opts, fill: fill || COL.chalk }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF2 = v => v.toFixed(2);
+const aSg = v => (v < 0 ? '−' : '+') + Math.abs(v).toFixed(2);
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;                                       // etiqueta +1 = salmón, etiqueta −1 = azul
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aSet = (e, str, t) => prog(() => { e.textContent = str; }, t, 0);            // cambia un texto simple en el instante t
+const aArrow = (p, x1, y1, x2, y2, col = COL.dim) => {
+  const a = Math.atan2(y2 - y1, x2 - x1), hd = d => `M${x2} ${y2}L${x2 - 18 * Math.cos(a + d)} ${y2 - 18 * Math.sin(a + d)}`;
+  return path(p, `M${x1} ${y1}L${x2} ${y2}${hd(.45)}${hd(-.45)}`, { stroke: col, 'stroke-width': 4 }, { d: 0 });
+};
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aDp = (a, b) => a[0] * b[0] + a[1] * b[1];
+const aFn = (s, x) => aDp(s.w, x) + s.b;                                           // w · x + b
+// SVM exacta en el plano (caso separable). El hiperplano de margen máximo queda fijado por 2 vectores de soporte (uno de cada
+// clase: la mediatriz) o por 3 (dos de una clase y uno de la otra). Se prueban todos los candidatos, se descartan los que violan
+// alguna restricción y_i(w · x_i + b) ≥ 1 y se conserva el de menor ‖w‖. Cada punto es [x1, x2, etiqueta].
+const aSvm = pts => {
+  let best = null;
+  const tryc = (w, b) => { const n = Math.hypot(w[0], w[1]); if (!isFinite(n + b) || !pts.every(p => p[2] * (aDp(w, p) + b) >= 1 - 1e-9)) return; if (!best || n < best.n - 1e-12) best = { w, b, n }; };
+  pts.forEach((P, i) => pts.forEach(N => {
+    if (N[2] === P[2]) return;
+    if (P[2] > 0) { const d = [P[0] - N[0], P[1] - N[1]], s = 2 / aDp(d, d), w = [d[0] * s, d[1] * s]; tryc(w, 1 - aDp(w, P)); }
+    pts.forEach((Q, j) => { if (j <= i || Q[2] !== P[2]) return; const n = [Q[1] - P[1], P[0] - Q[0]], den = aDp(n, [P[0] - N[0], P[1] - N[1]]); if (Math.abs(den) < 1e-12) return; const c = 2 * P[2] / den, w = [n[0] * c, n[1] * c]; tryc(w, P[2] - aDp(w, P)); });
+  }));
+  if (!best) return null;
+  best.rho = 1 / best.n;                                                           // margen geométrico ρ = 1/‖w‖
+  best.sv = pts.map((p, i) => i).filter(i => Math.abs(pts[i][2] * aFn(best, pts[i]) - 1) < 1e-7);   // puntos sobre los hiperplanos marginales
+  return best;
+};
+// Una recta como [θ, c, mitad de la franja]: normal unitaria n = (cos θ, sen θ) y n · x = c.
+const aDeg = d => d * Math.PI / 180, aN2 = th => [Math.cos(th), Math.sin(th)];
+const aSt = s => [Math.atan2(s.w[1], s.w[0]), -s.b / s.n, s.rho];
+const aRngOf = (pts, th) => { const n = aN2(th); return [Math.max(...pts.filter(p => p[2] < 0).map(p => aDp(n, p))), Math.min(...pts.filter(p => p[2] > 0).map(p => aDp(n, p)))]; };
+const aSep = (pts, th, f) => { const [lo, hi] = aRngOf(pts, th); return lo + f * (hi - lo); };   // c de la recta de dirección θ, a la fracción f del hueco entre las clases
+const aDist = (pts, th, c) => { const n = aN2(th); return pts.map(p => p[2] * (aDp(n, p) - c)); };   // distancia con signo: positiva si el punto queda del lado correcto
+const aMg = (pts, th, c) => Math.min(...aDist(pts, th, c));                        // margen geométrico de la recta (5.4)
+const aNear = (pts, th, c) => { const d = aDist(pts, th, c); return d.indexOf(Math.min(...d)); };
+const aErrs = (pts, th, c) => aDist(pts, th, c).filter(v => v <= 0).length;
+// Coeficientes α de las condiciones KKT: w = Σ α_i y_i x_i (5.9) y Σ α_i y_i = 0 (5.10), con α_i = 0 fuera de los vectores de soporte (5.11).
+const aAlpha = (pts, s) => {
+  const al = pts.map(() => 0), v = s.sv;
+  if (v.length === 2) v.forEach(i => { al[i] = s.n * s.n / 2; });
+  else if (v.length === 3) {
+    const A = [0, 1].map(r => v.map(i => pts[i][2] * pts[i][r])).concat([v.map(i => pts[i][2])]), b = [s.w[0], s.w[1], 0];
+    const det = M => M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]), D = det(A);
+    v.forEach((i, k) => { al[i] = det(A.map((row, r) => row.map((x, c) => c === k ? b[r] : x))) / D; });
+  } else return null;
+  return al;
+};
+const aDual = (pts, al) => al.reduce((s, a) => s + a, 0) - .5 * pts.reduce((s, p, i) => s + pts.reduce((t, q, j) => t + al[i] * al[j] * p[2] * q[2] * aDp(p, q), 0), 0);   // objetivo de (5.14)
+// Dejar uno fuera: por cada punto, la solución sin él, si lo clasifica bien y si es la misma recta.
+const aLoo = (pts, s) => pts.map((p, i) => { const q = aSvm(pts.filter((_, j) => j !== i)); return { q, ok: Math.sign(aFn(q, p)) === p[2], same: Math.abs(q.w[0] - s.w[0]) + Math.abs(q.w[1] - s.w[1]) + Math.abs(q.b - s.b) < 1e-9 }; });
+// La muestra del capítulo: 12 puntos ilustrativos, 6 por clase, linealmente separables.
+const aP = [[5, 6, 1], [9.5, 5.5, 1], [3, 6.5, 1], [9.5, 2.5, 1], [6.5, 7, 1], [6.5, 5.5, 1], [1, 4.5, -1], [1.5, 2.5, -1], [7.5, .5, -1], [2.5, 4.5, -1], [4, 3, -1], [6.5, 1.5, -1]];
+const aM = aP.length, aSol = aSvm(aP), aStar = aSt(aSol), aNsv = aSol.sv.length, aAl = aAlpha(aP, aSol), aVals = aP.map(p => p[2] * aFn(aSol, p));
+const aLo = aLoo(aP, aSol), aLerr = aLo.filter(o => !o.ok).length;
+const aNon = aP.map((p, i) => i).filter(i => !aSol.sv.includes(i));               // los que no son vectores de soporte
+const aSvOrd = [...aSol.sv].sort((i, j) => aLo[j].ok - aLo[i].ok);                 // vectores de soporte: primero los que siguen bien clasificados al quitarlos
+const aRem1 = aNon.reduce((a, i) => aVals[i] < aVals[a] ? i : a), aRem2 = aSvOrd[0];   // los dos puntos que se quitan en el beat «soporte»
+// Rectas separadoras que no son la de SVM: [θ, fracción del hueco].
+const aA0 = [aDeg(46), .35], aTour = [[aDeg(40.5), .5], [aDeg(71), .6], [aDeg(52), .78]], aPoor = [aDeg(71), .5];
+const aQ1 = [[aDeg(46), .5], [aDeg(67), .5]].map(([th, f]) => { const c = aSep(aP, th, f); return [th, c, aMg(aP, th, c)]; }).concat([aStar]), aQ1r = 2;   // comprobación 1
+// Comprobación 2: otra muestra (10 puntos) y tres puntos marcados; solo uno es vector de soporte.
+const aQ = [[1, 2.5, 1], [2, 5.5, 1], [4, 6.5, 1], [5.5, 6.5, 1], [5.5, 5, 1], [6.5, 2.5, -1], [8, 1.5, -1], [8.5, 4, -1], [8.5, 5.5, -1], [6.5, 1, -1]];
+const aQs = aSvm(aQ), aQlo = aLoo(aQ, aQs), aQm = [3, 8, 6], aQr = aQm.findIndex(i => !aQlo[i].same);
+const aGram = aP.map(p => aP.map(q => aDp(p, q))), aGmax = Math.max(...aGram.flat());   // tabla de productos internos x_i · x_j
+/* aMATH:end */
+
+// Plano de características con una recta, su franja y los hiperplanos marginales. Lo que depende de la recta se recorta al marco.
+// pl.set(θ, c, mitad) mueve la recta; pl.lg es el grupo de la recta (empieza oculto) y pl.tg el de los dos semiplanos teñidos.
+const aPlane = (p, ox, oy, sc, pts, id, { t0 = .4, W = 10.5, H = 8 } = {}) => {
+  const X = x => ox + x * sc, Y = y => oy - y * sc, pl = { X, Y, sc, pts, W, H };
+  mk('rect', { x: ox, y: oy - H * sc, width: W * sc, height: H * sc }, mk('clipPath', { id }, mk('defs', {}, p)));
+  const fr = put(mk('rect', { x: ox, y: oy - H * sc, width: W * sc, height: H * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, p), { o: t0 == null ? 1 : 0 });
+  if (t0 != null) show(fr, t0);
+  const cg = mk('g', { 'clip-path': `url(#${id})` }, p);
+  pl.tg = G(cg, { o: 0 }); pl.tp = mk('polygon', { fill: HUE.pos, 'fill-opacity': .13 }, pl.tg); pl.tn = mk('polygon', { fill: HUE.neg, 'fill-opacity': .13 }, pl.tg);
+  pl.under = G(cg);
+  pl.lg = G(cg, { o: 0 });
+  pl.band = mk('polygon', { fill: HUE.hyp, 'fill-opacity': .17 }, pl.lg);
+  pl.m1 = mk('path', { stroke: HUE.hyp, 'stroke-width': 2.5, 'stroke-dasharray': '10 8', fill: 'none' }, pl.lg); pl.m2 = mk('path', { stroke: HUE.hyp, 'stroke-width': 2.5, 'stroke-dasharray': '10 8', fill: 'none' }, pl.lg);
+  pl.ln = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, pl.lg);
+  pl.dg = G(p);
+  pl.dots = pts.map((q, i) => { const e = put(mk('circle', { r: sc > 50 ? 10 : 7, fill: aHue(q[2]) }, pl.dg), { x: X(q[0]), y: Y(q[1]), o: t0 == null ? 1 : 0 }); if (t0 != null) show(e, t0 + i * .03, .3); return e; });
+  pl.set = (th, c, half = 0) => {
+    const n = aN2(th), L = 30, P = (k, d) => X(n[0] * (c + d) - n[1] * k).toFixed(1) + ' ' + Y(n[1] * (c + d) + n[0] * k).toFixed(1);
+    const ln = d => `M${P(-L, d)}L${P(L, d)}`, pg = (a, b) => [P(-L, a), P(L, a), P(L, b), P(-L, b)].join(' ');
+    pl.ln.setAttribute('d', ln(0)); pl.m1.setAttribute('d', ln(half)); pl.m2.setAttribute('d', ln(-half));
+    pl.band.setAttribute('points', pg(-half, half)); pl.tp.setAttribute('points', pg(0, L)); pl.tn.setAttribute('points', pg(0, -L));
+    [pl.m1, pl.m2, pl.band].forEach(e => { e.style.display = half > 1e-6 ? '' : 'none'; });
+  };
+  return pl;
+};
+// Mueve la recta de un estado [θ, c, mitad] a otro.
+const aGo = (pl, a, b, t0, dur) => prog(q => pl.set(...a.map((v, i) => v + (b[i] - v) * q)), t0, dur);
+// Anillo alrededor del punto i del plano.
+const aRing = (pl, i, col, t0, r = 19) => { const e = put(mk('circle', { r, fill: 'none', stroke: col, 'stroke-width': 4 }, pl.dg), { x: pl.X(pl.pts[i][0]), y: pl.Y(pl.pts[i][1]), o: 0 }); if (t0 != null) show(e, t0, .3); return e; };
+// Marca de acierto (✓ verde) o de error (✗ roja) junto a un punto.
+const aMark = (g, x, y, ok, t0) => { const e = put(mk('path', { d: ok ? 'M-9 0L-3 8L10 -9' : 'M-8 -8L8 8M8 -8L-8 8', fill: 'none', stroke: ok ? COL.good : COL.bad, 'stroke-width': 5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, g), { x, y, o: 0 }); show(e, t0, .25); return e; };
+// Posición del rótulo de la recta n · x = c donde sale del marco (por el borde derecho o por el inferior).
+const aEdge = (pl, th, c) => { const n = aN2(th), y = (c - n[0] * pl.W) / n[1]; return y >= 0 && y <= pl.H ? { x: pl.X(pl.W) + 12, y: pl.Y(y) + 8, anchor: 'start' } : { x: pl.X(c / n[0]) + 36, y: pl.Y(0) + 30, anchor: 'end' }; };
+const aMain = (p, id) => aPlane(p, 100, 686, 62, aP, id);
+const NOTE = 'puntos ilustrativos · salmón = +1, azul = −1 · la recta y los valores se calculan en la página';
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 9', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'SVM: el caso separable', { x: 800, y: 420, size: 64, weight: 600, anchor: 'middle' });
+    T(g, 'máquinas de vectores de soporte', { x: 800, y: 500, size: 48, weight: 600, anchor: 'middle', fill: COL.task });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Entre todas las rectas que separan una muestra, la de margen máximo.', 800, 620, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['lineal', 'Clasificación lineal', (m) => {
+    const p = panel(0), tl = m('line'), tn = m('w'), ts = m('sign'), tm = m('move'), tv = m('vc'), RX = 830;
+    aNote(p, NOTE);
+    aTitle(p, 'Clasificación lineal');
+    const pl = aMain(p, 'aClipLineal'), th = aA0[0], c = aSep(aP, ...aA0), n = aN2(th);
+    text(p, 'cada punto: un ejemplo con etiqueta +1 o −1', RX, 230, 1.5, { size: 26, fill: COL.dim });
+    pl.set(th, c); show(pl.lg, tl, .6);
+    show(put(mk('path', { d: `M${RX} 300h44`, stroke: HUE.hyp, 'stroke-width': 4 }, p), { o: 0 }), tl);
+    aTx(p, 'w · x + b = 0', RX + 60, 310, tl, { size: 32, fill: HUE.hyp, weight: 600 });
+    text(p, 'hiperplano (aquí, una recta)', RX + 290, 308, tl + .6, { size: 24, fill: COL.dim });
+    // el vector normal w
+    const a0 = [n[0] * c + n[1] * 2, n[1] * c - n[0] * 2], a1 = [a0[0] + n[0] * 1.3, a0[1] + n[1] * 1.3];
+    draw(aArrow(pl.dg, pl.X(a0[0]), pl.Y(a0[1]), pl.X(a1[0]), pl.Y(a1[1]), HUE.hyp), tn, .6);
+    text(pl.dg, 'w', pl.X(a1[0]) + 10, pl.Y(a1[1]) - 6, tn + .4, { size: 30, fill: HUE.hyp, weight: 700, font: MATH });
+    aTx(p, 'w: vector normal a la recta  ·  b: un número', RX, 370, tn, { size: 26, font: UI });
+    show(pl.tg, ts, .8);
+    aTx(p, 'w · x + b > 0:  se predice +1', RX, 450, ts, { size: 30, fill: HUE.pos, weight: 600 });
+    aTx(p, 'w · x + b < 0:  se predice −1', RX, 498, ts + 5, { size: 30, fill: HUE.neg, weight: 600 });
+    // un punto nuevo cruza la recta
+    const A = [8.2, 4.3], B = [5.3, 2], nd = put(mk('circle', { r: 11, stroke: COL.chalk, 'stroke-width': 3 }, pl.dg), { o: 0 }), ro = text(p, '', RX, 580, tm, { size: 28, weight: 600 });
+    const at = q => { const x = [A[0] + (B[0] - A[0]) * q, A[1] + (B[1] - A[1]) * q], v = aDp(n, x) - c; put(nd, { x: pl.X(x[0]), y: pl.Y(x[1]) }); nd.setAttribute('fill', aHue(v)); ro.textContent = `punto nuevo:  w · x + b = ${aSg(v)}   →   ${v > 0 ? '+1' : '−1'}`; ro.setAttribute('fill', aHue(v)); };
+    at(0); show(nd, tm, .3); prog(at, tm + .5, 1.6); prog(q => at(1 - q), tm + 2.5, 1.4);
+    aTx(p, 'H = { x ↦ sign(w · x + b) :  w ∈ ℝ^{N}, b ∈ ℝ }', RX, 680, tv, { size: 30, weight: 600 });
+    aTx(p, '(5.2) · complejidad pequeña: VCdim(H) = N + 1 (cap. 5)', RX, 724, tv + 2.5, { size: 24, fill: COL.dim, font: UI });
+  }],
+
+  ['muchas', 'El caso separable', (m) => {
+    const p = panel(0), tm = m('many'), tg = m('geo'), tn = m('min'), ts = m('swing'), RX = 830;
+    aNote(p, NOTE);
+    aTitle(p, 'El caso separable: ¿qué recta elegir?');
+    const pl = aMain(p, 'aClipMuchas'), sg = G(pl.under, { o: 0 }), segs = aP.map(() => mk('path', { fill: 'none' }, sg)), ring = aRing(pl, 0, HUE.hyp, tn);
+    const er = text(p, '', RX, 230, .6, { size: 28 }), rv = text(p, '', RX + 110, 640, tn + 1, { size: 40, fill: HUE.hyp, weight: 700, font: MATH });
+    let hot = false, cur = aA0;
+    const upd = (th, f) => {
+      const c = aSep(aP, th, f), nn = aN2(th), k = aNear(aP, th, c);
+      pl.set(th, c); cur = [th, f];
+      segs.forEach((e, i) => { const q = aP[i], d = aDp(nn, q) - c, on = hot && i === k; e.setAttribute('d', `M${pl.X(q[0]).toFixed(1)} ${pl.Y(q[1]).toFixed(1)}L${pl.X(q[0] - d * nn[0]).toFixed(1)} ${pl.Y(q[1] - d * nn[1]).toFixed(1)}`); e.setAttribute('stroke', on ? HUE.hyp : COL.dim); e.setAttribute('stroke-width', on ? 5 : 2); });
+      put(ring, { x: pl.X(aP[k][0]), y: pl.Y(aP[k][1]) });
+      er.textContent = `errores en la muestra: ${aErrs(aP, th, c)} de ${aM}`; rv.textContent = aF2(aMg(aP, th, c));
+    };
+    const go = (a, b, t0, dur) => prog(q => upd(a[0] + (b[0] - a[0]) * q, a[1] + (b[1] - a[1]) * q), t0, dur);
+    upd(...aA0); show(pl.lg, .5);
+    go(aA0, aTour[0], tm, 1.5); go(aTour[0], aTour[1], tm + 2, 2); go(aTour[1], aTour[2], tm + 4.6, 1.8);
+    text(p, 'hay infinitas rectas que separan la muestra', RX, 274, tm + .6, { size: 26, fill: COL.dim });
+    show(sg, tg, .5);
+    aTx(p, 'ρ_{h}(x) = |w · x + b| / ‖w‖', RX, 380, tg, { size: 36, weight: 600 });
+    text(p, '(5.4) · margen geométrico de un punto: su distancia a la recta', RX, 422, tg + .6, { size: 22, fill: COL.dim });
+    prog(() => { hot = true; upd(...cur); }, tn, 0);
+    aTx(p, 'ρ_{h} = min_{i ∈ [m]} ρ_{h}(x_{i})', RX, 520, tn, { size: 36, weight: 600 });
+    text(p, 'margen de la recta: la distancia al punto más cercano', RX, 562, tn + .6, { size: 22, fill: COL.dim });
+    aTx(p, 'ρ_{h}  =', RX, 640, tn + 1, { size: 40, fill: HUE.hyp, weight: 700 });
+    go(aTour[2], aTour[1], ts, 2.2); go(aTour[1], aA0, ts + 2.8, 2.2);
+  }],
+
+  ['margen', 'El margen máximo', (m) => {
+    const p = panel(0), tb = m('band'), tx = m('max'), tt = m('touch'), tf = m('safe'), RX = 830;
+    aNote(p, NOTE);
+    aTitle(p, 'SVM: el hiperplano de margen máximo');
+    const pl = aMain(p, 'aClipMargen'), rv = text(p, '', RX + 110, 350, .6, { size: 40, fill: HUE.hyp, weight: 700, font: MATH });
+    aTx(p, 'ρ_{h}  =', RX, 350, .6, { size: 40, fill: HUE.hyp, weight: 700 });
+    const upd = (th, f, k) => { const c = aSep(aP, th, f), g = aMg(aP, th, c); pl.set(th, c, g * k); rv.textContent = aF2(g); };
+    upd(...aPoor, 0); show(pl.lg, .4);
+    prog(q => upd(...aPoor, q), tb + .6, 1.4);
+    text(p, 'el margen, como una franja sin puntos', RX, 230, tb, { size: 26 });
+    text(p, 'a los dos lados de la recta', RX, 266, tb, { size: 26 });
+    prog(q => upd(aPoor[0] + (aStar[0] - aPoor[0]) * q, .5, 1), tx + .4, 3.4);
+    aSol.sv.forEach((i, k) => aRing(pl, i, COL.chalk, tt + k * .25));
+    text(p, `la franja queda trabada por ${aNsv} puntos`, RX, 420, tt, { size: 26 });
+    text(p, 'solución de SVM: la recta separadora de margen máximo', RX, 480, tt + 2, { size: 26, fill: HUE.hyp, weight: 600 });
+    // la elección más segura: un disco de radio ρ alrededor de cada punto de entrenamiento
+    aP.forEach((q, i) => show(put(mk('circle', { cx: pl.X(q[0]), cy: pl.Y(q[1]), r: aSol.rho * pl.sc, fill: aHue(q[2]), 'fill-opacity': .13, stroke: aHue(q[2]), 'stroke-width': 1.5 }, pl.under), { o: 0 }), tf + 1.6 + i * .08, .4));
+    text(p, 'la elección más segura: un punto nuevo a menos de ρ', RX, 580, tf, { size: 26 });
+    text(p, 'de un punto de entrenamiento de su misma clase', RX, 618, tf + 2.2, { size: 26 });
+    text(p, 'queda bien clasificado', RX, 656, tf + 6, { size: 26 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    T(p, 'La misma muestra y tres rectas que la separan, cada una con su franja', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'La franja llega hasta el punto más cercano a la recta.', { x: 100, y: 184, size: 26 });
+    S.q1 = aQ1.map((l, i) => {
+      const x = 110 + i * 480, g = G(p), pl = aPlane(g, x, 580, 38, aP, 'aClipQ1' + i, { t0: null });
+      T(g, 'ABC'[i], { x, y: 262, size: 32, weight: 700, fill: HUE.hyp });
+      pl.set(...l); put(pl.lg, { o: 1 });
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-margen', prompt: ['¿Cuál es la solución de SVM? Elegir el dibujo.'],
+    build: pickEls(S.q1.map((el, i) => ({ el, box: [100 + i * 480, 226, 420, 366], label: 'dibujo ' + 'ABC'[i] })), aQ1r,
+      `Es la de margen máximo: su franja es la más ancha y toca ${aNsv} puntos.`,
+      i => `Separa la muestra, pero su margen es ${aF2(aQ1[i][2])}: hay una franja más ancha.`),
+  }], done) }],
+
+  ['primal', 'El problema de optimización', (m) => {
+    const p = panel(0), tsc = m('scale'), tmg = m('marg'), tr = m('rho'), tmn = m('min'), tst = m('st'), tc = m('convex'), RX = 960, BX = RX + 40, UW = 116, K0 = .4;
+    aNote(p, NOTE);
+    aTitle(p, 'El problema de optimización');
+    const pl = aMain(p, 'aClipPrimal'); pl.set(...aStar); show(pl.lg, .4);
+    // una barra por punto: y_i(w · x_i + b); al cambiar la escala de (w, b) todas se estiran a la vez
+    aTx(p, 'y_{i}(w · x_{i} + b), un valor por punto', RX, 214, .5, { size: 24 });
+    const bars = aP.map((q, i) => { const y = 236 + i * 25; show(put(mk('circle', { cx: RX + 12, cy: y + 9, r: 7, fill: aHue(q[2]) }, p), { o: 0 }), .5 + i * .03, .3); const b = put(mk('rect', { x: BX, y, width: 0, height: 18, fill: COL.chalk, 'fill-opacity': .82 }, p), { o: 0 }); show(b, .5 + i * .03, .3); return b; });
+    const one = put(mk('path', { d: `M${BX + UW} 226V540`, stroke: COL.chalk, 'stroke-width': 2.5, 'stroke-dasharray': '7 6', fill: 'none' }, p), { o: 0 }); show(one, .6);
+    const ol = text(p, '1', BX + UW, 566, .6, { size: 24, anchor: 'middle', font: MATH });
+    text(p, '0', BX, 566, .6, { size: 24, anchor: 'middle', font: MATH, fill: COL.dim });
+    const nw = text(p, '', RX, 618, .6, { size: 30, font: MATH, weight: 600 });
+    const setK = k => { bars.forEach((b, i) => { b.setAttribute('width', (aVals[i] * k * UW).toFixed(1)); b.setAttribute('fill', Math.abs(aVals[i] * k - 1) < 1e-6 ? HUE.hyp : COL.chalk); }); nw.textContent = `‖w‖ = ${aF2(aSol.n * k)}`; };
+    setK(K0);
+    prog(q => setK(K0 + .35 * q), tsc + 1.2, 1.5); prog(q => setK(K0 + .35 * (1 - q)), tsc + 3, 1.5); prog(q => setK(K0 + (1 - K0) * q), tsc + 6.6, 2.6);
+    text(p, 'misma recta, otra escala de (w, b)', RX + 210, 616, tsc + 1.2, { size: 24, fill: COL.dim });
+    // los hiperplanos marginales
+    [[aSol.rho, 'w · x + b = +1'], [0, 'w · x + b = 0'], [-aSol.rho, 'w · x + b = −1']].forEach(([d, str], k) => { const e = aEdge(pl, aStar[0], aStar[1] + d); text(p, str, e.x, e.y, tmg + (k === 1 ? .2 : k ? 6.2 : 3.6), { size: 22, fill: HUE.hyp, anchor: e.anchor, font: MATH, weight: 600 }); });
+    aTx(p, `ρ = 1 / ‖w‖ = ${aF2(aSol.rho)}`, RX, 668, tr, { size: 34, fill: HUE.hyp, weight: 600 });
+    aTx(p, 'min_{w,b}   ½ ‖w‖^{2}', RX, 736, tmn + 2, { size: 38, weight: 600 }); text(p, '(5.7)', RX + 300, 734, tmn + 2, { size: 22, fill: COL.dim });
+    aTx(p, 'sujeto a:  y_{i}(w · x_{i} + b) ≥ 1,  ∀ i ∈ [m]', RX, 786, tst, { size: 30 });
+    tw(one, { c_stroke: HUE.hyp, 'a_stroke-width': 5 }, tst + .4, .4); tw(ol, { c_fill: HUE.hyp }, tst + .4, .4);
+    text(p, 'convexo (programa cuadrático): solución única', RX, 836, tc, { size: 26, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['soporte', 'Vectores de soporte', (m) => {
+    const p = panel(0), tk = m('kkt'), tz = m('zero'), ts = m('sv'), t1 = m('rem'), t2 = m('rem2'), RX = 830, nn = aN2(aStar[0]);
+    aNote(p, NOTE);
+    aTitle(p, 'Vectores de soporte');
+    const pl = aMain(p, 'aClipSoporte'); pl.set(...aStar); show(pl.lg, .4);
+    aTx(p, 'w  =  ∑_{i=1}^{m} α_{i} y_{i} x_{i}', RX, 240, tk, { size: 40, weight: 600 }); text(p, '(5.9)', RX + 370, 238, tk, { size: 22, fill: COL.dim });
+    aTx(p, 'α_{i} = 0    o bien    y_{i}(w · x_{i} + b) = 1', RX, 320, tz, { size: 32 }); text(p, '(5.11)', RX + 600, 318, tz, { size: 22, fill: COL.dim });
+    aNon.forEach(i => { tw(pl.dots[i], { o: .3 }, tz + 1.4, .5); tw(pl.dots[i], { o: 1 }, t1 - .5, .4); });
+    const zl = text(p, 'puntos atenuados: α = 0', RX, 380, tz + 1.6, { size: 24, fill: COL.dim }); hide(zl, t1 - .5, .3);
+    const rings = {}, labs = {};
+    aSol.sv.forEach((i, k) => { const q = aP[i], s = q[2]; rings[i] = aRing(pl, i, COL.chalk, ts + k * .2); labs[i] = aTx(pl.dg, `α = ${aF2(aAl[i])}`, pl.X(q[0]) + s * 22, pl.Y(q[1]) + (s > 0 ? -22 : 40), ts + .3 + k * .2, { size: 24, weight: 600, font: UI, anchor: s > 0 ? 'start' : 'end' }); });
+    text(p, `vectores de soporte: ${aNsv} de ${aM}`, RX, 450, ts, { size: 30, fill: HUE.hyp, weight: 600 });
+    text(p, 'los puntos sobre los hiperplanos marginales', RX, 490, ts + 1.2, { size: 24 });
+    // quitar un punto que no es vector de soporte: la solución es la misma
+    const g1 = aRing(pl, aRem1, COL.dim, null), g2 = aRing(pl, aRem2, COL.dim, null), sA = aLo[aRem1], sB = aLo[aRem2];
+    [g1, g2].forEach(e => e.setAttribute('stroke-dasharray', '6 6'));
+    tw(pl.dots[aRem1], { o: 0 }, t1 + .6, .5); show(g1, t1 + .6, .4); tw(pl.dots[aRem1], { o: 1 }, t2 - .6, .4); hide(g1, t2 - .6, .3);
+    text(p, `sin un punto que no es de soporte: ${sA.same ? 'la misma recta' : 'otra recta'} · ρ = ${aF2(sA.q.rho)}`, RX, 590, t1 + 1.2, { size: 26 });
+    // quitar un vector de soporte: la recta se mueve
+    tw(pl.dots[aRem2], { o: 0 }, t2 + .5, .4); show(g2, t2 + .5, .4); aSol.sv.forEach(i => { hide(rings[i], t2 + .5, .3); hide(labs[i], t2 + .5, .3); });
+    aGo(pl, aStar, aSt(sB.q), t2 + .9, 1.4);
+    sB.q.sv.map(i => i < aRem2 ? i : i + 1).forEach(i => aRing(pl, i, COL.chalk, t2 + 2.3));   // los vectores de soporte de la nueva solución
+    text(p, `sin un vector de soporte: ${sB.same ? 'la misma recta' : 'otra recta'} · ρ = ${aF2(sB.q.rho)}`, RX, 650, t2 + 1.4, { size: 26, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), pl = aPlane(p, 100, 664, 58, aQ, 'aClipQ2', { t0: null });
+    T(p, 'Otra muestra, con su solución de SVM y tres puntos marcados', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    pl.set(...aSt(aQs)); put(pl.lg, { o: 1 });
+    T(p, `m = ${aQ.length} puntos · margen ρ = ${aF2(aQs.rho)}`, { x: 780, y: 240, size: 26 });
+    T(p, 'Se quita uno solo de los puntos marcados', { x: 780, y: 300, size: 26, fill: COL.dim });
+    T(p, 'y se vuelve a resolver el problema.', { x: 780, y: 336, size: 26, fill: COL.dim });
+    S.q2 = aQm.map((i, k) => { const g = G(pl.dg), x = pl.X(aQ[i][0]), y = pl.Y(aQ[i][1]); mk('circle', { cx: x, cy: y, r: 19, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, g); T(g, 'ABC'[k], { x: x + 26, y: y - 16, size: 30, weight: 700 }); return g; });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-soporte', prompt: ['¿Qué punto marcado, si se quita de la muestra, cambia la solución?'],
+    build: pickEls(S.q2.map((el, k) => ({ el, box: [100 + aQ[aQm[k]][0] * 58 - 32, 664 - aQ[aQm[k]][1] * 58 - 46, 92, 80], label: 'punto ' + 'ABC'[k] })), aQr,
+      'Está sobre el borde de la franja: es un vector de soporte.',
+      () => 'No toca la franja: no es vector de soporte y, sin él, nada cambia.'),
+  }], done) }],
+
+  ['dual', 'El problema dual', (m) => {
+    const p = panel(0), td = m('dual'), ti = m('inner'), tg = m('gram'), ta = m('alpha'), th = m('hyp'), tk = m('key'), GX = 680, GY = 330, CW = 26, AX = GX + aM * CW + 70;
+    aNote(p, 'la misma muestra · tabla de productos internos y coeficientes α calculados en la página');
+    aTitle(p, 'El problema dual');
+    const f = aRow(p, [['max_{α}   ∑_{i=1}^{m} α_{i}  −  ½ ∑_{i,j=1}^{m} α_{i} α_{j} y_{i} y_{j} '], ['(x_{i} · x_{j})']], 100, 210, td, { size: 34, weight: 600 });
+    text(p, '(5.14)', f.end + 30, 208, td, { size: 22, fill: COL.dim });
+    aTx(p, 'sujeto a:  α_{i} ≥ 0   ∧   ∑_{i=1}^{m} α_{i} y_{i} = 0', 100, 262, td + 1.2, { size: 26 });
+    tw(f[1], { c_fill: HUE.hyp }, ti + 1.6, .4);
+    const pl = aPlane(p, 100, 650, 40, aP, 'aClipDual', { t0: .4 });
+    // la tabla de m × m productos internos
+    const cells = aGram.map((row, i) => row.map((v, j) => { const e = put(mk('rect', { x: GX + j * CW, y: GY + i * CW, width: CW - 2, height: CW - 2, fill: COL.chalk, 'fill-opacity': (.08 + .92 * v / aGmax).toFixed(3) }, p), { o: 0 }); show(e, tg + (i + j) * .04, .3); return e; }));
+    aP.forEach((q, i) => { show(put(mk('circle', { cx: GX - 16, cy: GY + i * CW + 12, r: 6, fill: aHue(q[2]) }, p), { o: 0 }), tg, .3); show(put(mk('circle', { cx: GX + i * CW + 12, cy: GY - 16, r: 6, fill: aHue(q[2]) }, p), { o: 0 }), tg, .3); });
+    aTx(p, 'x_{i} · x_{j}:  m × m productos internos', GX - 24, GY + aM * CW + 36, tg + .6, { size: 24 });
+    const gv = G(p), box = put(mk('rect', { width: CW + 2, height: CW + 2, fill: 'none', stroke: HUE.hyp, 'stroke-width': 4 }, gv), { o: 0 }), rd = text(gv, '', 100, 716, tg + 1.2, { size: 26, fill: HUE.hyp, weight: 600 });
+    [[2, 3], [5, 10]].forEach(([i, j], k) => {
+      const t = tg + 1.2 + k * 1.5, vg = G(gv, { o: 0 });
+      [i, j].forEach(a => mk('path', { d: `M${pl.X(0)} ${pl.Y(0)}L${pl.X(aP[a][0])} ${pl.Y(aP[a][1])}`, stroke: HUE.hyp, 'stroke-width': 3, fill: 'none' }, vg));
+      show(vg, t, .3); hide(vg, t + 1.4, .3);
+      tw(box, { x: GX + j * CW - 2, y: GY + i * CW - 2, o: 1 }, t, k ? .4 : 0);
+      aSet(rd, `un par de puntos: su producto interno es ${aGram[i][j].toFixed(2)}`, t);
+    });
+    hide(gv, ta - .2, .3);
+    // la solución: α por punto
+    aTx(p, 'α_{i}', AX, GY - 10, ta, { size: 28, weight: 600 });
+    aP.forEach((q, i) => {
+      const y = GY + i * CW, on = aAl[i] > 1e-9;
+      if (on) { const b = put(mk('rect', { x: AX, y: y + 3, width: 0, height: CW - 8, fill: HUE.hyp }, p), {}); tw(b, { a_width: aAl[i] * 240 }, ta + .4, .6, out); }
+      text(p, on ? aF2(aAl[i]) : '0', AX + (on ? aAl[i] * 240 + 12 : 0), y + 21, ta + .2 + i * .04, { size: 22, fill: on ? HUE.hyp : COL.dim, weight: on ? 700 : 500 });
+    });
+    aSol.sv.forEach(i => aRing(pl, i, COL.chalk, ta + .4, 13));
+    text(p, 'α ≠ 0 solo en los', AX + 190, GY + 130, ta + 1.4, { size: 24 }); text(p, `${aNsv} vectores de soporte`, AX + 190, GY + 164, ta + 1.4, { size: 24 });
+    const h = aRow(p, [['h(x)  =  sgn( ∑_{i=1}^{m} α_{i} y_{i} '], ['(x_{i} · x)', HUE.hyp], [' + b )']], 100, 760, th, { size: 34, weight: 600 });
+    text(p, '(5.15)', h.end + 30, 758, th, { size: 22, fill: COL.dim });
+    text(p, 'la solución depende solo de productos internos entre vectores', 100, 816, tk, { size: 26, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['loo', 'Análisis leave-one-out', (m) => {
+    const p = panel(0), tl = m('loo'), tn = m('non'), to = m('only'), tsv = [m('s1'), m('s2'), m('s3')], tb = m('bound'), tt = m('thm'), tk = m('weak'), RX = 830;
+    aNote(p, NOTE);
+    aTitle(p, 'Análisis leave-one-out (dejar uno fuera)');
+    const pl = aMain(p, 'aClipLoo'); pl.set(...aStar); show(pl.lg, .4);
+    const g0 = G(p);
+    aTx(g0, 'R̂_{LOO}', RX, 232, tl, { size: 36, weight: 600 }); text(g0, 'error de dejar uno fuera (cap. 8)', RX + 130, 230, tl, { size: 24, fill: COL.dim });
+    text(g0, 'quitar un punto, entrenar con el resto y probar en él', RX, 276, tl + 2, { size: 24 });
+    const k1 = text(g0, `puntos probados: 0 de ${aM}`, RX, 350, tn - .3, { size: 28 }), k2 = text(g0, 'errores: 0', RX, 392, tn - .3, { size: 28 });
+    let done = 0, bad = 0;
+    const tally = (i, t) => { done++; if (!aLo[i].ok) bad++; aSet(k1, `puntos probados: ${done} de ${aM}`, t); aSet(k2, `errores: ${bad}`, t); if (!aLo[i].ok) tw(k2, { c_fill: COL.bad }, t, .3); };
+    const mark = (i, t) => aMark(pl.dg, pl.X(aP[i][0]) + 20, pl.Y(aP[i][1]) - 20, aLo[i].ok, t);
+    const ring = put(mk('circle', { r: 19, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, pl.dg), { x: pl.X(aP[aNon[0]][0]), y: pl.Y(aP[aNon[0]][1]), o: 0 });
+    show(ring, tn, .3);
+    // los que no son vectores de soporte: la recta no cambia
+    const dt = Math.min(.5, (to - tn - .6) / aNon.length);
+    aNon.forEach((i, k) => { const t = tn + .3 + k * dt; if (k) tw(ring, { x: pl.X(aP[i][0]), y: pl.Y(aP[i][1]) }, t - dt * .6, dt * .6); mark(i, t); tally(i, t); });
+    text(g0, 'solo un vector de soporte puede fallar', RX, 460, to, { size: 26, fill: HUE.hyp, weight: 600 });
+    // los vectores de soporte: se quita cada uno, se vuelve a resolver y se mira de qué lado queda
+    aSvOrd.forEach((i, k) => {
+      const t = tsv[k], end = (k < aSvOrd.length - 1 ? tsv[k + 1] : tb) - .6, q = aP[i], st1 = aSt(aLo[i].q);
+      const gh = put(mk('circle', { r: 10, fill: COL.board, stroke: aHue(q[2]), 'stroke-width': 3 }, pl.dg), { x: pl.X(q[0]), y: pl.Y(q[1]), o: 0 });
+      tw(ring, { x: pl.X(q[0]), y: pl.Y(q[1]) }, t - .3, .3);
+      tw(pl.dots[i], { o: 0 }, t, .25); show(gh, t, .25);
+      aGo(pl, aStar, st1, t + .25, .8);
+      mark(i, t + 1.2); tally(i, t + 1.2);
+      aGo(pl, st1, aStar, end, .5); tw(pl.dots[i], { o: 1 }, end, .3); hide(gh, end, .3);
+    });
+    hide(ring, tb - .6, .3);
+    aTx(p, 'R̂_{LOO}(SVM)  ≤  N_{SV}(S) / (m + 1)', RX, 540, tb, { size: 36, weight: 600 }); text(p, '(5.21)', RX + 560, 538, tb, { size: 22, fill: COL.dim });
+    text(p, `en esta muestra de m + 1 = ${aM} puntos:   ${aLerr}/${aM}  ≤  ${aNsv}/${aM}`, RX, 588, tb + 2.6, { size: 26 });
+    hide(g0, tt - .3, .4);
+    text(p, 'Teorema 5.4', RX, 232, tt + .3, { size: 28, fill: HUE.hyp, weight: 600 });
+    aTx(p, 'E[ R(h_{S}) ]  ≤  E[ N_{SV}(S) / (m + 1) ]', RX, 300, tt + 5, { size: 38, weight: 600 });
+    aTx(p, 'a la izquierda, S ∼ D^{m}; a la derecha, S ∼ D^{m+1}', RX, 344, tt + 5.6, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'lema 5.3: en promedio, R̂_{LOO} es el error con un punto menos', RX, 410, tt + .8, { size: 24, font: UI });
+    text(p, 'pocos vectores de soporte: mejor garantía', RX, 680, tk, { size: 26, fill: HUE.hyp, weight: 600 });
+    text(p, 'es una cota sobre el promedio: nada dice de la varianza', RX, 724, tk + 2.4, { size: 24, fill: COL.dim });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Un clasificador lineal etiqueta por el signo de w · x + b.', 'w1'], ['SVM elige el hiperplano separador de margen máximo: ρ = 1/‖w‖.', 'w2'],
+      ['La solución depende solo de los vectores de soporte y de productos internos.', 'w3'], ['El error esperado se acota por la fracción esperada de vectores de soporte.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 31, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Si una muestra es linealmente separable, hay una sola recta que la separa sin errores.'], ans: ['f'], why: 'Hay infinitas. La que es única es la de margen máximo, la solución de SVM.' },
+      { parts: ['Con la escala en que los puntos más cercanos cumplen ', $m('y(w · x + b) = 1'), ', el margen vale ', $m('1/‖w‖'), '.'], ans: ['v'], why: ['El margen es la distancia de esos puntos a la recta: ', $m('|w · x + b| / ‖w‖ = 1/‖w‖'), '.'] },
+      { parts: ['Quitar de la muestra un punto que no es vector de soporte cambia la solución de SVM.'], ans: ['f'], why: 'Su coeficiente α es 0: no aparece en w, y sin él la solución es la misma.' },
+      { parts: ['En el problema dual, los puntos de la muestra aparecen solo en productos internos entre pares.'], ans: ['v'], why: 'Por eso la solución depende de esos productos y no directamente de los vectores.' },
+      { parts: ['El teorema 5.4 acota el error esperado de SVM por la fracción esperada de vectores de soporte.'], ans: ['v'], why: 'Al dejar un punto fuera, solo puede fallar si es vector de soporte: R̂_LOO ≤ N_SV/(m + 1).' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

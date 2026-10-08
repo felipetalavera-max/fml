@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manifold learning y Johnson-Lindenstrauss</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 30, title: 'Manifold learning y Johnson-Lindenstrauss', minutes: 6, language: 'es', next: '../ch31/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 29) ---------- */
+// Tiza = los datos y las tablas · ámbar = lo elegido (el camino más corto, la reconstrucción, la franja 1 ± ε) · rosa (local) = error o distorsión
+// (la línea recta que engaña, el error de reconstrucción de LLE, los pares fuera de la franja) · de azul a salmón = solo para seguir los puntos a lo largo de la espiral.
+const HUE = { pt: COL.chalk, hyp: COL.task, err: COL.rat, a: COL.whole, b: COL.nat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'u_{1}', 'X^{⊤}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξχΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯])/;                          // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+// Entrada de leyenda: cuadrado, línea (line) o punto (dot).
+const aSq = (p, x, y, col, lab, { line = false, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none' } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };
+// Mezcla de dos colores hexadecimales (q de 0 a 1).
+const aMix = (c0, c1, q) => '#' + [1, 3, 5].map(k => Math.round(parseInt(c0.slice(k, k + 2), 16) * (1 - q) + parseInt(c1.slice(k, k + 2), 16) * q).toString(16).padStart(2, '0')).join('');
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aDeg = d => d * Math.PI / 180;
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aNorm = r => () => Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());   // normal estándar por Box-Muller (la del cap. 13)
+// Valores y vectores propios de una matriz simétrica por el método de Jacobi (el del cap. 11), de mayor a menor.
+const aEig = A => {
+  const n = A.length, a = A.map(r => r.slice()), V = a.map((r, i) => r.map((_, j) => +(i === j)));
+  for (let sw = 0; sw < 100; sw++) {
+    let off = 0; for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+    if (off < 1e-22) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      if (Math.abs(a[p][q]) < 1e-300) continue;
+      const th = (a[q][q] - a[p][p]) / (2 * a[p][q]), t = (th < 0 ? -1 : 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < n; k++) { const x = a[k][p], y = a[k][q]; a[k][p] = c * x - s * y; a[k][q] = s * x + c * y; }
+      for (let k = 0; k < n; k++) { const x = a[p][k], y = a[q][k]; a[p][k] = c * x - s * y; a[q][k] = s * x + c * y; }
+      for (let k = 0; k < n; k++) { const x = V[k][p], y = V[k][q]; V[k][p] = c * x - s * y; V[k][q] = s * x + c * y; }
+    }
+  }
+  const ord = a.map((r, i) => i).sort((i, j) => a[j][j] - a[i][i]);
+  return { val: ord.map(i => a[i][i]), vec: ord.map(i => V.map(v => v[i])) };
+};
+const aD2 = (p, q) => (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2, aDist = (p, q) => Math.sqrt(aD2(p, q));
+// --- Espiral ilustrativa en el plano: la curva (t cos t, t sin t) con t entre π y 4π; aM puntos con semilla, casi parejos en longitud de arco y ordenados a lo largo de la curva.
+// s (de 0 a 1) es la posición a lo largo de la espiral: solo sirve para dibujar y colorear, ninguna cuenta la usa.
+const aT0 = Math.PI, aT1 = 4 * Math.PI, aM = 36, aSeed = 30;
+const aArc = (() => { const n = 600, ts = [], ss = [0]; for (let k = 0; k <= n; k++) ts.push(aT0 + (aT1 - aT0) * k / n); for (let k = 1; k <= n; k++) { const tm = (ts[k] + ts[k - 1]) / 2; ss.push(ss[k - 1] + Math.sqrt(1 + tm * tm) * (ts[k] - ts[k - 1])); } return { ts, len: ss[n], ss: ss.map(v => v / ss[n]) }; })();
+const aTofS = s => { let k = 1; while (k < aArc.ss.length - 1 && aArc.ss[k] < s) k++; const f = (s - aArc.ss[k - 1]) / (aArc.ss[k] - aArc.ss[k - 1]); return aArc.ts[k - 1] + f * (aArc.ts[k] - aArc.ts[k - 1]); };
+const aSpS = (() => { const r = aRng(aSeed); return Array.from({ length: aM }, (_, i) => (i + .5 + .5 * (r() - .5)) / aM); })();
+const aSp = aSpS.map(s => { const t = aTofS(s); return [t * Math.cos(t), t * Math.sin(t)]; });
+// --- Grafo de vecinos (paso 1 de Isomap): cada punto se une con sus t vecinos más cercanos en distancia L2; el grafo es no dirigido.
+const aKnn = (P, t) => { const n = P.length, A = P.map(() => Array(n).fill(false)), N = []; P.forEach((p, i) => { const o = P.map((q, j) => j).filter(j => j !== i).sort((a, b) => aD2(p, P[a]) - aD2(p, P[b])).slice(0, t); N.push(o); o.forEach(j => { A[i][j] = A[j][i] = true; }); }); return { A, N, E: A.flatMap((r, i) => r.map((v, j) => v && i < j ? [i, j] : null).filter(e => e)) }; };
+// --- Caminos más cortos entre todos los pares por Floyd-Warshall (paso 2): D[i][j] = distancia geodésica aproximada; path(i, j) = el camino.
+const aFW = (P, A) => {
+  const n = P.length, D = P.map((p, i) => P.map((q, j) => i === j ? 0 : A[i][j] ? aDist(p, q) : Infinity)), nx = P.map((p, i) => P.map((q, j) => A[i][j] ? j : -1));
+  for (let k = 0; k < n; k++) for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (D[i][k] + D[k][j] < D[i][j]) { D[i][j] = D[i][k] + D[k][j]; nx[i][j] = nx[i][k]; }
+  return { D, path: (i, j) => { const o = [i]; while (i !== j) { i = nx[i][j]; o.push(i); } return o; } };
+};
+// --- Doble centrado (paso 3): −½ H Δ H con H = I − 11⊤/m, sobre la matriz de distancias al cuadrado.
+const aCenK = A => { const n = A.length, rm = A.map(r => aSum(r) / n), tm = aSum(rm) / n; return A.map((r, i) => r.map((v, j) => v - rm[i] - rm[j] + tm)); };
+const aDC = D => aCenK(D.map(r => r.map(v => v * v))).map(r => r.map(v => -v / 2));
+const aUp = y => y[y.length - 1] < y[0] ? y.map(v => -v) : y;                           // orienta una coordenada para que crezca a lo largo de la espiral
+const aMono = y => y.every((v, i) => !i || v > y[i - 1]);                              // ¿conserva el orden de los puntos?
+const aTn = 3, aGr = aKnn(aSp, aTn), aGeo = aFW(aSp, aGr.A);
+const aKI = aDC(aGeo.D), aEI = aEig(aKI), aYI = aUp(aEI.vec[0].map(v => Math.sqrt(aEI.val[0]) * v));      // (15.6) con k = 1
+// --- Laplacian eigenmaps (§15.3.2): pesos gaussianos sobre las aristas, grados, L = D − W, y el vector propio de menor valor propio no nulo.
+const aSig = 3, aW = aSp.map((p, i) => aSp.map((q, j) => aGr.A[i][j] ? Math.exp(-aD2(p, q) / (aSig * aSig)) : 0)), aDg = aW.map(aSum);
+const aL = aW.map((r, i) => r.map((v, j) => (i === j ? aDg[i] : 0) - v)), aEL = aEig(aL), aYL = aUp(aEL.vec[aM - 2]);
+const aObj = (W, y) => { let s = 0; W.forEach((r, i) => r.forEach((w, j) => { s += w * (y[i] - y[j]) ** 2; })); return s; };          // el objetivo de (15.7) con k = 1
+const aUnit = y => { const mu = aSum(y) / y.length, c = y.map(v => v - mu), nn = Math.sqrt(aSum(c.map(v => v * v))); return c.map(v => v / nn); };   // media 0 y norma 1, como un vector propio
+// --- LLE (§15.3.3): pesos de (15.9) para cada punto con sus t vecinos, y los vectores propios de menor valor propio de M = (I − W)⊤(I − W).
+const aSolve = (A, b) => { const n = b.length, a = A.map((r, i) => [...r, b[i]]); for (let c = 0; c < n; c++) { let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(a[r][c]) > Math.abs(a[p][c])) p = r; [a[c], a[p]] = [a[p], a[c]]; for (let r = 0; r < n; r++) if (r !== c) { const f = a[r][c] / a[c][c]; for (let k = c; k <= n; k++) a[r][k] -= f * a[c][k]; } } return a.map((r, i) => r[n] / r[i]); };
+const aLleW = (P, N) => P.map((p, i) => { const nb = N[i], C = nb.map(j => nb.map(k => (p[0] - P[j][0]) * (p[0] - P[k][0]) + (p[1] - P[j][1]) * (p[1] - P[k][1]))), w = aSolve(C, nb.map(() => 1)), tot = aSum(w), row = Array(P.length).fill(0); nb.forEach((j, a) => { row[j] = w[a] / tot; }); return row; });
+const aTl = 2, aNl = aKnn(aSp, aTl).N, aWl = aLleW(aSp, aNl);
+const aRec = (W, i, Y) => Y[0].map((_, c) => aSum(W[i].map((w, j) => w * Y[j][c])));                                                    // Σ_j W_ij y_j
+const aMl = (() => { const B = aWl.map((r, i) => r.map((v, j) => +(i === j) - v)); return B.map((_, i) => B.map((_, j) => aSum(B.map(r => r[i] * r[j])))); })();
+const aEM = aEig(aMl), aYM = aUp(aEM.vec[aM - 2]);
+const aLleErr = (W, Y) => aSum(Y.map((y, i) => { const r = aRec(W, i, Y); return aSum(y.map((v, c) => (v - r[c]) ** 2)); }));          // el objetivo de (15.10)
+// --- Johnson-Lindenstrauss (§15.4): aJm puntos de ℝ^N en tres grupos (ilustrativos, con semilla) y f = A/√k, con A gaussiana de k × N (lema 15.4).
+// Se sortea una sola A de aJK filas y cada k usa sus primeras k filas. Todo va con distancias al cuadrado, como en (15.13).
+const aJN = 1000, aJm = 30, aJe = .4, aJK = Math.ceil(20 * Math.log(aJm) / (aJe * aJe)), aJks = [5, 20, 80, aJK];
+const aJV = (() => { const g = aNorm(aRng(154)), cen = [0, 1, 2].map(() => Array.from({ length: aJN }, () => .5 * g())); return Array.from({ length: aJm }, (_, i) => { const c = Math.floor(i / 10); return cen[c].map(v => v + [.3, .6, .9][c] * g()); }); })();
+const aJZ = (() => { const g = aNorm(aRng(415)), row = new Float64Array(aJN); return Array.from({ length: aJK }, () => { for (let n = 0; n < aJN; n++) row[n] = g(); return aJV.map(x => { let s = 0; for (let n = 0; n < aJN; n++) s += row[n] * x[n]; return s; }); }); })();
+const aJP = []; for (let i = 0; i < aJm; i++) for (let j = i + 1; j < aJm; j++) aJP.push([i, j]);
+const aJd0 = aJV.map(u => aJV.map(v => { let s = 0; for (let n = 0; n < aJN; n++) s += (u[n] - v[n]) ** 2; return s; }));                // ‖u − v‖²
+const aJdk = k => aJV.map((_, i) => aJV.map((_, j) => { let s = 0; for (let r = 0; r < k; r++) s += (aJZ[r][i] - aJZ[r][j]) ** 2; return s / k; }));   // ‖f(u) − f(v)‖²
+const aJD = aJks.map(aJdk), aJq = aJD.map(D => aJP.map(([i, j]) => D[i][j] / aJd0[i][j]));
+const aJout = aJq.map(q => q.filter(v => v < 1 - aJe || v > 1 + aJe).length), aJmin = aJq.map(q => Math.min(...q)), aJmax = aJq.map(q => Math.max(...q));
+const aJbound = (e, k) => 1 - 2 * Math.exp(-(e * e - e ** 3) * k / 4);                 // cota de (15.12) para un vector
+// --- Comprobaciones, práctica y formatos.
+const aQA = [6, 34];                                                                 // el par del beat «geo»: cerca en línea recta, lejos por el grafo
+const aQ1 = [[20, 35], [14, 17], aQA], aQ1g = aQ1.map(([i, j]) => aGeo.D[i][j]), aQ1l = aQ1.map(([i, j]) => aDist(aSp[i], aSp[j])), aQ1r = aQ1g.indexOf(Math.max(...aQ1g));   // comprobación 1
+const aShuf = (y, seed) => { const r = aRng(seed), o = y.slice(); for (let i = o.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [o[i], o[j]] = [o[j], o[i]]; } return o; };
+const aQ2 = [aUnit(aYL), aShuf(aUnit(aYL), 7), aUnit(aSp.map(p => p[0]))], aQ2o = aQ2.map(y => aObj(aW, y)), aQ2r = aQ2o.indexOf(Math.min(...aQ2o));                         // comprobación 2
+const aLi = 4, aLnb = aNl[aLi], aLw = aLnb.map(j => aWl[aLi][j]), aLrec = aRec(aWl, aLi, aSp), aLerr = aD2(aSp[aLi], aLrec);                                               // el punto del beat «lle»
+const aIsoGap = Math.max(...aSp.flatMap((_, i) => aSp.map((_, j) => Math.abs(Math.abs(aYI[i] - aYI[j]) - aGeo.D[i][j]))));
+const aFx = (v, n) => (Math.abs(v) < .5 * 10 ** -n ? 0 : v).toFixed(n).replace('-', '−'), aF1 = v => aFx(v, 1), aF2 = v => aFx(v, 2), aF3 = v => aFx(v, 3);
+/* aMATH:end */
+
+const aCols = aSpS.map(s => aMix(HUE.a, HUE.b, s));                                   // color de cada punto: su posición a lo largo de la espiral
+let aClipN = 0;
+// Plano centrado en el origen (el del cap. 29): marco cuadrado de lado 2 · half que cubre de −view a view. Capas: pl.gc (recortada al marco) y pl.gp (puntos).
+const aPl = (p, cx, cy, half, view, { t0 = .4, axes = true } = {}) => {
+  const sc = half / view, id = 'aclip' + (aClipN++), g = G(p, { o: t0 == null ? 1 : 0 }), pl = { g, cx, cy, half, view, sc, X: v => cx + v * sc, Y: v => cy - v * sc };
+  if (t0 != null) show(g, t0);
+  mk('rect', { x: cx - half, y: cy - half, width: 2 * half, height: 2 * half }, mk('clipPath', { id }, g));
+  mk('rect', { x: cx - half, y: cy - half, width: 2 * half, height: 2 * half, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  pl.gc = G(g); pl.gc.setAttribute('clip-path', `url(#${id})`);
+  if (axes) mk('path', { d: `M${cx - half} ${cy}h${2 * half}M${cx} ${cy - half}v${2 * half}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '4 8', fill: 'none' }, pl.gc);
+  pl.gp = G(g);
+  return pl;
+};
+// La espiral sobre un plano aPl: los puntos (coloreados por posición) y, en la capa sv.eg (nace oculta salvo edges), las aristas del grafo de vecinos.
+// wt: matriz de pesos para dar a cada arista un grosor proporcional a su peso (capa sv.wg, oculta).
+const aSpV = (pl, { r = 7, edges = false, wt = null } = {}) => {
+  const pos = aSp.map(q => [pl.X(q[0]), pl.Y(q[1])]), f = v => v.toFixed(1), sv = { pos };
+  sv.eg = G(pl.gc, { o: edges ? 1 : 0 });
+  mk('path', { d: aGr.E.map(([i, j]) => `M${f(pos[i][0])} ${f(pos[i][1])}L${f(pos[j][0])} ${f(pos[j][1])}`).join(''), stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, sv.eg);
+  if (wt) { sv.wg = G(pl.gc, { o: 0 }); aGr.E.forEach(([i, j]) => mk('path', { d: `M${f(pos[i][0])} ${f(pos[i][1])}L${f(pos[j][0])} ${f(pos[j][1])}`, stroke: COL.chalk, 'stroke-width': (1 + 8 * wt[i][j]).toFixed(1), 'stroke-linecap': 'round', fill: 'none' }, sv.wg)); }
+  sv.dots = aSp.map((q, i) => mk('circle', { cx: f(pos[i][0]), cy: f(pos[i][1]), r, fill: aCols[i], stroke: COL.board, 'stroke-width': 1.5 }, pl.gp));
+  sv.ring = (i, g = pl.gp, rr = r + 7) => mk('circle', { cx: f(pos[i][0]), cy: f(pos[i][1]), r: rr, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3.5 }, g);
+  sv.seg = (idx, g, attrs) => mk('path', { d: idx.map((i, k) => (k ? 'L' : 'M') + f(pos[i][0]) + ' ' + f(pos[i][1])).join(''), fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', ...attrs }, g);
+  return sv;
+};
+// Recuadro numerado de una comprobación (los tres mosaicos de pickEls).
+const aCard = (p, x, y, w, hh, n) => { const g = G(p, { x, y }); mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); mk('circle', { cx: w - 40, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(n), { x: w - 40, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' }); return g; };
+// Matriz como mosaico de celdas sin número: más clara = valor mayor (escala lineal entre el mínimo y el máximo, o entre rng[0] y rng[1] si se da).
+const aCells = (p, x, y, cw, A, t0, ch = cw, rng = null) => { const g = G(p, { o: 0 }), fl = A.flat(), lo = rng ? rng[0] : Math.min(...fl), hi = rng ? rng[1] : Math.max(...fl); show(g, t0); A.forEach((row, i) => row.forEach((v, j) => mk('rect', { x: x + j * cw, y: y + i * ch, width: cw - 1, height: ch - 1, fill: COL.chalk, 'fill-opacity': (.04 + .92 * Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1)))).toFixed(3) }, g))); return g; };
+// Puntos que viajan de una lista de posiciones a otra: aparecen en t0 y llegan tras dur segundos.
+const aFly = (p, from, to, cols, t0, dur, r = 7) => { const g = G(p, { o: 0 }), es = from.map((q, i) => mk('circle', { cx: q[0].toFixed(1), cy: q[1].toFixed(1), r, fill: cols[i], 'fill-opacity': .9, stroke: COL.board, 'stroke-width': 1.2 }, g)); show(g, t0, .3); prog(q => es.forEach((e, i) => { e.setAttribute('cx', (from[i][0] + (to[i][0] - from[i][0]) * q).toFixed(1)); e.setAttribute('cy', (from[i][1] + (to[i][1] - from[i][1]) * q).toFixed(1)); }), t0 + .3, dur); return g; };
+// Una coordenada por punto sobre una recta horizontal (de x0 a x1, a la altura y): devuelve las posiciones. La escala lleva el mayor valor absoluto al borde.
+const aLineX = (vals, x0, x1, y) => { const mx = Math.max(...vals.map(Math.abs)), c = (x0 + x1) / 2, h = (x1 - x0) / 2 - 12; return vals.map(v => [c + v / mx * h, y]); };
+// Los puntos de la espiral vuelan a una recta bajo el plano: aparece el eje en t0 y los puntos llegan en dur segundos.
+const aSX0 = 100, aSX1 = 700, aSY = 706;
+const aUnroll = (p, sv, vals, t0, dur = 2.4) => { const ax = mk('path', { d: `M${aSX0} ${aSY}H${aSX1}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, p); put(ax, { o: 0 }); show(ax, t0 - .2, .3); return aFly(p, sv.pos, aLineX(vals, aSX0, aSX1, aSY), aCols, t0, dur); };
+// Histograma de cocientes sobre un eje de 0 a top (lo que pasa de top cae en la última barra): barras de tiza dentro de la franja 1 ± eps y rosa fuera.
+const aBW = .05;
+const aHistQ = (g, q, x0, base, w, h, top, eps) => {
+  const nb = Math.round(top / aBW), cnt = Array(nb).fill(0), lo = Math.round((1 - eps) / aBW), hi = Math.round((1 + eps) / aBW);
+  q.forEach(v => { cnt[Math.min(nb - 1, Math.floor(v / aBW))]++; });
+  const mx = Math.max(...cnt), bw = w / nb;
+  mk('rect', { x: x0 + lo * bw, y: base - h, width: (hi - lo) * bw, height: h, fill: HUE.hyp, 'fill-opacity': .13 }, g);
+  mk('path', { d: `M${x0} ${base}h${w}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  cnt.forEach((c, k) => { if (c) mk('rect', { x: (x0 + k * bw + .5).toFixed(1), y: (base - h * c / mx).toFixed(1), width: (bw - 1).toFixed(1), height: (h * c / mx).toFixed(1), fill: k < lo || k >= hi ? HUE.err : COL.chalk }, g); });
+  mk('path', { d: `M${x0 + w / top} ${base - h}v${h}`, stroke: HUE.hyp, 'stroke-width': 2, 'stroke-dasharray': '6 5', fill: 'none' }, g);
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 800, aPX = 420, aPY = 470, aPH = 300, aPV = 14, aLX = 300, aLY = 400, aLH = 200, TX = 780;
+const aQ4why = ['Épsilon está al cuadrado. La dimensión se multiplica por 4.', 'Una tolerancia menor pide más dimensiones, no menos. Se multiplica por 4.', null, 'K sí depende de épsilon. Lo que no aparece en k es N.'];
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 30', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Manifold learning y Johnson-Lindenstrauss', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Desenrollar los datos, y proyectarlos al azar.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['geo', 'Distancias sobre la variedad', (m) => {
+    const p = panel(0), tst = m('st'), tgr = m('gr'), tpa = m('path'), tn = m('num'), [a, b] = aQA;
+    aNote(p, `espiral ilustrativa (m = ${aM} puntos con semilla), calculada en la página · color: solo para seguir los puntos a lo largo de la espiral`);
+    aTitle(p, 'Manifold learning: la distancia que cuenta va por la variedad');
+    const pl = aPl(p, aPX, aPY, aPH, aPV, { axes: false }), sv = aSpV(pl);
+    show(sv.eg, tgr, .8);
+    const cu = path(pl.gc, aArc.ts.map((t, k) => (k ? 'L' : 'M') + pl.X(t * Math.cos(t)).toFixed(1) + ' ' + pl.Y(t * Math.sin(t)).toFixed(1)).join(''), { stroke: COL.faint, 'stroke-width': 3, fill: 'none' }, { d: 0 });
+    draw(cu, 2.4, 5); hide(cu, tgr - .2, .6);
+    hide(aTx(p, 'aquí:  una curva (dimensión 1) dentro del plano (N = 2)', RX, 238, 5, { size: 22, fill: COL.dim, font: UI }), tgr - .5, .4);
+    const gs = G(pl.gc, { o: 0 }); show(gs, tst + .4); sv.seg([a, b], gs, { stroke: HUE.err, 'stroke-width': 4, 'stroke-dasharray': '9 7' });
+    const gr = G(pl.gp, { o: 0 }); show(gr, tst); sv.ring(a, gr); sv.ring(b, gr);
+    const pe = path(pl.gc, aGeo.path(a, b).map((i, k) => (k ? 'L' : 'M') + sv.pos[i][0].toFixed(1) + ' ' + sv.pos[i][1].toFixed(1)).join(''), { stroke: HUE.hyp, 'stroke-width': 6, fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, { d: 0 });
+    draw(pe, tpa, 3.2);
+    aTx(p, 'los datos viven sobre una variedad (manifold) de baja dimensión, o cerca', RX, 200, 1.6, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['Isomap', COL.chalk, UI, 30], [':   conservar las distancias geodésicas', COL.chalk, UI, 26]], RX, 290, tgr, { weight: 700 });
+    aRow(p, [['1.   grafo G de los t vecinos más cercanos', COL.chalk, UI], [`      aquí t = ${aTn}`, COL.dim, UI, 22]], RX, 370, tgr + 1.2, { size: 26, weight: 600 });
+    aRow(p, [['2.   ', COL.chalk, UI], ['Δ_{ij}'], [':  el camino más corto en G entre i y j', COL.chalk, UI]], RX, 440, tpa, { size: 26, weight: 600 });
+    aTx(p, 'para todos los pares; por ejemplo, con Floyd-Warshall', RX + 56, 478, tpa + 1.6, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['en línea recta:      ', COL.chalk, UI, 26], [aF1(aDist(aSp[a], aSp[b])), HUE.err]], RX, 590, tst + 1.6, { size: 36, weight: 700 });
+    aRow(p, [['por el grafo:      ', COL.chalk, UI, 26], [aF1(aGeo.D[a][b]), HUE.hyp]], RX, 660, tn, { size: 36, weight: 700 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], WW = 420, HH = 390, Y0q = 252;
+    T(p, 'La misma espiral con su grafo de vecinos, y tres pares de puntos', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aSq(p, 100, 204, COL.dim, 'aristas del grafo de vecinos', { line: true }); mk('circle', { cx: 475, cy: 196, r: 11, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3.5 }, p); aTx(p, 'el par de puntos', 502, 204, null, { size: 22, fill: COL.dim, font: UI });
+    S.q1 = aQ1.map(([i, j], n) => { const g = aCard(p, BX[n], Y0q, WW, HH, n + 1), pl = aPl(g, 210, 200, 172, aPV, { t0: null, axes: false }), sv = aSpV(pl, { r: 5, edges: true }); sv.ring(i, pl.gp, 11); sv.ring(j, pl.gp, 11); return g; });
+    S.q1B = BX.map(bx => [bx, Y0q, WW, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-geodesica', prompt: ['¿En cuál de los tres pares es mayor la distancia a lo largo del grafo?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'par ' + (j + 1) })), aQ1r,
+      `Están en vueltas distintas: por el grafo hay ${aF1(aQ1g[aQ1r])}, y en línea recta solo ${aF1(aQ1l[aQ1r])}.`,
+      j => `Ahí el camino por el grafo mide ${aF1(aQ1g[j])}. En otro par hay que dar toda una vuelta.`),
+  }], done) }],
+
+  ['iso', 'Isomap', (m) => {
+    const p = panel(0), tt = m('tab'), td = m('dc'), te = m('eig'), tu = m('un'), tk = m('ker'), MY = 232, CW = 9, MX2 = TX + 400;
+    aNote(p, `tablas de ${aM} × ${aM}: celda más clara = valor mayor · valores propios de K_{Iso} (Jacobi): el mayor, ${Math.round(aEI.val[0])}; el menor, ${aF2(aEI.val[aM - 1])}`);
+    aTitle(p, 'Isomap: de las distancias geodésicas a una matriz de similitud');
+    const pl = aPl(p, aLX, aLY, aLH, aPV, { axes: false }), sv = aSpV(pl, { r: 6, edges: true });
+    aCells(p, TX, MY, CW, aGeo.D.map(r => r.map(v => v * v)), tt);
+    aRow(p, [['Δ'], [':   geodésicas al cuadrado', COL.dim, UI, 22]], TX, MY - 18, tt, { size: 26, weight: 700 });
+    aTx(p, '→', TX + 362, MY + 170, td, { size: 40, anchor: 'middle' });
+    aCells(p, MX2, MY, CW, aKI, td + .5);
+    aRow(p, [['K_{Iso}'], [':   doble centrado', COL.dim, UI, 22]], MX2, MY - 18, td + .5, { size: 26, weight: 700 });
+    aRow(p, [['K_{Iso}  =  −½ H Δ H'], ['            H  =  I_{m} − (1/m) 11^{⊤}', COL.dim, MATH, 24]], TX, 622, td + 1.2, { size: 30, weight: 700 });
+    aRow(p, [['Y  =  (Σ_{Iso,k})^{1/2} U_{Iso,k}^{⊤}', HUE.hyp], ['        (15.6)', COL.dim, UI, 22]], TX, 692, te, { size: 32, weight: 700 });
+    aTx(p, 'los k valores y vectores propios (singulares) principales de K_{Iso}', TX, 730, te + 2, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['K_{Iso}'], ['  semidefinida positiva   ⟹   Isomap = kernel PCA con  ', COL.chalk, UI, 24], ['K_{Iso}']], TX, 806, tk, { size: 28, weight: 600 });
+    aUnroll(p, sv, aYI, tu);
+    aTx(p, 'k = 1:   la espiral desenrollada, en orden', aSX0, aSY + 50, tu + 2.8, { size: 24, font: UI, weight: 600 });
+    aTx(p, `distancias en la recta y por el grafo:  difieren ${aF2(aIsoGap)} como mucho`, aSX0, aSY + 84, tu + 5, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['lap', 'Laplacian eigenmaps', (m) => {
+    const p = panel(0), tw0 = m('w'), to = m('obj'), tl = m('lap'), ts = m('sol'), tf = m('fly'), tk = m('kp'), ev = aEL.val;
+    aNote(p, `los mismos puntos y el mismo grafo (t = ${aTn}) · grosor de la arista = su peso, con σ = ${aSig} · vectores propios de L por Jacobi`);
+    aTitle(p, 'Laplacian eigenmaps: que los vecinos sigan siendo vecinos');
+    const pl = aPl(p, aLX, aLY, aLH, aPV, { axes: false }), sv = aSpV(pl, { r: 6, edges: true, wt: aW });
+    hide(sv.eg, tw0, .5); show(sv.wg, tw0, .8);
+    aRow(p, [['W_{ij}  =  exp(−‖x_{i} − x_{j}‖² / σ²)'], ['      si i y j son vecinos;  0 si no', COL.dim, UI, 22]], TX, 232, tw0, { size: 30, weight: 700 });
+    aRow(p, [['mín_{Y}     Σ_{i,j}  W_{ij} ‖y_{i} − y_{j}‖²', HUE.hyp], ['        (15.7)', COL.dim, UI, 22]], TX, 342, to, { size: 34, weight: 700 });
+    hide(aTx(p, 'penaliza que dos vecinos (peso grande) queden lejos en la representación', TX, 382, to + 3, { size: 22, fill: COL.dim, font: UI }), ts - .5, .4);
+    aRow(p, [['L  =  D − W'], ['        laplaciano del grafo;   ', COL.dim, UI, 22], ['D_{ii} = Σ_{j} W_{ij}', COL.dim, MATH, 24]], TX, 484, tl, { size: 32, weight: 700 });
+    aRow(p, [['Y  =  U_{L,k}^{⊤}'], [':   los k vectores propios de L de menor valor propio,', COL.chalk, UI, 22]], TX, 576, ts, { size: 32, weight: 700 });
+    aRow(p, [['sin el del valor 0.   Aquí, los menores:   ', COL.chalk, UI, 22], ['0', COL.dim], [',   '], [aFx(ev[aM - 2], 4), HUE.hyp], [`,   ${aFx(ev[aM - 3], 4)},  …`]], TX, 616, ts + 2.4, { size: 24, weight: 600 });
+    aRow(p, [['K_{L}  =  L^{†}'], [':   kernel PCA con la pseudoinversa del laplaciano', COL.chalk, UI, 24]], TX, 742, tk, { size: 30, weight: 700 });
+    aUnroll(p, sv, aYL, tf);
+    aTx(p, 'k = 1:   en orden, con los extremos apretados', aSX0, aSY + 50, tf + 2.8, { size: 24, font: UI, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], WW = 420, HH = 390, Y0q = 252, LY = 330, mx = Math.max(...aQ2.flat().map(Math.abs));
+    T(p, 'Los mismos puntos sobre una recta, de tres maneras', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'punto = dato (color: su posición en la espiral) · arco = arista del grafo de vecinos · las tres con media 0 y norma 1', 100, 204, null, { size: 22, fill: COL.dim, font: UI });
+    S.q2 = aQ2.map((y, n) => {
+      const g = aCard(p, BX[n], Y0q, WW, HH, n + 1), X = v => 210 + v / mx * 180;
+      mk('path', { d: `M24 ${LY}H396`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+      mk('path', { d: aGr.E.map(([i, j]) => { const x0 = X(y[i]), x1 = X(y[j]), rx = Math.abs(x1 - x0) / 2, ry = Math.max(6, Math.min(250, rx * 1.5)); return `M${x0.toFixed(1)} ${LY}A${rx.toFixed(1)} ${ry.toFixed(1)} 0 0 ${x1 > x0 ? 1 : 0} ${x1.toFixed(1)} ${LY}`; }).join(''), stroke: COL.dim, 'stroke-width': 1.6, fill: 'none' }, g);
+      y.forEach((v, i) => mk('circle', { cx: X(v).toFixed(1), cy: LY, r: 5.5, fill: aCols[i], stroke: COL.board, 'stroke-width': 1 }, g));
+      return g;
+    });
+    S.q2B = BX.map(bx => [bx, Y0q, WW, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-vecinos', prompt: ['¿En cuál de las tres rectas quedan más cerca los vecinos del grafo?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'recta ' + (j + 1) })), aQ2r,
+      `Ahí los arcos son los más cortos: la suma de (15.7) vale ${aF3(aQ2o[aQ2r])}, la menor.`,
+      j => `Ahí hay vecinos que quedan lejos (arcos largos): la suma de (15.7) vale ${aF3(aQ2o[j])}.`),
+  }], done) }],
+
+  ['lle', 'LLE', (m) => {
+    const p = panel(0), tr = m('rec'), tq = m('wt'), tlo = m('low'), ts = m('sol'), tf = m('fly'), tk = m('kp'), ZV = 2.6, c = aSp[aLi];
+    aNote(p, `los mismos puntos · aquí t = ${aTl} vecinos por punto · pesos por (15.9), calculados en la página · vectores propios de M por Jacobi`);
+    aTitle(p, 'LLE: reconstruir cada punto con sus vecinos');
+    // acercamiento al punto i y sus vecinos
+    const gz = G(p), zl = aPl(gz, aLX, aLY, aLH, ZV, { axes: false }), Z = q => [zl.X(q[0] - c[0]), zl.Y(q[1] - c[1])], f = v => v.toFixed(1), near = aSp.map((q, i) => i).filter(i => Math.max(Math.abs(aSp[i][0] - c[0]), Math.abs(aSp[i][1] - c[1])) < ZV - .15);
+    const pi = Z(c), pn = aLnb.map(j => Z(aSp[j])), pr = Z(aLrec);
+    const g1 = G(zl.gc, { o: 0 }); show(g1, tr); mk('path', { d: `M${f(pn[0][0])} ${f(pn[0][1])}L${f(pn[1][0])} ${f(pn[1][1])}`, stroke: HUE.hyp, 'stroke-width': 3, fill: 'none' }, g1);
+    const g2 = G(zl.gc, { o: 0 }); show(g2, tq); mk('path', { d: `M${f(pi[0])} ${f(pi[1])}L${f(pr[0])} ${f(pr[1])}`, stroke: HUE.err, 'stroke-width': 5, fill: 'none' }, g2);
+    near.forEach(i => { const q = Z(aSp[i]); mk('circle', { cx: f(q[0]), cy: f(q[1]), r: 9, fill: aCols[i], stroke: COL.board, 'stroke-width': 2 }, zl.gp); });
+    const g3 = G(zl.gp, { o: 0 }); show(g3, tr + .6);
+    mk('circle', { cx: f(pr[0]), cy: f(pr[1]), r: 7, fill: COL.board, stroke: HUE.hyp, 'stroke-width': 4 }, g3);
+    const el = Math.hypot(pi[0] - pr[0], pi[1] - pr[1]), nx = (pi[0] - pr[0]) / el, ny = (pi[1] - pr[1]) / el;
+    aHalo(aTx(g3, 'x_{i}', pi[0] + nx * 34, pi[1] + ny * 34 + 9, null, { size: 28, weight: 700, anchor: 'middle' }));
+    pn.forEach((q, k) => aHalo(aTx(g3, `W_{ij} = ${aF2(aLw[k])}`, q[0] - nx * 34 + (q[0] > pi[0] ? 14 : -14), q[1] - ny * 34 + 8, null, { size: 24, weight: 700, fill: HUE.hyp, anchor: q[0] > pi[0] ? 'end' : 'start' })));
+    aTx(gz, `acercamiento a un punto y sus ${aTl} vecinos`, aLX, aLY + aLH + 36, .6, { size: 22, fill: COL.dim, anchor: 'middle', font: UI });
+    hide(gz, tlo - .6, .4);
+    const gf = G(p, { o: 0 }), pl = aPl(gf, aLX, aLY, aLH, aPV, { t0: null, axes: false }), sv = aSpV(pl, { r: 6 }); show(gf, tlo - .1);
+    mk('path', { d: aNl.map((nb, i) => nb.map(j => `M${f(sv.pos[i][0])} ${f(sv.pos[i][1])}L${f(sv.pos[j][0])} ${f(sv.pos[j][1])}`).join('')).join(''), stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, pl.gc);
+    aRow(p, [['mín_{W}     '], ['‖x_{i} − Σ_{j} W_{ij} x_{j}‖²', HUE.err], ['        (15.8)', COL.dim, UI, 22]], TX, 232, tr, { size: 34, weight: 700 });
+    aTx(p, 'j recorre los vecinos de x_{i};   los pesos de cada fila suman 1', TX, 272, tr + 2, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['aquí:    pesos  ', COL.chalk, UI, 24], [`${aF2(aLw[0])}  y  ${aF2(aLw[1])}`, HUE.hyp], [',    error  ', COL.chalk, UI, 24], [aF2(aLerr), HUE.err]], TX, 344, tq + 1.2, { size: 30, weight: 700 }).forEach(e => hide(e, ts - .5, .4));
+    aRow(p, [['mín_{Y}     Σ_{i}  ‖y_{i} − Σ_{j} W_{ij} y_{j}‖²', HUE.hyp], ['        (15.10)', COL.dim, UI, 22]], TX, 456, tlo, { size: 34, weight: 700 });
+    aTx(p, 'los mismos pesos W, ahora fijos, en dimensión k', TX, 496, tlo + 2.4, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['M  =  (I − W)^{⊤}(I − W)'], ['        Y  =  U_{M,k}^{⊤}', COL.chalk, MATH, 28]], TX, 592, ts, { size: 32, weight: 700 });
+    aTx(p, 'los k vectores propios de M de menor valor propio, sin el del valor 0', TX, 632, ts + 2.4, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['LLE = kernel PCA con una matriz de kernel  ', COL.chalk, UI, 24], ['K_{LLE}']], TX, 742, tk, { size: 30, weight: 700 });
+    aUnroll(p, sv, aYM, tf);
+    aTx(p, 'k = 1:   la espiral desenrollada, en orden', aSX0, aSY + 50, tf + 2.8, { size: 24, font: UI, weight: 600 });
+  }],
+
+  ['jl1', 'Proyecciones aleatorias', (m) => {
+    const p = panel(0), tA = m('A'), tks = [m('k5'), m('k20'), m('k80')], tl = m('lem'), XS = [110, 480, 850, 1220], TY = 250, CW = 10, hi = Math.max(...aJd0.flat());
+    aNote(p, `puntos ilustrativos con semilla (tres grupos de 10) · una sola A con semilla: cada k usa sus primeras k filas · la misma escala de brillo en las cuatro tablas`);
+    aTitle(p, 'Johnson-Lindenstrauss: proyectar con una matriz aleatoria');
+    aCells(p, XS[0], TY, CW, aJd0, .4, CW, [0, hi]);
+    aRow(p, [['‖u − v‖²'], [`    en  `, COL.dim, UI, 22], [`ℝ^{N},  N = ${aJN}`, COL.dim, MATH, 24]], XS[0], TY - 18, .5, { size: 26, weight: 700 });
+    aTx(p, `m = ${aJm} puntos:  ${aJP.length} pares`, XS[0], TY + 340, 1.2, { size: 22, fill: COL.dim, font: UI });
+    tks.forEach((t0, n) => {
+      aCells(p, XS[n + 1], TY, CW, aJD[n], t0, CW, [0, hi]);
+      aRow(p, [['‖f(u) − f(v)‖²'], [`,    k = ${aJks[n]}`, HUE.hyp]], XS[n + 1], TY - 18, t0, { size: 26, weight: 700 });
+      aTx(p, `cocientes:  de ${aF2(aJmin[n])} a ${aF2(aJmax[n])}`, XS[n + 1], TY + 340, t0 + 1, { size: 22, fill: COL.dim, font: UI });
+    });
+    aRow(p, [['f(x)  =  (1/√k) A x', HUE.hyp], ['        A:  k × N,  con entradas independientes de una normal estándar', COL.dim, UI, 22]], XS[0], 664, tA, { size: 32, weight: 700 });
+    aRow(p, [['P[ (1 − ε)‖x‖²  ≤  ‖(1/√k) A x‖²  ≤  (1 + ε)‖x‖² ]   ≥   1 − 2e^{−(ε² − ε³)k/4}'], ['        (15.12)', COL.dim, UI, 22]], XS[0], 746, tl, { size: 30, weight: 700 });
+    aTx(p, 'lema 15.3:  para un x fijo y 0 < ε < 1/2 · se apoya en el lema 15.2:  una χ² con k grados de libertad se concentra alrededor de k', XS[0], 792, tl + 3, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['jl2', 'El lema', (m) => {
+    const p = panel(0), ths = [m('h5'), m('h20'), m('h80'), m('hK')], tl = m('lem'), tN = m('N'), HX = 110, HW = 620, HHt = 74, TOP = 2.5, bases = [300, 430, 560, 690], X = v => HX + v / TOP * HW;
+    aNote(p, `los mismos ${aJm} puntos de ℝ^{${aJN}} y la misma A · franja ámbar: de 1 − ε a 1 + ε, con ε = ${aJe} · rosa: pares fuera de la franja · log: logaritmo natural`);
+    aTitle(p, 'Lema 15.4: todas las distancias a la vez');
+    aJks.forEach((k, n) => {
+      const g = G(p, { o: 0 }), b = bases[n]; show(g, n ? ths[n] : Math.min(ths[0], 2.2));
+      aHistQ(g, aJq[n], HX, b, HW, HHt, TOP, aJe);
+      aRow(g, [[`k = ${k}`, COL.chalk, MATH, 26], ['        fuera de la franja:   ', COL.dim, UI, 22], [`${aJout[n]} de ${aJP.length}`, aJout[n] ? HUE.err : HUE.hyp, UI, 24]], HX, b - HHt - 12, null, { weight: 700 });
+    });
+    const ga = G(p, { o: 0 }); show(ga, .6); aRow(ga, [['cociente de cada par:   ', COL.dim, UI, 22], ['‖f(u) − f(v)‖² / ‖u − v‖²', COL.chalk, MATH, 24]], HX, bases[3] + 78, null, { size: 24 });
+    [[0, '0'], [1 - aJe, String(1 - aJe)], [1, '1'], [1 + aJe, String(1 + aJe)], [2, '2'], [TOP, `≥ ${TOP}`]].forEach(([v, s]) => { mk('path', { d: `M${X(v).toFixed(1)} ${bases[3]}v8`, stroke: COL.dim, 'stroke-width': 2 }, ga); aTx(ga, s, X(v), bases[3] + 34, null, { size: 22, fill: COL.dim, anchor: 'middle' }); });
+    aRow(p, [['para  ', COL.chalk, UI, 24], ['0 < ε < 1/2,   m > 4'], ['  y  ', COL.chalk, UI, 24], ['k  =  20 log m / ε²', HUE.hyp]], RX, 250, tl, { size: 32, weight: 700 });
+    aRow(p, [['todo conjunto V de m puntos de  ', COL.chalk, UI, 24], ['ℝ^{N}'], ['  admite  ', COL.chalk, UI, 24], ['f : ℝ^{N} → ℝ^{k}'], ['  con', COL.chalk, UI, 24]], RX, 330, tl + 3, { size: 28, weight: 600 });
+    aTx(p, '(1 − ε)‖u − v‖²  ≤  ‖f(u) − f(v)‖²  ≤  (1 + ε)‖u − v‖²', RX, 400, tl + 3.6, { size: 28, weight: 700 });
+    aTx(p, 'para todo u, v de V        (15.13)', RX, 440, tl + 3.6, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['aquí:   ', COL.chalk, UI, 24], [`m = ${aJm},   ε = ${aJe}`], ['      →      ', COL.chalk], [`k = ${aJK}`, HUE.hyp]], RX, 548, ths[3], { size: 32, weight: 700 });
+    aTx(p, 'f = A/√k, con A gaussiana, cumple (15.13) con probabilidad positiva', RX, 590, ths[3] + 2.4, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['k no depende de N', HUE.hyp, UI, 30], [',  la dimensión original', COL.chalk, UI, 26]], RX, 700, tN, { weight: 700 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Isomap:  conserva distancias geodésicas (caminos más cortos en el grafo de vecinos).', 'w1'], ['Laplacian eigenmaps y LLE:  conservan vecindades; vectores propios de menor valor propio.', 'w2'],
+      ['Los tres son casos de kernel PCA, con  K_{Iso},  K_{L} = L^{†}  y  K_{LLE}.', 'w3'], ['Johnson-Lindenstrauss:  con k = 20 log m / ε², las distancias cambian a lo sumo 1 ± ε.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 28, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Isomap aproxima la distancia geodésica entre dos puntos lejanos con su distancia en línea recta.'], ans: ['f'], why: 'Usa el camino más corto por el grafo de vecinos.' },
+      { parts: ['Laplacian eigenmaps usa los vectores propios del laplaciano de menor valor propio, sin el del valor cero.'], ans: ['v'], why: 'Es la solución de (15.7), con L = D − W.' },
+      { parts: ['LLE busca una representación en la que cada punto se reconstruye con los mismos pesos que en el espacio original.'], ans: ['v'], why: 'Es el problema (15.10).' },
+      { parts: ['En el lema de Johnson-Lindenstrauss, la dimensión k crece con la dimensión original N.'], ans: ['f'], why: 'k depende de m y de épsilon, no de N.' },
+      { parts: ['Isomap, Laplacian eigenmaps y LLE se pueden ver como casos de kernel PCA.'], ans: ['v'], why: 'Cada uno con su matriz de kernel.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-eps', prompt: ['En el lema 15.4, k es 20 por el logaritmo de m, sobre épsilon al cuadrado. Si épsilon se reduce a la mitad, ¿qué pasa con k?'],
+    build: choice([['se multiplica por 2'], ['se divide por 2'], ['se multiplica por 4'], ['no cambia']], 2,
+      'Épsilon va al cuadrado en el denominador: la mitad, al cuadrado, es un cuarto.',
+      aQ4why),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

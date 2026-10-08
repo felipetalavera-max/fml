@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Función de crecimiento y dimensión VC</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 5, title: 'Función de crecimiento y dimensión VC', minutes: 6, language: 'es', next: '../ch06/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 4) ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, rad: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'Π_{H}(m) = 2^{m}'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    mk('tspan', { dy: dy - prev, ...(k ? { 'font-size': size * .68 } : {}) }, e).textContent = k ? s.slice(2, -1) : s;
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+const aFmt = v => v.toFixed(2).replace('-', '−');
+const aBar = (p, x, y, w, t0, fill = COL.chalk) => { const e = put(mk('rect', { x, y: y - 20, width: 0, height: 22, fill, 'fill-opacity': .8 }, p), {}); tw(e, { a_width: w }, t0, .7, out); return e; };
+const aNote = (p, str = 'puntos ilustrativos · dicotomías contadas en la página') => text(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aPos = l => l.filter(v => v > 0).length;
+// Las 2^m maneras de etiquetar m puntos con +1 y −1, ordenadas por cantidad de positivos.
+const aLabs = m => Array.from({ length: 2 ** m }, (_, n) => Array.from({ length: m }, (_, i) => n >> i & 1 ? 1 : -1)).sort((u, v) => aPos(u) - aPos(v));
+// Rectas en el plano. Una recta es { a, c }: los puntos con cos(a)·x + sen(a)·y > c reciben +1.
+const aProj = (pts, a) => pts.map(q => q[0] * Math.cos(a) + q[1] * Math.sin(a));
+const aDirs = pts => {
+  const o = []; for (let k = 0; k < 120; k++) o.push(k * 3 * Math.PI / 180);
+  pts.forEach((q, i) => pts.forEach((u, j) => { if (i < j) { const b = Math.atan2(u[1] - q[1], u[0] - q[0]) + Math.PI / 2; [-1e-4, 1e-4, Math.PI - 1e-4, Math.PI + 1e-4].forEach(e => o.push(b + e)); } }));
+  return o;
+};
+// La recta que logra una dicotomía (la de mayor separación entre las direcciones probadas), o null si ninguna recta la logra.
+const aLine = (pts, lab) => {
+  if (lab.every(v => v === lab[0])) { const a = lab[0] * Math.PI / 2, pr = aProj(pts, a); return { a, c: lab[0] > 0 ? Math.min(...pr) - .16 : Math.max(...pr) + .16 }; }
+  let best = null;
+  aDirs(pts).forEach(a => {
+    const pr = aProj(pts, a), lo = Math.max(...pr.filter((_, i) => lab[i] < 0)), hi = Math.min(...pr.filter((_, i) => lab[i] > 0));
+    if (hi - lo > 1e-9 && (!best || hi - lo > best.gap)) best = { a, c: (lo + hi) / 2, gap: hi - lo };
+  });
+  return best;
+};
+// Una recta con dirección fija que pasa entre los puntos: la que deja menos puntos del lado equivocado.
+const aTry = (pts, lab, a) => {
+  const pr = aProj(pts, a), cs = [...pr].sort((u, v) => u - v); let best = null;
+  cs.slice(1).map((v, i) => (v + cs[i]) / 2).forEach(c => [1, -1].forEach(s => {
+    const miss = pts.map((_, i) => i).filter(i => s * (pr[i] - c) * lab[i] < 0);
+    if (!best || miss.length < best.miss.length) best = { a, c, miss };
+  }));
+  return best;
+};
+// Rectángulos alineados a los ejes (+1 dentro): el más chico que contiene a los positivos, o null si atrapa un negativo.
+const aBBox = q => [Math.min(...q.map(v => v[0])), Math.min(...q.map(v => v[1])), Math.max(...q.map(v => v[0])), Math.max(...q.map(v => v[1]))];
+const aIn = (q, b) => q[0] >= b[0] && q[0] <= b[2] && q[1] >= b[1] && q[1] <= b[3];
+const aRectFor = (pts, lab) => { const ps = pts.filter((_, i) => lab[i] > 0); if (!ps.length) return [.03, .03, .12, .12]; const b = aBBox(ps); return pts.some((q, i) => lab[i] < 0 && aIn(q, b)) ? null : b; };
+// Intervalos en la recta (+1 dentro): los positivos deben quedar seguidos.
+const aIntOK = lab => { const f = lab.indexOf(1), l = lab.lastIndexOf(1); return f < 0 || lab.slice(f, l + 1).every(v => v > 0); };
+const aIntN = m => aLabs(m).filter(aIntOK).length;
+// Funciones seno: puntos t_i = 2^−i; con ω = kπ y k = 1 + Σ 2^i sobre los puntos negativos, el signo de sin(ωt_i) es la etiqueta pedida.
+const aST = [1, 2, 3, 4].map(i => 2 ** -i);
+const aOm = lab => 1 + lab.reduce((s, v, i) => s + (v < 0 ? 2 ** (i + 1) : 0), 0);
+const aSinLab = k => aST.map(t => Math.sin(k * Math.PI * t) > 0 ? 1 : -1);
+const aSinN = aLabs(4).filter(l => aSinLab(aOm(l)).every((v, i) => v === l[i])).length;
+// Lema de Sauer y términos de las cotas.
+const aCh = (n, k) => { let r = 1; for (let i = 0; i < k; i++) r = r * (n - i) / (i + 1); return Math.round(r); };
+const aSauer = (m, d) => Array.from({ length: d + 1 }, (_, i) => aCh(m, i)).reduce((s, v) => s + v, 0);   // Σ_{i≤d} C(m, i), (3.27)
+const aGrow = (n, m) => Math.sqrt(2 * Math.log(n) / m);                           // √(2 log Π_H(m) / m), (3.21)
+const aVC = (m, d) => Math.sqrt(2 * d * Math.log(Math.E * m / d) / m);            // √(2d log(em/d) / m), (3.29)
+
+// Conjuntos de puntos (ilustrativos), en coordenadas [0, 1]² con y hacia abajo.
+const aP3 = [[.28, .70], [.50, .26], [.76, .62]], aP3c = [[.24, .68], [.50, .50], [.76, .32]];           // tres puntos; los mismos, alineados
+const aP4 = [[.26, .30], [.74, .24], [.78, .72], [.24, .74]], aP4b = [[.50, .20], [.80, .76], [.20, .76], [.50, .58]];   // figura 3.2 (a) y (b)
+const aPR4 = [[.5, .18], [.82, .5], [.5, .82], [.18, .5]], aPR5 = [[.5, .14], [.86, .44], [.62, .86], [.14, .6], [.46, .5]];   // rombo; cinco puntos
+const aPQ = [[.20, .42], [.46, .14], [.68, .30], [.84, .36], [.40, .86]];                                  // comprobación 2
+const aWrap = v => Math.atan2(Math.sin(v), Math.cos(v)), aNorm = a => (a % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+// Las 8 dicotomías de tres puntos, en el orden en que una recta que gira las va logrando.
+const aD3 = (() => {
+  const l = aLabs(3).map(lab => ({ lab, L: aLine(aP3, lab), Lc: aLine(aP3c, lab) })).sort((u, v) => aNorm(u.L.a) - aNorm(v.L.a)), k = l.findIndex(d => aPos(d.lab) % 3);
+  return [...l.slice(k), ...l.slice(0, k)];
+})();
+const aN3 = aD3.filter(d => d.L).length, aN3c = aD3.filter(d => d.Lc).length;
+const aD4 = aLabs(4).map(lab => ({ lab, L: aLine(aP4, lab) })), aN4 = aD4.filter(d => d.L).length, aN4b = aLabs(4).filter(l => aLine(aP4b, l)).length;
+const aNR4 = aLabs(4).filter(l => aRectFor(aPR4, l)).length;
+const aOdd = (pts, i) => aIn(pts[i], aBBox(pts.filter((_, j) => j !== i)));       // ¿el punto i queda dentro del rectángulo de los demás?
+// Umbrales sobre la muestra del cap. 4: m = 8 puntos de [0, 1] con semilla; el corte j deja j puntos a su izquierda.
+const aM = 8, aIdx = Array.from({ length: aM }, (_, i) => i);
+const aXs = (() => { const r = aRng(1096); return aIdx.map(() => r()).sort((a, b) => a - b); })();
+const aEdge = [0, ...aXs.slice(1).map((x, i) => (x + aXs[i]) / 2), 1];
+const aThr = aEdge.map((_, j) => aIdx.map(i => i < j ? -1 : 1));
+const aNT = new Set(aThr.map(h => h.join())).size;                                // vectores distintos de los umbrales sobre S
+const aQ1 = [[1, 1, -1], [1, -1, 1], [-1, 1, -1]];                                // comprobación 1: tres maneras de etiquetar
+const aSinSeq = [[1, 1, 1, 1], [1, -1, 1, 1], [-1, 1, -1, 1], [-1, -1, 1, -1]];   // dicotomías que se muestran con el seno
+/* aMATH:end */
+
+const aX0 = 100, aXW = 760, aPX = t => aX0 + t * aXW;
+// Recorta la recta al cuadrado [0, 1]²: devuelve sus dos extremos o null.
+const aSeg = L => {
+  const d = [-Math.sin(L.a), Math.cos(L.a)], p0 = [L.c * Math.cos(L.a), L.c * Math.sin(L.a)]; let lo = -9, hi = 9;
+  [0, 1].forEach(k => {
+    if (Math.abs(d[k]) < 1e-9) { if (p0[k] < 0 || p0[k] > 1) { lo = 1; hi = 0; } return; }
+    const t1 = -p0[k] / d[k], t2 = (1 - p0[k]) / d[k]; lo = Math.max(lo, Math.min(t1, t2)); hi = Math.min(hi, Math.max(t1, t2));
+  });
+  return lo < hi ? [lo, hi].map(t => [p0[0] + t * d[0], p0[1] + t * d[1]]) : null;
+};
+// Recuadro con puntos: pts en [0, 1]², lab = etiquetas (o null: grises). La capa ln queda debajo de los puntos.
+const aTile = (p, x, y, w, pts, lab, { r = 9, o = 1 } = {}) => {
+  const g = G(p, { o }), t = { g, x, y, w, px: q => x + q[0] * w, py: q => y + q[1] * w };
+  t.fr = mk('rect', { x, y, width: w, height: w, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  t.ln = G(g);
+  t.dots = pts.map((q, i) => put(mk('circle', { r, fill: lab ? aHue(lab[i]) : COL.dim }, g), { x: t.px(q), y: t.py(q) }));
+  return t;
+};
+const aSegD = (t, L) => { const s = L && aSeg(L); return s ? 'M' + s.map(q => `${t.px(q).toFixed(1)} ${t.py(q).toFixed(1)}`).join('L') : 'M0 0'; };
+const aHyp = (t, L, w = 3, o = 1) => path(t.ln, aSegD(t, L), { stroke: HUE.hyp, 'stroke-width': w }, { o });
+const aCross = (p, x, y, k = 12, o = 0) => put(mk('path', { d: `M${-k} ${-k}L${k} ${k}M${k} ${-k}L${-k} ${k}`, fill: 'none', stroke: COL.bad, 'stroke-width': 5, 'stroke-linecap': 'round' }, p), { x, y, o });
+// Mueve una recta dibujada de L0 a L1 por el camino más corto.
+const aSweep = (el, t, L0, L1, t0, dur) => {
+  let a1 = L1.a, c1 = L1.c;
+  if (Math.abs(aWrap(a1 - L0.a)) > Math.PI / 2) { a1 += Math.PI; c1 = -c1; }
+  const da = aWrap(a1 - L0.a);
+  prog(q => el.setAttribute('d', aSegD(t, { a: L0.a + da * q, c: L0.c + (c1 - L0.c) * q })), t0, dur);
+};
+const aRectEl = (t, b, pad, attrs) => mk('rect', { x: t.px([b[0] - pad]), y: t.py([0, b[1] - pad]), width: (b[2] - b[0] + 2 * pad) * t.w, height: (b[3] - b[1] + 2 * pad) * t.w, ...attrs }, t.ln);
+// Eje pequeño con m puntos etiquetados y, si existe, el intervalo que logra esa dicotomía.
+const aMini = (p, x, y, w, lab, t0) => {
+  const g = G(p, { o: 0 }), n = lab.length, X = k => x + w * (k + 1) / (n + 1), f = lab.indexOf(1), l = lab.lastIndexOf(1), ok = aIntOK(lab), h = w / (n + 1) * .36;
+  if (ok) { const a = f < 0 ? x + 2 : X(f) - h, b = f < 0 ? x + 2 + h : X(l) + h; mk('rect', { x: a, y: y - 18, width: b - a, height: 36, fill: HUE.hyp, 'fill-opacity': .25, stroke: HUE.hyp, 'stroke-width': 3 }, g); }
+  else { mk('rect', { x: x - 6, y: y - 26, width: w + 12, height: 52, fill: 'none', stroke: COL.bad, 'stroke-width': 3 }, g); aCross(g, x + 12, y - 2, 7, 1); }
+  mk('path', { d: `M${x} ${y}H${x + w}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  lab.forEach((v, k) => mk('circle', { cx: X(k), cy: y, r: 9, fill: aHue(v) }, g));
+  show(g, t0, .3); return g;
+};
+// Número combinatorio «m sobre i», dibujado a la derecha de x.
+const aBin = (p, x, y, size, t0, fill = COL.chalk) => {
+  const g = G(p, { o: 0 });
+  T(g, '(', { x, y: y + size * .42, size: size * 1.9, fill, font: MATH, weight: 300 }); T(g, ')', { x: x + size * 1.08, y: y + size * .42, size: size * 1.9, fill, font: MATH, weight: 300 });
+  T(g, 'm', { x: x + size * .84, y: y - size * .34, size: size * .74, fill, font: MATH, anchor: 'middle' }); T(g, 'i', { x: x + size * .84, y: y + size * .36, size: size * .74, fill, font: MATH, anchor: 'middle' });
+  show(g, t0); return g;
+};
+const aCirc = (n, cx, cy, R) => Array.from({ length: n }, (_, k) => { const a = (-90 + k * 360 / n) * Math.PI / 180; return [cx + R * Math.cos(a), cy + R * Math.sin(a), a]; });
+const aPoly = pts => 'M' + pts.map(q => `${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join('L') + 'Z';
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 5', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Función de crecimiento y dimensión VC', { x: 800, y: 430, size: 72, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Para medir un conjunto de hipótesis, basta contar de cuántas maneras colorea unos puntos.', 800, 600, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['dicot', 'Contar dicotomías', (m) => {
+    const p = panel(0), tp = m('pts'), tl = m('line'), tm = m('move'), te = m('eight'), tc = m('col'), td = m('def'), step = 1.15, RX = 570;
+    aNote(p);
+    text(p, 'plano de características · H: todas las rectas', 100, 130, .3, { size: 22, fill: COL.dim });
+    const B = aTile(p, 100, 150, 400, aP3, null, { r: 15, o: 0 });
+    show(B.g, .2);
+    B.dots.forEach((e, i) => { const y = st(e).y; put(e, { o: 0, y: y - 46 }); tw(e, { o: 1, y }, tp + i * .3, .45, out); });
+    const ln = aHyp(B, aD3[0].L, 5, 0);
+    show(ln, tl, .4);
+    const tk = k => k ? tm + (k - 1) * step : tl;                                  // momento en que la recta logra la dicotomía k
+    const tiles = aD3.map((d, k) => {
+      const t = aTile(p, 110 + k * 172, 600, 150, aP3, d.lab, { r: 10, o: 0 }), gl = aHyp(t, d.L), cl = d.Lc ? aHyp(t, d.Lc, 3, 0) : aCross(t.g, t.x + 75, t.y + 75, 22);
+      if (k) aSweep(ln, B, aD3[k - 1].L, d.L, tk(k), .7);
+      B.dots.forEach((e, i) => tw(e, { c_fill: aHue(d.lab[i]) }, tk(k) + .4, .2));
+      show(t.g, tk(k) + .7, .3);
+      const n = text(p, `dicotomías distintas hasta ahora: ${k + 1}`, RX, 400, tk(k) + .7, { size: 26 });
+      hide(n, k < 7 ? tk(k + 1) + .7 : te, .15);
+      // tres puntos alineados: dos dicotomías dejan de lograrse; después se vuelve a los puntos originales
+      t.dots.forEach((e, i) => { tw(e, { x: t.px(aP3c[i]), y: t.py(aP3c[i]) }, tc, .9); tw(e, { x: t.px(aP3[i]), y: t.py(aP3[i]) }, td, .9); });
+      hide(gl, tc, .3); show(cl, tc + .9, .3); hide(cl, td, .3); show(gl, td + .9, .3);
+      if (!d.Lc) { tw(t.fr, { c_stroke: COL.bad }, tc + .9, .3); tw(t.fr, { c_stroke: COL.faint }, td, .3); }
+      return t;
+    });
+    hide(ln, tc, .3);
+    B.dots.forEach((e, i) => { tw(e, { x: B.px(aP3c[i]), y: B.py(aP3c[i]), c_fill: COL.dim }, tc, .9); tw(e, { x: B.px(aP3[i]), y: B.py(aP3[i]), c_fill: aHue(aD3[7].lab[i]) }, td, .9); });
+    show(ln, td + .9, .3);
+    text(p, 'Otra medida de H: contar', RX, 180, 4.2, { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'una hipótesis h (aquí, una recta) da +1 o −1 a cada punto', RX, 226, tl, { size: 24 });
+    text(p, 'Dicotomía: una manera de etiquetar los puntos con una h ∈ H', RX, 296, tm + 6, { size: 28, weight: 600 });
+    aTx(p, '( h(x_{1}), …, h(x_{m}) )', RX, 338, tm + 6.4, { size: 26, fill: COL.dim });
+    aTx(p, `3 puntos:  2^{3} = 8 maneras de colorearlos · las rectas logran ${aN3}`, RX, 400, te + .2, { size: 26, font: UI });
+    text(p, `3 puntos alineados: las rectas logran solo ${aN3c}`, RX, 440, tc + 1.4, { size: 26 });
+    aTx(p, 'Π_{H}(m) = max_{S ⊆ X, |S| = m} | { (h(x_{1}), …, h(x_{m})) : h ∈ H } |', RX, 506, td + .4, { size: 31, fill: COL.task, weight: 600 });
+    aTx(p, `función de crecimiento · definición 3.6 del libro · S = {x_{1}, …, x_{m}} · rectas: Π_{H}(3) = ${aN3}`, RX, 546, td + 2.2, { size: 22, fill: COL.dim, font: UI });
+    text(p, 'No depende de la distribución D: es una medida puramente combinatoria.', 800, 820, td + 7.9, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['massart', 'El lema de Massart', (m) => {
+    const p = panel(0), ts = m('sweep'), tm = m('mas'), tc = m('cor'), tb = m('bound'), tt = m('thr'), ta = m('allf'), Y = 190, k = 380, ms = [8, 32, 128, 512];
+    aNote(p, 'umbrales: el ejemplo del capítulo 4 · valores calculados en la página');
+    text(p, `S: ${aM} puntos · H: todos los umbrales de [0, 1]`, aX0, 130, .3, { size: 22, fill: COL.dim });
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${aPX(0)} ${Y}H${aPX(1)}`, stroke: COL.dim, 'stroke-width': 3 }, ax);
+    T(ax, '0', { x: aPX(0) - 14, y: Y + 9, size: 24, fill: COL.dim, anchor: 'end', font: MATH }); T(ax, '1', { x: aPX(1) + 14, y: Y + 9, size: 24, fill: COL.dim, font: MATH });
+    const dots = aXs.map(x => mk('circle', { cx: aPX(x), cy: Y, r: 13, fill: COL.dim }, ax));
+    show(ax, .2);
+    const line = put(mk('path', { d: `M0 ${Y - 36}V${Y + 36}`, stroke: HUE.hyp, 'stroke-width': 5 }, p), { x: aPX(0), o: 0 });
+    show(line, ts, .3);
+    aThr.forEach((h, j) => {
+      const t = ts + .3 + j * .42, g = G(p, { o: 0 });
+      tw(line, { x: aPX(aEdge[j]) }, t, .3);
+      dots.forEach((e, i) => tw(e, { c_fill: aHue(h[i]) }, t + .15, .15));
+      h.forEach((v, i) => mk('rect', { x: aPX(aXs[i]) - 13, y: 248 + j * 30, width: 26, height: 22, fill: aHue(v) }, g));
+      T(g, String(j + 1), { x: aPX(0) - 14, y: 267 + j * 30, size: 22, fill: COL.dim, anchor: 'end' });
+      show(g, t + .3, .2);
+    });
+    text(p, `infinitos umbrales; sobre S, solo ${aNT} vectores de signos distintos: m + 1`, aX0, 556, ts + 4.4, { size: 24, weight: 600 });
+    text(p, 'Lema de Massart', 940, 150, tm, { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'teorema 3.7 del libro', 1210, 150, tm, { size: 22, fill: COL.dim });
+    aTx(p, 'A ⊂ ℝ^{m} finito,   r = max_{x∈A} ‖x‖_{2}', 940, 204, tm + 1.6, { size: 26 });
+    aTx(p, 'E_{σ}[ (1/m) sup_{x∈A} Σ_{i} σ_{i}x_{i} ] ≤ r √[ 2 log|A| ] / m', 940, 258, tm + 3.4, { size: 29, weight: 600 });
+    text(p, 'el supremo sobre |A| vectores crece solo como √log|A|', 940, 296, tm + 6, { size: 22, fill: COL.dim });
+    aTx(p, 'ℜ_{m}(H) ≤ √[ 2 log Π_{H}(m) / m ]', 940, 376, tc + 1.4, { size: 36, fill: HUE.rad, weight: 600 });
+    text(p, 'corolario 3.8 · A: los vectores de H sobre S, con r = √m', 940, 414, tc + 2.2, { size: 22, fill: COL.dim });
+    text(p, 'Corolario 3.9 · con probabilidad ≥ 1 − δ, para toda h ∈ H:', 940, 484, tb, { size: 22, fill: COL.dim });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + √[2 log Π_{H}(m) / m] + √[log(1/δ) / 2m]', 940, 532, tb + .8, { size: 26, fill: COL.task, weight: 600 });
+    aTx(p, 'umbrales:  Π_{H}(m) = m + 1', aX0, 622, tt, { size: 24, fill: HUE.rad, weight: 600 });
+    aTx(p, 'el término  √[ 2 log Π_{H}(m) / m ]', 440, 622, tt, { size: 22, fill: COL.dim });
+    ms.forEach((n, i) => {
+      const v = aGrow(n + 1, n), y = 664 + i * 40, t = tt + .6 + i * .5;
+      aTx(p, `m = ${n}`, aX0, y, t, { size: 26 }); aBar(p, 250, y, v * k, t, HUE.rad);
+      text(p, aFmt(v), 264 + v * k, y, t + .3, { size: 26, weight: 600 });
+    });
+    const va = aGrow(2 ** 8, 8);
+    aTx(p, 'todas las funciones:  Π_{H}(m) = 2^{m}', 940, 622, ta, { size: 24, fill: COL.bad, weight: 600 });
+    aBar(p, 940, 664, va * k, ta + .6, COL.bad); text(p, '≈ ' + aFmt(va), 954 + va * k, 664, ta + 1, { size: 26, weight: 600, fill: COL.bad });
+    aTx(p, '√[ 2 log 2^{m} / m ] = √[ 2 log 2 ]:  no depende de m', 940, 712, ta + 1.6, { size: 24 });
+    aTx(p, 'La cota sirve cuando las dicotomías crecen más lento que 2^{m}.', 800, 836, ta + 3.2, { size: 30, fill: COL.task, anchor: 'middle', weight: 600, font: UI });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    T(p, 'H: intervalos de la recta', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, '+1 dentro del intervalo, −1 fuera', { x: 480, y: 130, size: 24 });
+    mk('rect', { x: 260, y: 186, width: 220, height: 40, fill: HUE.hyp, 'fill-opacity': .25, stroke: HUE.hyp, 'stroke-width': 3 }, p);
+    mk('path', { d: 'M100 206H700', stroke: COL.dim, 'stroke-width': 3 }, p);
+    [[180, -1], [370, 1], [590, -1]].forEach(([x, v]) => T(p, v > 0 ? '+1' : '−1', { x, y: 178, size: 24, fill: aHue(v), anchor: 'middle', weight: 600 }));
+    T(p, 'una hipótesis de H', { x: 730, y: 214, size: 22, fill: COL.dim });
+    S.q1 = aQ1.map((lab, i) => {
+      const x = 100 + i * 480, g = G(p);
+      mk('rect', { x, y: 300, width: 420, height: 240, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+      T(g, 'ABC'[i], { x: x + 24, y: 346, size: 32, weight: 700, fill: HUE.hyp });
+      mk('path', { d: `M${x + 40} 450H${x + 380}`, stroke: COL.dim, 'stroke-width': 3 }, g);
+      lab.forEach((v, k) => { const cx = x + 40 + (k + 1) * 85; mk('circle', { cx, cy: 450, r: 18, fill: aHue(v) }, g); T(g, v > 0 ? '+' : '−', { x: cx, y: 412, size: 40, fill: aHue(v), anchor: 'middle', weight: 700 }); });
+      return g;
+    });
+  }, { ask: done => {
+    const right = aQ1.findIndex(l => !aIntOK(l)), how = ['los dos primeros puntos', '', 'solo el punto del medio'];
+    return quiz(BAND, [{
+      id: 'c-intervalo', prompt: ['¿Qué etiquetado no puede dar ningún intervalo? Elegirlo en el dibujo.'],
+      build: pickEls(aQ1.map((_, i) => ({ el: S.q1[i], box: [100 + i * 480, 300, 420, 240], label: 'etiquetado ' + 'ABC'[i] })), right,
+        `Un intervalo que contiene a los dos extremos contiene al punto del medio. Con 3 puntos se logran ${aIntN(3)} de 8.`,
+        i => `Ese sí se logra, con un intervalo que cubra ${how[i]}. Falta el que ningún intervalo puede dar.`),
+    }], done);
+  } }],
+
+  ['vc', 'Fragmentar y dimensión VC', (m) => {
+    const p = panel(0), ts = m('shat'), tf = m('four'), tg = m('diag'), ti = m('inside'), td = m('dim'), to = m('some');
+    const labA = [1, -1, 1, -1], labB = [1, 1, 1, -1], rad = v => v * Math.PI / 180;
+    aNote(p);
+    text(p, `3 puntos: las rectas logran ${aN3} de 8`, 100, 138, .3, { size: 24, weight: 600 });
+    aLabs(3).forEach((lab, i) => { const t = aTile(p, 100 + i * 96, 156, 84, aP3, lab, { r: 7, o: 0 }); aHyp(t, aLine(aP3, lab)); show(t.g, .3 + i * .05, .3); });
+    text(p, 'fragmentado', 864, 138, ts + 3.4, { size: 24, fill: COL.good, anchor: 'end', weight: 600 });
+    text(p, 'H fragmenta al conjunto S', 940, 150, ts, { size: 32, fill: COL.task, weight: 600 });
+    aTx(p, 'H logra las 2^{m} dicotomías de S  (en inglés, shattering)', 940, 190, ts + 1.6, { size: 22, fill: COL.dim, font: UI });
+    text(p, '4 puntos: 16 maneras de colorearlos', 100, 298, tf, { size: 24, weight: 600 });
+    aD4.forEach((d, i) => {
+      const t = aTile(p, 100 + (i % 8) * 96, 316 + (i > 7) * 96, 84, aP4, d.lab, { r: 7, o: 0 });
+      show(t.g, tf + .3 + i * .05, .3);
+      if (d.L) show(aHyp(t, d.L, 3, 0), tf + 2.2 + i * .1, .2);
+      else { show(aCross(t.g, t.x + 42, t.y + 42, 16), tf + 4.6, .3); tw(t.fr, { c_stroke: COL.bad, 'a_stroke-width': 4 }, tf + 4.6, .3); }
+    });
+    text(p, `las rectas logran ${aN4}`, 864, 298, tf + 4.6, { size: 24, fill: COL.bad, anchor: 'end', weight: 600 });
+    // un recuadro grande donde una recta intenta lograr las dicotomías imposibles (figura 3.2 del libro)
+    const B = aTile(p, 940, 250, 300, aP4, labA, { r: 14, o: 0 }), tries = [15, 60, 105, 150];
+    show(B.g, tg, .4);
+    const A = tries.map(v => aTry(aP4, labA, rad(v))), Bt = tries.map(v => aTry(aP4b, labB, rad(v))), ln = aHyp(B, A[0], 5, 0);
+    const rings = aP4.map(q => put(mk('circle', { r: 25, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, B.g), { x: B.px(q), y: B.py(q), o: 0 }));
+    const mark = (L, t) => rings.forEach((e, i) => tw(e, { o: L && L.miss.includes(i) ? 1 : 0 }, t, .2));
+    show(ln, tg + .8, .3); mark(A[0], tg + 1.1);
+    A.slice(1).forEach((L, n) => { const t = tg + 2.2 + n * 1.5; mark(null, t); aSweep(ln, B, A[n], L, t, .6); mark(L, t + .6); });
+    hide(ln, ti, .3); mark(null, ti);
+    B.dots.forEach((e, i) => tw(e, { x: B.px(aP4b[i]), y: B.py(aP4b[i]), c_fill: aHue(labB[i]) }, ti + .3, .8));
+    rings.forEach((e, i) => tw(e, { x: B.px(aP4b[i]), y: B.py(aP4b[i]) }, ti + .3, .1));
+    aSweep(ln, B, A[3], Bt[0], ti + 1, .2); show(ln, ti + 1.4, .3); mark(Bt[0], ti + 1.7);
+    Bt.slice(1).forEach((L, n) => { const t = ti + 2.8 + n * 1.4; mark(null, t); aSweep(ln, B, Bt[n], L, t, .6); mark(L, t + .6); });
+    const ca = G(p, { o: 0 }), cb = G(p, { o: 0 });
+    ['cuatro puntos en', 'posición convexa:', 'cada diagonal de un color'].forEach((s, i) => T(ca, s, { x: 1262, y: 290 + i * 30, size: 22 }));
+    ['un punto dentro del', 'triángulo de los otros:', 'ese azul, los demás salmón'].forEach((s, i) => T(cb, s, { x: 1262, y: 290 + i * 30, size: 22 }));
+    show(ca, tg, .4); hide(ca, ti, .3); show(cb, ti + .3, .4);
+    ['siempre queda algún punto', 'del lado equivocado'].forEach((s, i) => text(p, s, 1262, 430 + i * 30, tg + 3, { size: 22, fill: COL.bad, weight: 600 }));
+    text(p, 'los dos casos de la figura 3.2 del libro', 940, 584, tg + .6, { size: 22, fill: COL.dim });
+    text(p, 'Ningún conjunto de 4 puntos queda fragmentado.', 100, 560, td, { size: 26, weight: 600 });
+    aTx(p, 'VCdim(H) = max { m : Π_{H}(m) = 2^{m} }', 100, 660, td + 3.9, { size: 36, fill: COL.task, weight: 600 });
+    text(p, 'dimensión VC: el tamaño del mayor conjunto que H fragmenta · definición 3.10', 100, 700, td + 4.4, { size: 22, fill: COL.dim });
+    text(p, 'VCdim(rectas en el plano) = 3', 940, 656, td + 8.4, { size: 32, weight: 600 });
+    aTx(p, 'hiperplanos en ℝ^{d}:  VCdim = d + 1', 940, 700, td + 9.4, { size: 22, fill: COL.dim, font: UI });
+    text(p, `Basta que exista un conjunto de ese tamaño fragmentado: 3 puntos alineados no lo están (${aN3c} de 8).`, 800, 800, to, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['ejemplos', 'Dos ejemplos', (m) => {
+    const p = panel(0), t2 = m('int2'), t3 = m('int3'), t4 = m('rect4'), t5 = m('rect5'), tr = m('rule');
+    aNote(p);
+    text(p, 'Intervalos en la recta', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    text(p, '+1 dentro, −1 fuera', 440, 130, .3, { size: 22, fill: COL.dim });
+    text(p, `2 puntos: ${aIntN(2)} de 4 dicotomías`, 100, 186, t2, { size: 24, weight: 600 });
+    aLabs(2).forEach((lab, i) => aMini(p, 100 + i * 172, 232, 150, lab, t2 + .3 + i * .15));
+    text(p, `3 puntos: ${aIntN(3)} de 8 dicotomías`, 100, 310, t3, { size: 24, weight: 600 });
+    aLabs(3).forEach((lab, i) => aMini(p, 100 + (i % 4) * 172, 356 + (i > 3) * 72, 150, lab, t3 + .3 + i * .1));
+    text(p, 'un intervalo no puede saltarse el punto del medio', 100, 496, t3 + 3.6, { size: 22, fill: COL.dim });
+    text(p, 'VCdim(intervalos en la recta) = 2', 100, 620, t3 + 7.2, { size: 30, weight: 600 });
+    text(p, 'Rectángulos alineados a los ejes', 840, 130, t4, { size: 30, fill: COL.task, weight: 600 });
+    text(p, '+1 dentro', 1330, 130, t4, { size: 22, fill: COL.dim });
+    aLabs(4).forEach((lab, i) => {
+      const t = aTile(p, 840 + (i % 4) * 90, 160 + (i >> 2) * 90, 80, aPR4, lab, { r: 7, o: 0 }), b = aRectFor(aPR4, lab);
+      if (b) aRectEl(t, b, aPos(lab) ? .09 : 0, { fill: HUE.hyp, 'fill-opacity': .22, stroke: HUE.hyp, 'stroke-width': 2.5 });
+      show(t.g, t4 + 2.4 + i * .1, .3);
+    });
+    text(p, `4 puntos en rombo: ${aNR4} de 16`, 840, 548, t4 + 5, { size: 24, weight: 600 });
+    const B = aTile(p, 1250, 160, 300, aPR5, null, { r: 13, o: 0 }), odd = aPR5.findIndex((_, i) => aOdd(aPR5, i)), bb = aBBox(aPR5);
+    show(B.g, t5, .4);
+    const box = put(aRectEl(B, bb, 0, { fill: 'none', stroke: COL.chalk, 'stroke-width': 3, 'stroke-dasharray': '9 7' }), { o: 0 });
+    show(box, t5 + 2.6, .5);
+    B.dots.forEach((e, i) => { if (i !== odd) pulse(e, t5 + 1.4 + i * .15, 1.5); tw(e, { c_fill: aHue(i === odd ? -1 : 1) }, t5 + 7.7, .4); });
+    const ring = put(mk('circle', { r: 24, fill: 'none', stroke: HUE.hyp, 'stroke-width': 4 }, B.g), { x: B.px(aPR5[odd]), y: B.py(aPR5[odd]), o: 0 });
+    show(ring, t5 + 5.8, .3); tw(ring, { c_stroke: COL.bad }, t5 + 8.6, .3); tw(box, { c_stroke: COL.bad }, t5 + 8.6, .3);
+    text(p, '5 puntos', 1250, 494, t5, { size: 24, weight: 600 });
+    ['si contiene a los 4 salmón,', 'contiene también al azul'].forEach((s, i) => text(p, s, 1250, 526 + i * 28, t5 + 8.6, { size: 22, fill: COL.bad, weight: 600 }));
+    text(p, 'VCdim(rectángulos alineados a los ejes) = 4', 840, 620, t5 + 11.5, { size: 30, weight: 600 });
+    text(p, 'Cota inferior: mostrar un conjunto de d puntos fragmentado.', 800, 730, tr + 2.4, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'Cota superior: probar que ningún conjunto de d + 1 puntos lo está.', 800, 776, tr + 5, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), B = aTile(p, 100, 130, 520, aPQ, null, { r: 16 });
+    S.q2b = B; S.q2c = B.dots;
+    aPQ.forEach((q, i) => T(p, 'ABCDE'[i], { x: B.px(q) + 26, y: B.py(q) - 18, size: 30, weight: 700 }));
+    T(p, 'H: rectángulos alineados a los ejes', { x: 700, y: 220, size: 30, fill: COL.task, weight: 600 });
+    T(p, '+1 dentro del rectángulo, −1 fuera', { x: 700, y: 262, size: 24 });
+    T(p, 'Se pinta un punto de azul (−1)', { x: 700, y: 350, size: 26 });
+    T(p, 'y los otros cuatro de salmón (+1).', { x: 700, y: 388, size: 26 });
+  }, { ask: done => {
+    const B = S.q2b, right = aPQ.findIndex((_, i) => aOdd(aPQ, i)), bb = aBBox(aPQ.filter((_, i) => i !== right));
+    const box = put(aRectEl(B, bb, 0, { fill: HUE.hyp, 'fill-opacity': .15, stroke: HUE.hyp, 'stroke-width': 3 }), { o: 0 });
+    return quiz(BAND, [{
+      id: 'c-rectangulo', prompt: ['¿Qué punto, pintado de azul, da una dicotomía imposible? Elegirlo.'],
+      build: pickEls(aPQ.map((q, i) => ({ el: S.q2c[i], box: [B.px(q) - 40, B.py(q) - 56, 96, 96], label: 'punto ' + 'ABCDE'[i] })), right,
+        `Imposible: el rectángulo más chico que contiene a los otros cuatro ya contiene a ${'ABCDE'[right]}.`,
+        i => `${'ABCDE'[i]} está en un extremo: un rectángulo puede contener a los otros cuatro y dejarlo fuera.`,
+        () => { fx(box, { o: 1 }, 0, .4); S.q2c.forEach((e, i) => fx(e, { c_fill: aHue(i === right ? -1 : 1) }, 0, .4)); }),
+    }], done);
+  } }],
+
+  ['infinita', 'Dimensión VC infinita', (m) => {
+    const p = panel(0), tp = m('poly'), tt = m('tan'), tn = m('inf'), ts = m('sin'), tf = m('freq'), tr = m('par');
+    const CX = 310, CY = 345, R = 125, c9 = aCirc(9, CX, CY, R), posA = [1, 3, 6, 8], negB = [0, 2, 4, 7];
+    aNote(p, 'seno: puntos t = 1/2, 1/4, 1/8 y 1/16 (construcción ilustrativa)');
+    text(p, 'Polígonos convexos', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    text(p, '+1 dentro', 400, 130, .3, { size: 22, fill: COL.dim });
+    show(put(mk('circle', { cx: CX, cy: CY, r: R, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, p), { o: 0 }), .2);
+    const g9 = G(p, { o: 0 }), sty = { fill: HUE.hyp, 'fill-opacity': .18, stroke: HUE.hyp, 'stroke-width': 4, 'stroke-linejoin': 'round' };
+    const pa = put(mk('path', { d: aPoly(posA.map(i => c9[i])), ...sty }, g9), { o: 0 });
+    // lados apoyados en los negativos: tangentes a un círculo apenas más chico, para que los negativos queden fuera
+    const pb = put(mk('path', { d: aPoly(negB.map((i, n) => { const a = c9[i][2], b = c9[negB[(n + 1) % negB.length]][2] + (n === negB.length - 1 ? 2 * Math.PI : 0), h = (b - a) / 2, r = (R - 12) / Math.cos(h); return [CX + r * Math.cos(a + h), CY + r * Math.sin(a + h)]; })), ...sty }, g9), { o: 0 });
+    const d9 = c9.map(q => mk('circle', { cx: q[0], cy: q[1], r: 12, fill: COL.dim }, g9));
+    show(g9, .2);
+    d9.forEach((e, i) => { tw(e, { c_fill: aHue(posA.includes(i) ? 1 : -1) }, tp + 1.2, .3); tw(e, { c_fill: aHue(negB.includes(i) ? -1 : 1) }, tt, .3); });
+    show(pa, tp + 3.6, .5); hide(pa, tt, .3); show(pb, tt + 1.6, .5);
+    const c1 = text(p, 'menos positivos: los positivos son los vértices', 100, 590, tp + 3.6, { size: 22 }); hide(c1, tt, .3);
+    const c2 = text(p, 'más positivos: los lados se apoyan en los negativos', 100, 590, tt + 1.6, { size: 22 }); hide(c2, tn, .3);
+    text(p, 'con d lados:  VCdim = 2d + 1', 100, 640, tt + 5.2, { size: 28, weight: 600 });
+    text(p, 'en el dibujo, d = 4 y 9 puntos', 480, 640, tt + 5.6, { size: 22, fill: COL.dim });
+    hide(g9, tn, .3);
+    const c20 = aCirc(20, CX, CY, R), g20 = G(p, { o: 0 }), rr = aRng(11), labs = [0, 1, 2].map(() => c20.map(() => rr() < .5 ? 1 : -1));
+    const ps = labs.map(l => put(mk('path', { d: aPoly(c20.filter((_, i) => l[i] > 0)), ...sty }, g20), { o: 0 }));
+    const d20 = c20.map((q, i) => mk('circle', { cx: q[0], cy: q[1], r: 9, fill: aHue(labs[0][i]) }, g20));
+    show(g20, tn + .3, .3);
+    labs.forEach((l, n) => { const t = tn + .3 + n * 1.5; show(ps[n], t, .3); if (n) { hide(ps[n - 1], t, .3); d20.forEach((e, i) => tw(e, { c_fill: aHue(l[i]) }, t, .3)); } });
+    text(p, '20 puntos, cualquier dicotomía: un polígono con más lados', 100, 590, tn + .6, { size: 22 });
+    text(p, 'sin límite de lados:  VCdim = +∞', 100, 690, tn + 2.6, { size: 28, weight: 600 });
+    // funciones seno sobre la recta
+    const TX = t => 860 + t * 1240, AY = 345, AM = 118;
+    text(p, 'Funciones seno', 840, 130, ts, { size: 30, fill: COL.task, weight: 600 });
+    aTx(p, '{ t ↦ sin(ωt) :  ω ∈ ℝ }', 1080, 130, ts + 1, { size: 26 });
+    text(p, 'etiqueta: el signo de sin(ωt)', 1250, 590, ts + 1.6, { size: 22, fill: COL.dim });
+    const ga = G(p, { o: 0 });
+    mk('path', { d: `M${TX(0)} ${AY}H1560`, stroke: COL.dim, 'stroke-width': 2 }, ga);
+    aST.forEach((t, i) => T(ga, ['1/2', '1/4', '1/8', '1/16'][i], { x: TX(t), y: AY + AM + 44, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    T(ga, 't', { x: 1572, y: AY + 8, size: 24, fill: COL.dim, font: MATH });
+    show(ga, ts, .4);
+    const gs = aSinSeq.map(lab => {
+      const k = aOm(lab), g = G(p, { o: 0 }), f = t => AY - AM * Math.sin(k * Math.PI * t);
+      let d = ''; for (let x = TX(0); x <= 1560; x += 1.5) d += `${d ? 'L' : 'M'}${x} ${f((x - 860) / 1240).toFixed(1)}`;
+      mk('path', { d, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, g);
+      aST.forEach((t, i) => { mk('path', { d: `M${TX(t)} ${AY}V${f(t)}`, stroke: aHue(lab[i]), 'stroke-width': 3 }, g); mk('circle', { cx: TX(t), cy: f(t), r: 6, fill: aHue(lab[i]) }, g); });
+      aTx(g, `ω = ${k === 1 ? '' : k}π`, 860, 590, null, { size: 28, fill: HUE.hyp, weight: 600 });
+      return g;
+    });
+    const ds = aST.map(t => put(mk('circle', { cx: TX(t), cy: AY, r: 11, fill: COL.dim }, p), { o: 0 }));
+    ds.forEach(e => show(e, ts, .4));
+    aSinSeq.forEach((lab, n) => { const t = n ? tf + .3 + (n - 1) * 1.5 : ts + 2; show(gs[n], t, .3); if (n) hide(gs[n - 1], t, .3); ds.forEach((e, i) => tw(e, { c_fill: aHue(lab[i]) }, t, .3)); });
+    text(p, `4 puntos: ${aSinN} de 16 dicotomías, con un solo parámetro`, 840, 640, tf + 3.6, { size: 24, weight: 600 });
+    text(p, 'y lo mismo con más puntos:  VCdim = +∞', 840, 690, tf + 4.6, { size: 28, weight: 600 });
+    text(p, 'La dimensión VC no es el número de parámetros.', 800, 790, tr + 5.2, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'rectas en el plano: 3 parámetros y VCdim 3 · seno: 1 parámetro y VCdim infinita', 800, 830, tr, { size: 22, fill: COL.dim, anchor: 'middle' });
+  }],
+
+  ['sauer', 'El lema de Sauer', (m) => {
+    const p = panel(0), ta = m('all'), tl = m('lemma'), ts = m('split'), tp = m('poly'), tw2 = m('two'), tb = m('bound'), tr = m('ratio');
+    const X = n => 130 + n * 31, Y = v => 540 - v * 62, lg = Math.log10, N = Array.from({ length: 21 }, (_, n) => n), d = 3, k = 520;
+    const curve = (f, from = 0) => 'M' + N.filter(n => n >= from).map(n => `${X(n)} ${Y(lg(f(n))).toFixed(1)}`).join('L');
+    aNote(p, 'curvas calculadas en la página, con d = 3');
+    text(p, 'número de dicotomías sobre m puntos (escala logarítmica)', 100, 130, .3, { size: 22, fill: COL.dim });
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${X(0)} 160V${Y(0)}H770`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    [0, 2, 4, 6].forEach(v => { aTx(ax, v ? `10^{${v}}` : '1', X(0) - 12, Y(v) + 8, null, { size: 22, fill: COL.dim, anchor: 'end' }); mk('path', { d: `M${X(0) - 6} ${Y(v)}h6`, stroke: COL.dim, 'stroke-width': 2 }, ax); });
+    [0, 5, 10, 15, 20].forEach(n => T(ax, String(n), { x: X(n), y: Y(0) + 30, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    T(ax, 'm', { x: 782, y: Y(0) + 8, size: 24, fill: COL.dim, font: MATH });
+    show(ax, .2);
+    draw(path(p, curve(n => 2 ** n), { stroke: COL.bad, 'stroke-width': 4 }, { d: 0 }), ta, 2.4);
+    aTx(p, '2^{m}: todas las maneras', 590, 196, ta + 1.6, { size: 24, fill: COL.bad, anchor: 'end', weight: 600, font: UI });
+    draw(path(p, curve(n => aSauer(n, d)), { stroke: HUE.rad, 'stroke-width': 5 }, { d: 0 }), tl + 7, 2.6);
+    const lgd = (y, dash, str, t) => { const g = G(p, { o: 0 }); mk('path', { d: `M440 ${y - 8}h50`, stroke: HUE.rad, 'stroke-width': dash ? 3 : 5, ...(dash ? { 'stroke-dasharray': '9 7' } : {}) }, g); aTx(g, str, 502, y, null, { size: 22, fill: HUE.rad, font: UI }); show(g, t); };
+    lgd(452, false, 'cota de Sauer, d = 3', tl + 7);
+    const sp = G(p, { o: 0 });
+    mk('path', { d: `M${X(d)} ${Y(0)}V300`, stroke: COL.chalk, 'stroke-width': 2, 'stroke-dasharray': '6 6' }, sp); T(sp, 'm = d', { x: X(d) + 10, y: 318, size: 22, font: MATH });
+    show(sp, ts);
+    show(put(mk('path', { d: curve(n => (Math.E * n / d) ** d, d), fill: 'none', stroke: HUE.rad, 'stroke-width': 3, 'stroke-dasharray': '9 7' }, p), { o: 0 }), tp + 3);
+    lgd(488, true, '(em/d)^{d}', tp + 3);
+    text(p, 'Lema de Sauer', 840, 150, tl, { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'teorema 3.17 del libro', 1080, 150, tl, { size: 22, fill: COL.dim });
+    const f = aTx(p, 'VCdim(H) = d   ⟹   Π_{H}(m) ≤ Σ_{i=0}^{d}', 840, 216, tl + 2.6, { size: 31, weight: 600 });
+    aBin(p, 848 + f.getComputedTextLength(), 216, 31, tl + 6.4);
+    aTx(p, `rectas en el plano, d = 3:   m = 3:  ${aN3} ≤ ${aSauer(3, d)}   ·   m = 4:  ${aN4} ≤ ${aSauer(4, d)}`, 840, 276, ts + 1.4, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'm ≥ d:   Π_{H}(m) ≤ (em/d)^{d} = O(m^{d})', 840, 346, tp, { size: 31, fill: HUE.rad, weight: 600 });
+    text(p, 'corolario 3.18 · crecimiento polinomial', 840, 382, tp + 5, { size: 22, fill: COL.dim });
+    text(p, 'Solo dos comportamientos:', 840, 446, tw2, { size: 24, weight: 600 });
+    aTx(p, 'VCdim(H) = d finita:   Π_{H}(m) = O(m^{d})', 840, 488, tw2 + 1.4, { size: 26, fill: HUE.rad });
+    aTx(p, 'VCdim(H) = +∞:   Π_{H}(m) = 2^{m}', 840, 528, tw2 + 2.8, { size: 26, fill: COL.bad });
+    text(p, 'Corolario 3.19 · con probabilidad ≥ 1 − δ, para toda h ∈ H:', 100, 634, tb, { size: 22, fill: COL.dim });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + √[ 2d log(em/d) / m ] + √[ log(1/δ) / 2m ]', 100, 690, tb + 1.6, { size: 33, fill: COL.task, weight: 600 });
+    text(p, 'el término de complejidad, con d = 3:', 1040, 634, tb + 5.5, { size: 22, fill: COL.dim });
+    [[100, '100'], [1000, '1 000'], [10000, '10 000']].forEach(([n, s], i) => {
+      const v = aVC(n, d), y = 676 + i * 38, t = tb + 6 + i * .6;
+      aTx(p, `m = ${s}`, 1040, y, t, { size: 24 }); aBar(p, 1190, y, v * k, t, HUE.rad);
+      text(p, aFmt(v), 1204 + v * k, y, t + .3, { size: 24, weight: 600 });
+    });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + O( √[ log(m/d) / (m/d) ] )', 100, 764, tr, { size: 28 });
+    text(p, 'ecuación (3.30)', 690, 762, tr, { size: 22, fill: COL.dim });
+    text(p, 'Importa el cociente m/d: hacen falta muchos más datos que dimensión VC.', 800, 836, tr + 2.6, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Función de crecimiento: el mayor número de dicotomías que H logra sobre m puntos.', 'w1'], ['Dimensión VC: el tamaño del mayor conjunto de puntos que H fragmenta.', 'w2'],
+      ['Lema de Sauer: con dimensión VC d, las dicotomías crecen como un polinomio en m.', 'w3'], ['La cota de generalización depende del cociente m/d.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 220, size: 31, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre un conjunto H de hipótesis con valores en {−1, +1}: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Si H fragmenta algún conjunto de 5 puntos, su dimensión VC es al menos 5.'], ans: ['v'], why: 'La dimensión VC es el tamaño del mayor conjunto fragmentado: mostrar uno de 5 puntos da la cota inferior.' },
+      { parts: ['Si la dimensión VC de H es 3, H fragmenta todos los conjuntos de 3 puntos.'], ans: ['f'], why: 'Basta con que exista uno. Las rectas del plano tienen dimensión VC 3 y no fragmentan 3 puntos alineados.' },
+      { parts: ['Un conjunto de hipótesis definido por un solo parámetro tiene dimensión VC 1.'], ans: ['f'], why: 'Las funciones seno tienen un solo parámetro, la frecuencia, y dimensión VC infinita.' },
+      { parts: ['Si la dimensión VC de H es 3, sobre 4 puntos H logra menos de 16 dicotomías.'], ans: ['v'], why: 'Con dimensión VC 3 ningún conjunto de 4 puntos queda fragmentado. El lema de Sauer da a lo sumo ' + aSauer(4, 3) + '.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-sauer', prompt: ['Los intervalos de la recta tienen dimensión VC 2. Según el lema de Sauer, ¿cuántas dicotomías logran como máximo sobre 4 puntos?'],
+    build: choice([[String(2 ** 4)], [String(aSauer(4, 2))], [String(aSauer(4, 1))]], 1,
+      `La suma de los números combinatorios de 4 sobre 0, 1 y 2: ${aCh(4, 0)} + ${aCh(4, 1)} + ${aCh(4, 2)} = ${aSauer(4, 2)}.` + (aIntN(4) === aSauer(4, 2) ? ` Los intervalos logran exactamente ${aIntN(4)}: aquí la cota se alcanza.` : ''),
+      ['Eso sería lograr todas las maneras de colorear 4 puntos, es decir, fragmentarlos. Con dimensión VC 2, el lema da menos.', null, 'Esa suma se detiene en i = 1. Llega hasta i = d = 2: falta el término de 4 sobre 2, que vale 6.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

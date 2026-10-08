@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ranking con SVM y RankBoost</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 21, title: 'Ranking con SVM y RankBoost', minutes: 6, language: 'es', next: '../ch22/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 20) ---------- */
+// verde = par bien ordenado · rojo = par invertido (o empatado, cuando cuenta como error) · gris = par empatado para un ranker base o sin evaluar ·
+// ámbar = la hipótesis: puntuación, ranker base elegido, w y su recta · salmón/azul = etiqueta +1/−1 del par (vectores diferencia) ·
+// violeta = complejidad · rosa (local) = pérdida de margen y cotas del error empírico.
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, ok: COL.good, bad: COL.bad, cx: COL.real, bnd: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'r^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξΦΨΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺≈∼∞⊤∈→↦′″⌊⌋])/;                                       // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aSg = v => v > 0 ? '+' + v : v < 0 ? '−' + -v : '0';                          // un entero con su signo
+
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aDp = (u, v) => u[0] * v[0] + u[1] * v[1];
+// --- Muestra ilustrativa: ocho resultados de una búsqueda, con dos características en una escala de 0 a 10:
+// x1 = coincidencia con la consulta, x2 = popularidad. Los nombres van de A a H por coincidencia decreciente.
+const aNm = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+const aIt = [[9, 2], [8, 6.5], [7, 4.5], [6, 9], [5, 1], [3.5, 7], [2.5, 3.5], [1, 8]];
+const aN = aIt.length, aAllN = aIt.map((_, i) => i);
+// Pares (x, x′, y), con índices de aIt: y = +1 si x′ debe ir antes que x; y = −1 si debe ir antes x (§10.1). Ninguno lleva 0.
+const aPr = [[4, 0, 1], [0, 5, 1], [0, 6, -1], [1, 2, -1], [1, 4, -1], [3, 2, -1], [2, 7, -1], [3, 5, -1], [4, 6, 1], [4, 7, 1], [5, 6, -1], [7, 5, 1]];
+const aM = aPr.length, aAllM = aPr.map((_, k) => k);
+const aFirst = k => aPr[k][2] > 0 ? aPr[k][1] : aPr[k][0];                              // el elemento que debe ir primero
+const aLast = k => aPr[k][2] > 0 ? aPr[k][0] : aPr[k][1];
+// Margen del par k con las puntuaciones s (una por elemento): y_k (s(x′_k) − s(x_k)). Mal ordenado si es ≤ 0 (10.2).
+const aMg = (s, k) => aPr[k][2] * (s[aPr[k][1]] - s[aPr[k][0]]);
+const aMgs = s => aAllM.map(k => aMg(s, k));
+const aBadI = s => aAllM.filter(k => aMg(s, k) <= 0);                                   // pares mal ordenados (invertidos o empatados)
+const aTieI = s => aAllM.filter(k => Math.abs(aMg(s, k)) < 1e-12);
+// Orden de la lista: de mayor a menor puntuación; los empates conservan el orden anterior (prev[i] = fila actual del elemento i).
+const aRows = (s, prev = aAllN) => { const o = aAllN.slice().sort((i, j) => s[j] - s[i] || prev[i] - prev[j]), r = []; o.forEach((i, row) => { r[i] = row; }); return r; };
+const aS1 = aIt.map(q => q[0]), aS2 = aIt.map(q => q[1]);                               // dos funciones de puntuación: por x1 y por x2
+const aArrive = [5, 1, 7, 0, 3, 6, 2, 4];                                               // orden de llegada (sin ordenar) para el primer beat
+// --- Ranking con SVM (§10.3): la SVM (10.9), sin término independiente, sobre z_i = y_i (x′_i − x_i), con Φ = identidad.
+// Dual: max Σα − ½ ‖Σ α_i z_i‖², 0 ≤ α_i ≤ C; ascenso por coordenadas hasta que ningún α se mueve más de 1e-13.
+const aPsi = aPr.map(([a, b]) => [aIt[b][0] - aIt[a][0], aIt[b][1] - aIt[a][1]]);       // Ψ(x, x′) = Φ(x′) − Φ(x)
+const aZs = aPr.map(([, , y], k) => [y * aPsi[k][0], y * aPsi[k][1]]);
+const aRsvm = (Z, C) => {
+  const al = Z.map(() => 0); let w = [0, 0];
+  for (let it = 0; it < 200000; it++) { let mx = 0; Z.forEach((z, i) => { const a = Math.min(C, Math.max(0, al[i] + (1 - aDp(z, w)) / aDp(z, z))), d = a - al[i]; mx = Math.max(mx, Math.abs(d)); al[i] = a; w = [w[0] + d * z[0], w[1] + d * z[1]]; }); if (mx < 1e-13) break; }
+  const n2 = aDp(w, w), xi = Z.map(z => Math.max(0, 1 - aDp(z, w)));
+  return { w, al, xi, n: Math.sqrt(n2), rho: 1 / Math.sqrt(n2), sv: Z.map((_, i) => i).filter(i => al[i] > 1e-9), primal: n2 / 2 + C * aSum(xi), dual: aSum(al) - n2 / 2 };
+};
+const aC = 10, aSv = aRsvm(aZs, aC), aSs = aIt.map(q => aDp(aSv.w, q));                 // puntuaciones h(x) = w · x
+// --- RankBoost (figura 10.1) con rankers base de umbral: h(x) = 1 si x_j > θ, 0 si no; θ recorre los puntos medios entre valores vecinos.
+const aThr = [0, 1].flatMap(j => { const vs = [...new Set(aIt.map(q => q[j]))].sort((a, b) => a - b); return vs.slice(1).map((v, k) => [j, (v + vs[k]) / 2]); });
+const aHx = (st, q) => q[st[0]] > st[1] ? 1 : 0;
+const aSt = (st, k) => aPr[k][2] * (aHx(st, aIt[aPr[k][1]]) - aHx(st, aIt[aPr[k][0]]));     // +1 bien ordenado, −1 invertido, 0 empatado
+const aEps = (st, D) => { const e = { p: 0, m: 0, z: 0 }; aAllM.forEach(k => { const s = aSt(st, k); e[s > 0 ? 'p' : s < 0 ? 'm' : 'z'] += D[k]; }); return e; };   // (10.11)
+const aBest = D => aThr.reduce((b, st) => { const e = aEps(st, D), v = e.m - e.p; return !b || v < b.v - 1e-12 ? { st, v } : b; }, null).st;   // línea 4: el menor ε⁻ − ε⁺
+const aRunRB = rounds => {
+  const R = []; let D = aAllM.map(() => 1 / aM), f = aAllN.map(() => 0), prodZ = 1, sum = 0, a1 = 0;
+  for (let t = 0; t < rounds; t++) {
+    const st = aBest(D), e = aEps(st, D), s = aAllM.map(k => aSt(st, k)), al = .5 * Math.log(e.p / e.m), Z = e.z + 2 * Math.sqrt(e.p * e.m);
+    const Dn = D.map((d, k) => d * Math.exp(-al * s[k]) / Z);
+    f = f.map((v, i) => v + al * aHx(st, aIt[i])); prodZ *= Z; sum += ((e.p - e.m) / 2) ** 2; a1 += Math.abs(al);
+    R.push({ st, ep: e.p, em: e.m, e0: e.z, al, Z, D, Dn, s, hx: aIt.map(q => aHx(st, q)), f, bad: aBadI(f), tie: aTieI(f), nerr: aBadI(f).length, err: aBadI(f).length / aM, prodZ, bnd: Math.exp(-2 * sum), F: aSum(aMgs(f).map(v => Math.exp(-v))) / aM, a1, mg: aMgs(f).map(v => v / a1) });
+    D = Dn;
+  }
+  return R;
+};
+const aTs = 4, aTmax = 6, aRB = aRunRB(aTmax);                                          // rondas paso a paso · rondas de la gráfica
+const aStName = st => `x_{${st[0] + 1}} > ${st[1]}`;
+const aFeat = ['coincidencia', 'popularidad'];
+// F/m a lo largo de la coordenada elegida en la ronda r (§10.4.2): ε⁺ e^{−η} + ε⁻ e^{η} + ε⁰, por el producto de los Z anteriores.
+const aFdir = (r, eta) => (r ? aRB[r - 1].prodZ : 1) * (aRB[r].ep * Math.exp(-eta) + aRB[r].em * Math.exp(eta) + aRB[r].e0);
+// Comprobaciones: tres pares para cada una.
+const aQ1 = [0, 6, 9], aQ1bad = aQ1.map(k => aMg(aS2, k) <= 0), aQ1r = aQ1bad.indexOf(true);            // con h = x2: ¿cuál queda invertido?
+const aQ2 = [0, 3, 1], aQ2s = aQ2.map(k => aRB[1].s[k]), aQ2r = aQ2s.indexOf(-1);                       // ronda 2: ¿a cuál le sube más el peso?
+const aF2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2).replace('-', '−');
+const aF1 = v => String(Math.round(v * 10) / 10).replace('-', '−');
+const aRho = 2, aLowI = rho => aAllM.filter(k => aMg(aS1, k) <= rho);                   // pares con margen ≤ ρ para h = x1: el lado derecho de (10.4)
+/* aMATH:end */
+const aY = y => y > 0 ? '+1' : '−1';
+const aStCol = s => s > 0 ? HUE.ok : s < 0 ? HUE.bad : COL.dim;                      // color de un par según el signo de su margen
+// Flecha que se redibuja: e._to(x0, y0, x1, y1).
+const aArrow = (g, col, sw = 5) => {
+  const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, g);
+  e._to = (x0, y0, x1, y1) => {
+    const L = Math.hypot(x1 - x0, y1 - y0);
+    if (L < 2) { e.setAttribute('d', ''); return; }
+    const ux = (x1 - x0) / L, uy = (y1 - y0) / L, hd = Math.min(16, L * .45), bx = x1 - ux * hd, by = y1 - uy * hd, f = v => v.toFixed(1);
+    e.setAttribute('d', `M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}M${f(bx - uy * hd * .55)} ${f(by + ux * hd * .55)}L${f(x1)} ${f(y1)}L${f(bx + uy * hd * .55)} ${f(by - ux * hd * .55)}`);
+  };
+  return e;
+};
+// Lista de resultados como fichas (nombre, x1, x2, puntuación) que se reordenan, con un arco por par de preferencia a su derecha.
+// El punto de cada arco marca al elemento que debe ir primero. rows[i] = fila inicial del elemento i.
+// ls.order(s, t): reordena por las puntuaciones s (los arcos siguen a las fichas) · ls.vals(strs, t): escribe la columna de puntuación ·
+// ls.paint(cols, t): color de cada arco · ls.byScore(s, t): verde/rojo según el margen, de trazos si hay empate ·
+// ls.width(D, t): grosor = peso del par · ls.mark(flags, t): borde ámbar en las fichas marcadas.
+const aList = (p, { x = 150, y = 232, w = 300, rh = 56, ch = 46, t0 = .4, rows = aAllN, arcs = true, head = 'h(x)' } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ls = { g, x, y, w, rh, ch, row: rows.slice(), xr: x + w + 8 }, cy = aAllN.map(i => y + rows[i] * rh);
+  if (t0 != null) show(g, t0);
+  aTx(g, 'x_{1}', x + 112, y - 16, null, { size: 22, fill: COL.dim, anchor: 'middle' }); aTx(g, 'x_{2}', x + 178, y - 16, null, { size: 22, fill: COL.dim, anchor: 'middle' });
+  ls.hd = aTx(g, head, x + w - 46, y - 16, null, { size: 22, fill: HUE.hyp, anchor: 'middle' });
+  aAllN.forEach(r => T(g, String(r + 1), { x: x - 20, y: y + r * rh + ch / 2 + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+  ls.ag = G(g, { o: arcs ? 1 : 0 });
+  const inc = aAllN.map(i => aAllM.filter(k => aPr[k][0] === i || aPr[k][1] === i)), off = (i, k) => (inc[i].indexOf(k) - (inc[i].length - 1) / 2) * 11;
+  ls.arc = aAllM.map(() => { const ag = G(ls.ag); return { g: ag, e: mk('path', { fill: 'none', stroke: COL.dim, 'stroke-width': 4, 'stroke-linecap': 'round' }, ag), d: mk('circle', { r: 6, fill: COL.dim, cx: ls.xr }, ag) }; });
+  ls.redraw = () => aAllM.forEach(k => { const [a, b] = aPr[k], ya = cy[a] + ch / 2 + off(a, k), yb = cy[b] + ch / 2 + off(b, k), bl = 26 + .5 * Math.abs(ya - yb), xr = ls.xr; ls.arc[k].e.setAttribute('d', `M${xr} ${ya.toFixed(1)}C${(xr + bl).toFixed(1)} ${ya.toFixed(1)} ${(xr + bl).toFixed(1)} ${yb.toFixed(1)} ${xr} ${yb.toFixed(1)}`); ls.arc[k].d.setAttribute('cy', (aFirst(k) === a ? ya : yb).toFixed(1)); });
+  ls.card = aAllN.map(i => {
+    const cg = G(g, { x, y: cy[i] }), bx = mk('rect', { x: 0, y: 0, width: w, height: ch, fill: COL.board, stroke: COL.faint, 'stroke-width': 2 }, cg);
+    T(cg, aNm[i], { x: 32, y: ch / 2 + 10, size: 28, weight: 700, anchor: 'middle' });
+    aIt[i].forEach((v, j) => T(cg, String(v), { x: 112 + j * 66, y: ch / 2 + 8, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+    return { g: cg, bx, sv: aTx(cg, '', w - 46, ch / 2 + 9, null, { size: 26, fill: HUE.hyp, weight: 700, anchor: 'middle' }) };
+  });
+  ls.redraw();
+  ls.order = (s, t, dur = 1.2) => { const nr = aRows(s, ls.row), from = ls.row.map(r => y + r * rh), to = nr.map(r => y + r * rh); ls.row = nr; prog(q => { aAllN.forEach(i => { cy[i] = from[i] + (to[i] - from[i]) * q; put(ls.card[i].g, { y: cy[i] }); }); ls.redraw(); }, t, dur); };
+  ls.vals = (strs, t) => aAt(() => ls.card.forEach((c, i) => c.sv._set(strs[i])), t);
+  ls.paint = (cols, t, dur = .4) => aAllM.forEach(k => { if (cols[k] == null) return; tw(ls.arc[k].e, { c_stroke: cols[k] }, t, dur); tw(ls.arc[k].d, { c_fill: cols[k] }, t, dur); });
+  ls.dash = (ks, t) => aAt(() => aAllM.forEach(k => ls.arc[k].e.setAttribute('stroke-dasharray', ks.includes(k) ? '3 9' : 'none')), t);
+  ls.byScore = (s, t) => { ls.paint(aAllM.map(k => aMg(s, k) > 0 ? HUE.ok : HUE.bad), t); ls.dash(aTieI(s), t); };
+  ls.width = (D, t, dur = .8) => aAllM.forEach(k => { const sw = Math.max(1.5, 48 * D[k]); tw(ls.arc[k].e, { 'a_stroke-width': sw }, t, dur); tw(ls.arc[k].d, { a_r: Math.max(5, sw / 2 + 2.5) }, t, dur); });
+  ls.mark = (flags, t) => ls.card.forEach((c, i) => tw(c.bx, { c_stroke: flags[i] ? HUE.hyp : COL.faint, 'a_stroke-width': flags[i] ? 4 : 2 }, t, .3));
+  ls.bottom = y + aN * rh;
+  return ls;
+};
+// Tarjeta de un par para las comprobaciones: x, x′, y, y la puntuación de cada elemento con el nombre hn de la función.
+const aPairCard = (p, j, k, bx, by, w, hh, hn, s) => {
+  const g = G(p, { x: bx, y: by }), [a, b, y] = aPr[k];
+  mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+  mk('circle', { cx: 44, cy: 44, r: 22, fill: COL.chalk }, g); T(g, String(j + 1), { x: 44, y: 53, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+  aRow(g, [['x  =  '], [aNm[a], COL.chalk, UI]], 50, 128, null, { size: 30, weight: 700 });
+  aRow(g, [['x′  =  '], [aNm[b], COL.chalk, UI]], 50, 184, null, { size: 30, weight: 700 });
+  aRow(g, [['y  =  '], [aY(y), y > 0 ? HUE.pos : HUE.neg]], 50, 240, null, { size: 30, weight: 700 });
+  mk('path', { d: `M30 276H${w - 30}`, stroke: COL.faint, 'stroke-width': 2 }, g);
+  [a, b].forEach((i, n) => aTx(g, `${hn}(${aNm[i]})  =  ${s[i]}`, 50, 326 + n * 46, null, { size: 28, fill: HUE.hyp, weight: 600 }));
+  return g;
+};
+// Tira de márgenes: eje de lo a hi con marcas; un punto por valor, apilados si coinciden. sp.at(vals) = posiciones; sp.dots(vals, cols, t(k)).
+const aStrip = (p, x0, x1, y, lo, hi, ticks, { r = 10 } = {}) => {
+  const g = G(p, { o: 0 }), SX = v => x0 + (v - lo) / (hi - lo) * (x1 - x0), sp = { g, SX, y, r };
+  mk('path', { d: `M${x0} ${y}H${x1}`, stroke: COL.faint, 'stroke-width': 2 }, g);
+  ticks.forEach(v => { mk('path', { d: `M${SX(v)} ${y - 6}v12`, stroke: v ? COL.faint : COL.chalk, 'stroke-width': 2 }, g); T(g, aF1(v), { x: SX(v), y: y + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  sp.at = vals => { const seen = []; return vals.map(v => { const n = seen.filter(u => Math.abs(SX(u) - SX(v)) < 2 * r - 3).length; seen.push(v); return [SX(v), y - r - 5 - n * (2 * r + 2)]; }); };
+  sp.dots = (vals, cols, tk) => { const at = sp.at(vals); return vals.map((v, k) => { const e = put(mk('circle', { r, fill: cols[k], stroke: COL.board, 'stroke-width': 2 }, p), { x: at[k][0], y: at[k][1], o: 0 }); show(e, tk(k), .3); return e; }); };
+  return sp;
+};
+// Gráfica por rondas (como la del cap. 14): eje de 0 a 1, barras y líneas.
+const aChart = (p, x0, y0, w, hh, { t0 = .4, n = aTmax } = {}) => {
+  const sx = w / (n + .6), ch = { CX: t => x0 + t * sx, VY: v => y0 - v * hh, sx, g: G(p, { o: 0 }) };
+  mk('path', { d: `M${x0 - 22} ${y0 - hh - 14}V${y0}H${x0 + w}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, ch.g);
+  [0, .5, 1].forEach(v => { mk('path', { d: `M${x0 - 30} ${ch.VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, ch.g); T(ch.g, String(v), { x: x0 - 38, y: ch.VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  for (let t = 1; t <= n; t++) T(ch.g, String(t), { x: ch.CX(t), y: y0 + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH });
+  T(ch.g, 'ronda', { x: x0 + w + 8, y: y0 + 32, size: 22, fill: COL.dim });
+  show(ch.g, t0);
+  ch.bar = (t, v, col, tt) => { const bw = sx * .46, e = mk('rect', { x: ch.CX(t) - bw / 2, y: y0, width: bw, height: 0, fill: col }, p); tw(e, { a_y: ch.VY(Math.max(v, .008)), a_height: Math.max(v, .008) * hh }, tt, .45, out); return e; };
+  ch.line = (vals, col, tt, dur, { dash = null, sw = 4, dots = true } = {}) => {
+    const d = vals.map((v, t) => (t ? 'L' : 'M') + ch.CX(t).toFixed(1) + ' ' + ch.VY(v).toFixed(1)).join('');
+    if (dash) show(put(mk('path', { d, fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-dasharray': dash }, p), { o: 0 }), tt, dur);
+    else draw(path(p, d, { stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round' }, { d: 0 }), tt, dur);
+    if (dots) vals.forEach((v, t) => show(put(mk('circle', { cx: ch.CX(t), cy: ch.VY(v), r: 6, fill: col }, p), { o: 0 }), tt + dur * t / vals.length, .2));
+  };
+  return ch;
+};
+// Plano centrado en el origen (como aOrig del cap. 17): marco cuadrado de lado 2 · half que cubre de −view a view. pl.cg recorta al marco.
+const aOrig = (p, cx, cy, half, view, id, { t0 = .4 } = {}) => {
+  const sc = half / view, pl = { PX: v => cx + v * sc, PY: v => cy - v * sc, sc, cx, cy, half, view }, box = { x: cx - half, y: cy - half, width: 2 * half, height: 2 * half };
+  mk('rect', box, mk('clipPath', { id }, mk('defs', {}, p)));
+  pl.g = G(p, { o: 0 }); show(pl.g, t0);
+  pl.cg = mk('g', { 'clip-path': `url(#${id})` }, pl.g);
+  pl.under = G(pl.cg);
+  mk('path', { d: `M${cx - half} ${cy}h${2 * half}M${cx} ${cy - half}v${2 * half}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '4 8', fill: 'none' }, pl.cg);
+  mk('rect', { ...box, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, pl.g);
+  aTx(pl.g, 'x_{1}', cx + half - 8, cy + 26, null, { size: 22, fill: COL.dim, anchor: 'end' }); aTx(pl.g, 'x_{2}', cx - 10, cy - half + 26, null, { size: 22, fill: COL.dim, anchor: 'end' });
+  pl.lg = G(pl.cg); pl.dg = G(pl.g); pl.og = G(pl.g);
+  return pl;
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const aArrRows = aAllN.map(i => aArrive.indexOf(i)), aR1 = aRows(aS1), aR2 = aRows(aS2), aE1 = aBadI(aS1);
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 3 · Capítulo 21', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Ranking con SVM y RankBoost', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Ordenar en lugar de clasificar: una puntuación aprendida a partir de pares.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['rank', 'El problema de ranking', (m) => {
+    const p = panel(0), ttp = m('top'), tl = m('list'), th = m('h'), ts = m('sort'), to = m('other'), RX = 760;
+    aNote(p, 'datos ilustrativos: ocho resultados de una búsqueda, con dos características en una escala de 0 a 10');
+    aTitle(p, 'Ranking: ordenar por puntuación');
+    const ls = aList(p, { rows: aArrRows, arcs: false, head: '' });
+    // solo se miran los primeros: un corchete sobre las tres primeras filas
+    const bk = G(p, { o: 0 }); show(bk, ttp, .3); hide(bk, tl - .2, .3);
+    mk('path', { d: `M${ls.xr + 8} ${ls.y}h14v${2 * ls.rh + ls.ch}h-14`, fill: 'none', stroke: HUE.hyp, 'stroke-width': 4 }, bk);
+    aTx(bk, 'lo que se llega a mirar', ls.xr + 38, ls.y + ls.rh + ls.ch / 2 + 8, null, { size: 22, fill: HUE.hyp, font: UI });
+    aTx(p, 'importa el orden: solo se miran los primeros resultados', RX, 262, ttp, { size: 26, font: UI, weight: 600 });
+    aRow(p, [['x_{1}'], [':  coincidencia con la consulta          ', COL.chalk, UI, 26], ['x_{2}'], [':  popularidad', COL.chalk, UI, 26]], RX, 346, tl, { size: 28, weight: 600 });
+    aRow(p, [['h : X → ℝ'], ['        función de puntuación', COL.dim, UI, 24]], RX, 430, th, { size: 30, weight: 600 });
+    const hx = aTx(p, 'h(x)  =  x_{1}', RX, 514, th + 2.6, { size: 30, weight: 700, fill: HUE.hyp });
+    const cap = aTx(p, 'puntuar por coincidencia', RX + 250, 514, th + 2.6, { size: 24, fill: COL.dim, font: UI });
+    aAt(() => ls.hd._set('h(x)'), th + 2.6); ls.vals(aS1.map(String), th + 2.6);
+    ls.order(aS1, ts + .3, 1.6);
+    aTx(p, 'el orden:  de mayor a menor h(x)', RX, 598, ts, { size: 26, font: UI, weight: 600 });
+    aAt(() => { hx._set('h(x)  =  x_{2}'); cap._set('puntuar por popularidad'); }, to + .3); ls.vals(aS2.map(String), to + .3);
+    ls.order(aS2, to + .9, 1.6);
+    aTx(p, 'otra función de puntuación, otro orden', RX, 682, to, { size: 26, font: UI, weight: 600 });
+  }],
+
+  ['pares', 'Pares y error de ranking', (m) => {
+    const p = panel(0), tp = m('pair'), tlb = m('lab'), ta = m('arcs'), tc = m('col'), te = m('err'), ttr = m('tr'), tcy = m('cyc'), RX = 760, k0 = 0, [a0, b0, y0] = aPr[k0];
+    aNote(p, `muestra ilustrativa: ${aN} resultados y ${aM} pares de preferencia · h(x) = x_{1} · los conteos se calculan en la página`);
+    aTitle(p, 'La muestra son pares; el error, la fracción de pares mal ordenados');
+    const ls = aList(p); ls.vals(aS1.map(String), 0);
+    ls.arc.forEach((o, k) => { put(o.g, { o: 0 }); show(o.g, k === k0 ? tp + 1.6 : ta + .08 * k, .3); });
+    ls.paint(aAllM.map(k => k === k0 ? COL.chalk : null), 0, 0); ls.paint(aAllM.map(k => k === k0 ? COL.dim : null), ta, .3);
+    ls.byScore(aS1, tc);
+    const LY = ls.bottom + 28, lg = G(p, { o: 0 }), lg2 = G(p, { o: 0 }); show(lg, ta + .6); show(lg2, tc);
+    aSq(lg, ls.x, LY, COL.dim, 'punto: el que debe ir primero', { dot: true });
+    aSq(lg2, ls.x, LY + 36, HUE.ok, 'bien ordenado', { line: true }); aSq(lg2, ls.x + 220, LY + 36, HUE.bad, 'invertido', { line: true });
+    const g1 = G(p), g2 = G(p);
+    aTx(g1, 'S  =  ( (x_{1}, x′_{1}, y_{1}), …, (x_{m}, x′_{m}, y_{m}) )', RX, 262, tp, { size: 30, weight: 600 });
+    aRow(g1, [['y = +1'], [':  x′ va antes        ', COL.chalk, UI, 26], ['−1'], [':  x va antes        ', COL.chalk, UI, 26], ['0'], [':  sin preferencia', COL.chalk, UI, 26]], RX, 346, [tlb, tlb + 1.2, tlb + 4.2, tlb + 4.2, tlb + 6.6, tlb + 6.6], { size: 28, weight: 700 });
+    aTx(g1, `el arco dibujado:   x = ${aNm[a0]},   x′ = ${aNm[b0]},   y = ${aY(y0)}`, RX, 388, tlb + 1.2, { size: 22, fill: COL.dim, font: UI });
+    aRow(g1, [['R̂_{S}(h)  =  (1/m) |{ i :  y_{i} ≠ 0   y   y_{i} ( h(x′_{i}) − h(x_{i}) ) ≤ 0 }|'], ['      (10.2)', COL.dim, UI, 22]], RX, 480, te, { size: 26, weight: 600 });
+    aRow(g1, [['aquí:   ', COL.dim, UI, 24], [`${aE1.length} de ${aM}`, HUE.bad, UI, 28], [`   =   ${aF2(aE1.length / aM)}`, HUE.bad]], RX, 536, te + 2.6, { size: 28, weight: 700 });
+    hide(g1, ttr - .5, .4);
+    aTx(p, `pares mal ordenados:  ${aE1.length} de ${aM}`, ls.x, LY + 82, ttr, { size: 24, fill: HUE.bad, font: UI, weight: 600 });
+    // un ciclo de tres preferencias, y un orden cualquiera: uno de los tres pares queda invertido
+    aTx(g2, 'las preferencias no tienen por qué ser transitivas', RX, 262, ttr, { size: 26, font: UI, weight: 600 });
+    const cg = G(g2, { o: 0 }), V = [[960, 350], [840, 540], [1080, 540]], nm = ['x′', 'x', 'x″'], ed = [[1, 0], [0, 2], [2, 1]]; show(cg, ttr + 1);   // [de, hacia]: «hacia» debe ir primero
+    const el = ed.map(([a, b]) => { const dx = V[b][0] - V[a][0], dy = V[b][1] - V[a][1], L = Math.hypot(dx, dy), u = [dx / L, dy / L], P0 = [V[a][0] + u[0] * 52, V[a][1] + u[1] * 52], P1 = [V[b][0] - u[0] * 60, V[b][1] - u[1] * 60]; return { e: mk('path', { d: `M${P0[0]} ${P0[1]}L${P1[0]} ${P1[1]}`, stroke: COL.dim, 'stroke-width': 5, 'stroke-linecap': 'round', fill: 'none' }, cg), d: mk('circle', { cx: P1[0], cy: P1[1], r: 8, fill: COL.dim }, cg) }; });
+    V.forEach(([vx, vy], i) => { mk('rect', { x: vx - 42, y: vy - 28, width: 84, height: 56, fill: COL.board, stroke: COL.faint, 'stroke-width': 2 }, cg); aTx(cg, nm[i], vx, vy + 10, null, { size: 30, weight: 700, anchor: 'middle' }); });
+    aTx(cg, 'un ciclo de preferencias', 960, 620, null, { size: 22, fill: COL.dim, font: UI, anchor: 'middle' });
+    // el orden de una h: x″, x′, x. Los pares (x → x′) y (x′ → x″) quedan bien; el par (x″ → x) queda invertido.
+    const og = G(g2, { o: 0 }), OX = 1340; show(og, tcy + 1.4);
+    aTx(og, 'el orden de una h', OX, 318, null, { size: 22, fill: COL.dim, font: UI, anchor: 'middle' });
+    ['x″', 'x′', 'x'].forEach((s, r) => { const yy = 350 + r * 72; mk('rect', { x: OX - 60, y: yy, width: 120, height: 54, fill: COL.board, stroke: COL.faint, 'stroke-width': 2 }, og); aTx(og, s, OX, yy + 37, null, { size: 30, weight: 700, anchor: 'middle' }); T(og, String(r + 1), { x: OX - 78, y: yy + 35, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+    [HUE.ok, HUE.ok, HUE.bad].forEach((c, i) => { tw(el[i].e, { c_stroke: c }, tcy + 2.4 + .3 * i, .3); tw(el[i].d, { c_fill: c }, tcy + 2.4 + .3 * i, .3); });
+    aTx(g2, 'el orden que induce h siempre es transitivo', RX, 700, tcy + 5, { size: 26, font: UI, weight: 600 });
+    aRow(g2, [['en un ciclo de tres:  ', COL.chalk, UI, 26], ['al menos un par queda mal ordenado', HUE.bad, UI, 26]], RX, 760, tcy + 2.4, { size: 26, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [570, 890, 1210], W = 290;
+    T(p, 'Otra puntuación: por popularidad', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'h(x) = x_{2}.   Cada tarjeta es un par de la muestra, con su etiqueta y.', 100, 190, null, { size: 26, fill: COL.dim, font: UI });
+    const ls = aList(p, { t0: null, rows: aR2, arcs: false, y: 256, rh: 52, ch: 44 }); ls.card.forEach((c, i) => c.sv._set(String(aS2[i])));
+    S.q1 = aQ1.map((k, j) => aPairCard(p, j, k, BX[j], 250, W, 410, 'h', aS2));
+    S.q1B = BX.map(bx => [bx, 250, W, 410]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-invertido', prompt: ['¿Cuál de estos tres pares queda invertido con esta h?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'par ' + (j + 1) })), aQ1r,
+      `${aNm[aFirst(aQ1[aQ1r])]} debe ir antes que ${aNm[aLast(aQ1[aQ1r])]}, pero su puntuación es menor: ${aS2[aFirst(aQ1[aQ1r])]} contra ${aS2[aLast(aQ1[aQ1r])]}.`,
+      j => `Ahí ${aNm[aFirst(aQ1[j])]} debe ir antes, y tiene la mayor puntuación: bien ordenado.`),
+  }], done) }],
+
+  ['cota', 'Cota por margen', (m) => {
+    const p = panel(0), tma = m('mar'), tng = m('neg'), trh = m('rho'), tth = m('thm'), trd = m('rad'), ttw = m('two'), tcf = m('conf'), ttd = m('trade'), RX = 720, mg = aMgs(aS1), SY = 420, R0 = 1, R1 = 3;
+    aNote(p, 'teorema 10.1, con etiquetas en {−1, +1} · h(x) = x_{1}, la puntuación de antes · los valores de ρ son ilustrativos');
+    aTitle(p, 'La cota por margen, ahora sobre pares');
+    const ls = aList(p); ls.vals(aS1.map(String), 0); ls.byScore(aS1, 0);
+    aSq(p, ls.x, ls.bottom + 28, HUE.ok, 'bien ordenado', { line: true }); aSq(p, ls.x + 220, ls.bottom + 28, HUE.bad, 'invertido', { line: true });
+    aTx(p, 'margen del par i:    y_{i} ( h(x′_{i}) − h(x_{i}) )', RX, 262, tma, { size: 30, weight: 600 });
+    const sp = aStrip(p, 760, 1540, SY, -6, 7, [-6, -4, -2, 0, 2, 4, 6]); show(sp.g, tma);
+    const tk = k => tma + 2.2 + .22 * k, dots = sp.dots(mg, mg.map(aStCol), tk);
+    aAllM.forEach(k => { tw(ls.arc[k].e, { 'a_stroke-width': 9 }, tk(k) - .1, .12); tw(ls.arc[k].e, { 'a_stroke-width': 4 }, tk(k) + .12, .25); });
+    aTx(p, 'margen ≤ 0:  mal ordenados', sp.SX(-3), SY - 62, tng, { size: 22, fill: HUE.bad, font: UI, anchor: 'middle' });
+    // el margen ρ: una línea que se mueve; los pares bien ordenados que no lo alcanzan pasan a rosa
+    const rg = G(p, { o: 0 }), rl = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, rg), rt = aTx(rg, 'ρ', 0, SY - 86, null, { size: 28, fill: HUE.hyp, weight: 700, anchor: 'middle' }); show(rg, trh, .3);
+    const live = aTx(p, '', RX, 572, trh + 3, { size: 26, weight: 600 });
+    const setRho = (rho, on = true) => {
+      rl.setAttribute('d', `M${sp.SX(rho).toFixed(1)} ${SY - 78}V${SY + 8}`); put(rt, { x: sp.SX(rho) });
+      dots.forEach((e, k) => e.setAttribute('fill', mg[k] <= 0 ? HUE.bad : on && mg[k] <= rho ? HUE.bnd : HUE.ok));
+      live._set(`con ρ = ${rho.toFixed(1)}:    ${aLowI(rho).length} de ${aM} pares bajo el margen          2/ρ = ${aF2(2 / rho)}`);
+    };
+    setRho(R0, false); aAt(() => setRho(R0), trh + 3);
+    prog(q => setRho(R0 + (R1 - R0) * q), ttd + 1.6, 3.2);
+    aRow(p, [['R̂_{S,ρ}(h)', HUE.bnd], ['   ≤   fracción de pares con margen ≤ ρ', COL.chalk, UI, 26], ['        (10.4)', COL.dim, UI, 22]], RX, 512, trh + 3, { size: 28, weight: 600 });
+    text(p, 'Teorema 10.1', RX, 668, tth, { size: 26, fill: HUE.hyp, weight: 600 });
+    aTx(p, '(10.5)', 1570, 668, tth, { size: 22, fill: COL.dim, font: UI, anchor: 'end' });
+    aRow(p, [['R(h)   ≤   '], ['R̂_{S,ρ}(h)', HUE.bnd], ['   +   '], ['(2/ρ) ( ℜ_{m}^{D₁}(H) + ℜ_{m}^{D₂}(H) )', HUE.cx], ['   +   '], ['√( log(1/δ) / 2m )']], RX, 728, [tth, tth, trd, trd, tcf, tcf], { size: 26, weight: 600 });
+    aRow(p, [['D_{1}', HUE.cx], [':  los primeros elementos de los pares          ', COL.dim, UI, 22], ['D_{2}', HUE.cx], [':  los segundos', COL.dim, UI, 22]], RX, 786, ttw, { size: 24, weight: 600 });
+  }],
+
+  ['svm', 'Ranking con SVM', (m) => {
+    const p = panel(0), tli = m('lin'), tdf = m('dif'), ty = m('y'), tsv = m('svm'), tob = m('obj'), tln = m('line'), trs = m('res'), tke = m('ker'), RX = 640, w = aSv.w, ord = aAllN.slice().sort((i, j) => aSs[j] - aSs[i]);
+    aNote(p, `la SVM (10.9) con Φ(x) = x y C = ${aC}, resuelta en la página por el dual:  w = (${aF2(w[0])}, ${aF2(w[1])}),  margen 1/‖w‖ = ${aF2(aSv.rho)}`);
+    aTitle(p, 'Ranking con SVM: de pares a vectores diferencia');
+    const pl = aOrig(p, 330, 452, 232, 9.6, 'a21clip'), X1 = pl.PX, Y1 = pl.PY;
+    // los ocho resultados en el plano de características
+    const ig = G(pl.g);
+    aIt.forEach((q, i) => { mk('circle', { cx: X1(q[0]), cy: Y1(q[1]), r: 7, fill: COL.dim }, ig); aHalo(T(ig, aNm[i], { x: X1(q[0]) + 16, y: Y1(q[1]) - 8, size: 22, fill: COL.chalk, weight: 700, anchor: 'middle' })); });
+    hide(ig, tdf + 1.9, .5);
+    // un par = una flecha de x a x′, del color de su etiqueta; todas se trasladan hasta salir del origen
+    const ag = G(pl.cg, { o: 0 }); show(ag, tli + 2.2, .5);
+    const ar = aPr.map(([a, b, y]) => aArrow(ag, y > 0 ? HUE.pos : HUE.neg, 3));
+    const setQ = q => aPr.forEach(([a], k) => { const tx = aIt[a][0] * (1 - q), ty2 = aIt[a][1] * (1 - q); ar[k]._to(X1(tx), Y1(ty2), X1(tx + aPsi[k][0]), Y1(ty2 + aPsi[k][1])); });
+    setQ(0); prog(setQ, tdf + .5, 1.8);
+    tw(ag, { o: .3 }, ty + 1, .5);
+    const dts = aPr.map(([, , y], k) => { const e = put(mk('circle', { cx: X1(aPsi[k][0]), cy: Y1(aPsi[k][1]), r: 9, fill: y > 0 ? HUE.pos : HUE.neg, stroke: COL.board, 'stroke-width': 2 }, pl.dg), { o: 0 }); show(e, ty + .06 * k, .3); return e; });
+    const LY = 452 + 232 + 34, lg = G(p, { o: 0 }); show(lg, tli + 2.2);
+    aSq(lg, 100, LY, HUE.pos, 'y = +1', { dot: true }); aSq(lg, 250, LY, HUE.neg, 'y = −1', { dot: true });
+    // la recta por el origen w · Ψ = 0, la franja del margen y la flecha de w
+    const n = aSv.n, u = [w[0] / n, w[1] / n], L = 30, sg = G(pl.under, { o: 0 }), ln = G(pl.lg, { o: 0 }), og = G(pl.og, { o: 0 }); show(sg, tln + .6); show(ln, tln); show(og, tln);
+    const C4 = [[-1, 1], [1, 1], [1, -1], [-1, -1]].map(([sa, sb]) => [sa * (-u[1]) * L + sb * u[0] * aSv.rho, sa * u[0] * L + sb * u[1] * aSv.rho]);
+    mk('path', { d: 'M' + C4.map(q => X1(q[0]).toFixed(1) + ' ' + Y1(q[1]).toFixed(1)).join('L') + 'Z', fill: HUE.hyp, 'fill-opacity': .22 }, sg);
+    mk('path', { d: `M${X1(-u[1] * L).toFixed(1)} ${Y1(u[0] * L).toFixed(1)}L${X1(u[1] * L).toFixed(1)} ${Y1(-u[0] * L).toFixed(1)}`, stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, ln);
+    const wl = 4; aArrow(og, HUE.hyp, 6)._to(pl.cx, pl.cy, X1(u[0] * wl), Y1(u[1] * wl));
+    aHalo(aTx(og, 'w', X1(u[0] * wl) + 20, Y1(u[1] * wl) - 6, null, { size: 28, fill: HUE.hyp, weight: 700, anchor: 'middle' }));
+    aSv.sv.forEach(k => show(put(mk('circle', { cx: X1(aPsi[k][0]), cy: Y1(aPsi[k][1]), r: 16, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, pl.og), { o: 0 }), tln + 1.2, .3));
+    aRow(p, [[`con esta w:  `, COL.dim, UI, 24], [`${aBadI(aSs).length} de ${aM} pares invertidos`, HUE.ok, UI, 26]], 100, LY + 50, trs, { size: 26, weight: 600 });
+    aTx(p, `orden que resulta:  ${ord.map(i => aNm[i]).join('  ')}`, 100, LY + 90, trs + 1.6, { size: 24, fill: COL.dim, font: UI });
+    aRow(p, [['h(x)  =  w · Φ(x)'], ['      margen del par:   ', COL.dim, UI, 24], ['y_{i} w · ( Φ(x′_{i}) − Φ(x_{i}) )']], RX, 262, [tli, tli + 1.4, tli + 1.4], { size: 28, weight: 600 });
+    aRow(p, [['Ψ(x, x′)  =  Φ(x′) − Φ(x)'], ['        un punto por par, con su etiqueta', COL.dim, UI, 24]], RX, 346, [tdf, ty], { size: 30, weight: 600 });
+    aRow(p, [['min_{w, ξ}    ½ ‖w‖^{2}   +   C ∑_{i ≤ m} ξ_{i}'], ['          (10.9)', COL.dim, UI, 22]], RX, 444, tsv + 2, { size: 30, weight: 600 });
+    aRow(p, [['con    ', COL.dim, UI, 24], ['y_{i} [ w · Ψ(x_{i}, x′_{i}) ]  ≥  1 − ξ_{i},        ξ_{i} ≥ 0']], RX, 502, tob + 1.2, { size: 28, weight: 600 });
+    aRow(p, [['una SVM (cap. 10) sobre los puntos ', COL.chalk, UI, 26], ['Ψ'], [':  recta por el origen, sin b', COL.chalk, UI, 26]], RX, 600, tln, { size: 28, weight: 600 });
+    aRow(p, [['K′_{ij}  =  K(x_{i}, x_{j}) + K(x′_{i}, x′_{j}) − K(x′_{i}, x_{j}) − K(x_{i}, x′_{j})']], RX, 698, tke, { size: 28, weight: 600 });
+    aTx(p, 'con kernels: la matriz que necesita el dual          (10.10)', RX, 740, tke + 3, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['rb1', 'RankBoost: una ronda', (m) => {
+    const p = panel(0), td = m('d'), th = m('h'), t3 = m('three'), tpl = m('plus'), tmi = m('minus'), tze = m('zero'), tpk = m('pick'), tal = m('alpha'), tup = m('upd'), tz = m('z'), RX = 720, r = aRB[0];
+    aNote(p, `rankers base: h(x) = 1 si x_{j} > θ, y 0 si no (${aThr.length} umbrales) · seudocódigo de la figura 10.1 · todo se calcula en la página`);
+    aTitle(p, 'RankBoost: una distribución sobre los pares');
+    const ls = aList(p, { head: 'h_{1}(x)' });
+    ls.width(aAllM.map(() => 2 / aM), td + 3.6, .3); ls.width(r.D, td + 4.1, .5);
+    ls.mark(r.hx, th + 2.2); ls.vals(r.hx.map(String), th + 2.2);
+    [[1, tpl], [-1, tmi]].forEach(([s, t]) => ls.paint(r.s.map(v => v === s ? aStCol(s) : null), t));
+    ls.dash(aAllM.filter(k => !r.s[k]), tze);
+    ls.width(r.Dn, tup + 1.6, 1.4);
+    const LY = ls.bottom + 28, lg = [[HUE.ok, 'bien ordenado', tpl, null, 0], [HUE.bad, 'invertido', tmi, null, 210], [COL.dim, 'empatado', tze, '3 9', 370]];
+    lg.forEach(([c, s, t, dash, dx]) => { const e = G(p, { o: 0 }); aSq(e, ls.x + dx, LY, c, s, { line: true, dash }); show(e, t, .3); });
+    aTx(p, 'grosor del arco = peso del par', ls.x, LY + 40, td + 3.4, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['D_{1}(i)  =  1/m'], ['        el peso del par i', COL.dim, UI, 24]], RX, 262, td, { size: 30, weight: 600 });
+    aRow(p, [[`h_{1}(x)  =  1  si  ${aStName(r.st)},    0  si no`, HUE.hyp], [`        (${aFeat[r.st[0]]})`, COL.dim, UI, 24]], RX, 346, th + 2.2, { size: 30, weight: 600 });
+    aTx(p, 'se elige el ranker base con mayor  ε_{t}^{+} − ε_{t}^{−}', RX, 388, tpk, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [[`ε_{1}^{+}  =  ${aF2(r.ep)}`, HUE.ok], [`          ε_{1}^{−}  =  ${aF2(r.em)}`, HUE.bad], [`          ε_{1}^{0}  =  ${aF2(r.e0)}`, COL.dim], ['        (10.11)', COL.dim, UI, 22]], RX, 462, [tpl, tmi, tze, tze], { size: 30, weight: 700 });
+    aRow(p, [['α_{t}  =  ½ log( ε_{t}^{+} / ε_{t}^{−} )'], [`        α_{1}  =  ${aF2(r.al)}`, HUE.hyp]], RX, 548, [tal, tal + 3], { size: 30, weight: 600 });
+    aRow(p, [['D_{t+1}(i)  =  D_{t}(i) exp( −α_{t} y_{i} ( h_{t}(x′_{i}) − h_{t}(x_{i}) ) )  /  Z_{t}']], RX, 634, tup, { size: 28, weight: 600 });
+    aRow(p, [['Z_{t}  =  ε_{t}^{0} + 2 √( ε_{t}^{+} ε_{t}^{−} )'], [`        Z_{1}  =  ${aF2(r.Z)}`, COL.dim]], RX, 720, [tz, tz + .8], { size: 30, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [570, 890, 1210], W = 290, r = aRB[1];
+    T(p, 'Ronda 2: otro ranker base', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, `h_{2}(x) = 1 si ${aStName(r.st)} (${aFeat[r.st[0]]}), y 0 si no.   Tres pares de la muestra:`, 100, 190, null, { size: 26, fill: COL.dim, font: UI });
+    const ls = aList(p, { t0: null, arcs: false, y: 256, rh: 52, ch: 44, head: 'h_{2}(x)' });
+    ls.card.forEach((c, i) => { c.sv._set(String(r.hx[i])); if (r.hx[i]) { c.bx.setAttribute('stroke', HUE.hyp); c.bx.setAttribute('stroke-width', 4); } });
+    S.q2 = aQ2.map((k, j) => aPairCard(p, j, k, BX[j], 250, W, 410, 'h_{2}', r.hx));
+    S.q2B = BX.map(bx => [bx, 250, W, 410]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-peso', prompt: ['¿A cuál de estos tres pares le sube más el peso tras la ronda 2?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'par ' + (j + 1) })), aQ2r,
+      `El ranker lo invierte: ${aNm[aFirst(aQ2[aQ2r])]} debe ir antes y recibe 0; ${aNm[aLast(aQ2[aQ2r])]} recibe 1.`,
+      j => aQ2s[j] > 0 ? 'Ese par queda bien ordenado por el ranker: su peso baja.' : 'Ahí hay empate: el peso solo cambia al normalizar.'),
+  }], done) }],
+
+  ['rb2', 'RankBoost: ronda a ronda', (m) => {
+    const p = panel(0), trr = [m('r1'), m('r2'), m('r3'), m('r4')], tth = m('thm'), tex = m('exp'), tal = m('alpha'), RX = 720, fs = r => r.f.map(aF2), r0 = aRB[0];
+    aNote(p, `la misma ejecución, con T = 1 a ${aTmax} rondas · error empírico, productos y cota calculados en la página`);
+    aTitle(p, 'La puntuación combinada f, ronda a ronda');
+    // estado inicial: tras la ronda 1
+    const ls = aList(p, { head: 'f_{t}(x)', rows: aRows(r0.f) }); ls.vals(fs(r0), 0); ls.byScore(r0.f, 0); ls.width(r0.Dn, 0, 0); ls.row = aRows(r0.f);
+    const LY = ls.bottom + 28;
+    aSq(p, ls.x, LY, HUE.ok, 'bien ordenado', { line: true }); aSq(p, ls.x + 210, LY, HUE.bad, 'invertido', { line: true }); aSq(p, ls.x, LY + 36, HUE.bad, 'empatado: también cuenta como error', { line: true, dash: '3 9' });
+    const cnt = aTx(p, '', ls.x, LY + 82, trr[0], { size: 24, fill: HUE.bad, font: UI, weight: 600 }), cs = r => `pares mal ordenados:  ${r.nerr} de ${aM}`; cnt._set(cs(r0));
+    const rs = (r, t) => `ronda ${t + 1}:     h_{${t + 1}} = [ ${aStName(r.st)} ]          α_{${t + 1}} = ${aF2(r.al)}          Z_{${t + 1}} = ${aF2(r.Z)}`;
+    const rl = aTx(p, rs(r0, 0), RX, 262, .5, { size: 28, weight: 600 });
+    aTx(p, 'f_{t}  =  ∑_{s ≤ t} α_{s} h_{s}', ls.x + ls.w - 46, ls.y - 52, .5, { size: 24, fill: HUE.hyp, weight: 600, anchor: 'middle' });
+    const ch = aChart(p, 800, 590, 540, 250), tbar = t => t < aTs ? trr[t] + (t ? 1.5 : .2) : tth - .8 + (t - aTs) * .3, LX = ch.CX(4.1), lg = G(p, { o: 0 }); show(lg, trr[0]);
+    aSq(lg, LX, ch.VY(1) + 6, HUE.bad, 'error empírico de f_{t}');
+    aRB.forEach((r, t) => { ch.bar(t + 1, r.err, HUE.bad, tbar(t)); if (t < aTs) aTx(p, r.nerr ? aF2(r.err) : '0', ch.CX(t + 1), ch.VY(r.err) - 12, tbar(t) + .3, { size: 22, fill: HUE.bad, anchor: 'middle', weight: 600 }); });
+    for (let t = 1; t < aTs; t++) { const r = aRB[t], t0 = trr[t];
+      aAt(() => rl._set(rs(r, t)), t0); ls.mark(r.hx, t0); ls.mark(r.hx.map(() => 0), t0 + 2.4);
+      ls.vals(fs(r), t0 + .5); ls.order(r.f, t0 + .6, 1.1); ls.byScore(r.f, t0 + 1.2); ls.width(r.Dn, t0 + 1.5, .7);
+      aAt(() => cnt._set(cs(r)), t0 + 1.5);
+    }
+    tw(cnt, { c_fill: HUE.ok }, trr[aTs - 1] + 1.5, .3);
+    // la cota: el producto de los Z y la exponencial de (10.13)
+    const l2 = G(p, { o: 0 }), l3 = G(p, { o: 0 }); show(l2, tth + 2.8); show(l3, tex + .3);
+    aSq(l2, LX, ch.VY(1) + 42, HUE.bnd, '∏_{s ≤ t} Z_{s}', { line: true }); aSq(l3, LX, ch.VY(1) + 78, HUE.bnd, 'cota (10.13)', { line: true, dash: '6 7' });
+    ch.line([1, ...aRB.map(r => r.prodZ)], HUE.bnd, tth + 2.8, 2.2);
+    ch.line([1, ...aRB.map(r => r.bnd)], HUE.bnd, tex + .3, 1, { dash: '6 7', dots: false });
+    text(p, 'Teorema 10.3', RX, 668, tth, { size: 26, fill: HUE.hyp, weight: 600 });
+    aRow(p, [['R̂_{S}(f)   ≤   ', COL.chalk], ['∏_{t ≤ T} Z_{t}', HUE.bnd], ['   ≤   exp( −2 ∑_{t ≤ T} ( (ε_{t}^{+} − ε_{t}^{−}) / 2 )^{2} )', COL.chalk], ['      (10.13)', COL.dim, UI, 22]], RX, 724, [tth + 1, tth + 2.8, tex, tex], { size: 28, weight: 600 });
+    aRow(p, [['si  (ε_{t}^{+} − ε_{t}^{−}) / 2  ≥  γ > 0  en cada ronda:      '], ['R̂_{S}(f)  ≤  exp( −2 γ^{2} T )'], ['    (10.14)', COL.dim, UI, 22]], RX, 784, [tex + 3.4, tex + 5, tex + 5], { size: 26, weight: 600 });
+    aTx(p, 'α_{t} es el valor que hace mínimo Z_{t}', RX, 836, tal, { size: 24, fill: COL.dim, font: UI });
+  }],
+
+  ['rb3', 'Descenso por coordenadas y margen', (m) => {
+    const p = panel(0), tf = m('f'), tco = m('coord'), tst = m('step'), tmr = m('mar'), tt = m('t'), RX = 720, r = aRB[0], PX0 = 170, PY0 = 620, PW = 400, PH = 330, E1 = 2, V0 = .75, V1 = 1.12, EX = e => PX0 + e / E1 * PW, VY = v => PY0 - (v - V0) / (V1 - V0) * PH;
+    aNote(p, `curva: F/m en la dirección del ranker de la ronda 1, calculada en la página · márgenes de f/‖α‖_{1} con T = ${aTs} y con T = ${aTmax}`);
+    aTitle(p, 'RankBoost como descenso por coordenadas, y su cota por margen');
+    // izquierda: F/m a lo largo de la coordenada elegida; el mínimo está en η = α_1 y vale Z_1
+    const ax = G(p, { o: 0 }); show(ax, .4);
+    mk('path', { d: `M${PX0} ${PY0 - PH - 10}V${PY0}H${PX0 + PW + 10}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, ax);
+    [0, 1, 2].forEach(e => { mk('path', { d: `M${EX(e)} ${PY0}v8`, stroke: COL.faint, 'stroke-width': 2 }, ax); T(ax, String(e), { x: EX(e), y: PY0 + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+    [.8, .9, 1, 1.1].forEach(v => { mk('path', { d: `M${PX0 - 8} ${VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, ax); T(ax, aF1(v), { x: PX0 - 16, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+    aTx(ax, 'η', PX0 + PW + 26, PY0 + 8, null, { size: 26, fill: COL.dim }); aTx(ax, 'F / m', PX0 - 50, PY0 - PH - 28, null, { size: 24, fill: COL.dim });
+    aTx(ax, `dirección: el ranker h_{1} = [ ${aStName(r.st)} ]`, PX0, PY0 + 84, null, { size: 22, fill: COL.dim, font: UI });
+    let d = ''; for (let i = 0; i <= 80; i++) { const e = E1 * i / 80; d += (i ? 'L' : 'M') + EX(e).toFixed(1) + ' ' + VY(aFdir(0, e)).toFixed(1); }
+    draw(path(p, d, { stroke: COL.chalk, 'stroke-width': 4 }, { d: 0 }), tf + 4.6, 1.6);
+    const dt = put(mk('circle', { r: 11, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 2 }, p), { x: EX(0), y: VY(1), o: 0 }); show(dt, tco + 1.2, .3);
+    prog(q => put(dt, { x: EX(r.al * q), y: VY(aFdir(0, r.al * q)) }), tst + .4, 1.8);
+    const mg = G(p, { o: 0 }); show(mg, tst + 2.2);
+    mk('path', { d: `M${EX(r.al)} ${VY(r.Z) + 14}V${PY0}M${PX0} ${VY(r.Z)}H${EX(r.al) - 14}`, stroke: HUE.hyp, 'stroke-width': 2, 'stroke-dasharray': '5 7', fill: 'none' }, mg);
+    aHalo(aTx(mg, `α_{1} = ${aF2(r.al)}`, EX(r.al) + 12, PY0 - 16, null, { size: 24, fill: HUE.hyp, weight: 700 }));
+    aHalo(aTx(mg, `Z_{1} = ${aF2(r.Z)}`, PX0 + 14, VY(r.Z) + 32, null, { size: 24, fill: HUE.hyp, weight: 700 }));
+    aRow(p, [['F(α)  =  ∑_{i ≤ m} exp( −y_{i} [ f(x′_{i}) − f(x_{i}) ] )'], ['        (10.15)', COL.dim, UI, 22]], RX, 262, tf, { size: 30, weight: 600 });
+    aTx(p, 'convexa, y cota superior del número de pares mal ordenados', RX, 304, tf + 4.6, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['una ronda  =  una coordenada:  ', COL.chalk, UI, 26], ['el ranker base h_{t}']], RX, 388, tco, { size: 28, weight: 600 });
+    aRow(p, [['el paso que minimiza F:    ', COL.chalk, UI, 26], ['η  =  ½ log( ε_{t}^{+} / ε_{t}^{−} )  =  '], ['α_{t}', HUE.hyp]], RX, 462, [tst, tst + 2.2, tst + 2.2], { size: 28, weight: 600 });
+    // la cota por margen (10.19) y los márgenes normalizados de la combinación
+    aRow(p, [['R(f)   ≤   '], ['R̂_{S,ρ}( f / ‖α‖_{1} )', HUE.bnd], ['   +   '], ['(2/ρ) ( ℜ_{m}^{D₁}(H) + ℜ_{m}^{D₂}(H) )', HUE.cx], ['   +   '], ['√( log(1/δ) / 2m )']], RX, 572, tmr, { size: 24, weight: 600 });
+    aTx(p, '(10.19)', 1570, 530, tmr, { size: 22, fill: COL.dim, font: UI, anchor: 'end' });
+    const SY = 722, sp = aStrip(p, 760, 1500, SY, -.1, 1, [0, .2, .4, .6, .8, 1], { r: 9 }); show(sp.g, tmr + 3);
+    const a4 = aRB[aTs - 1].mg, a6 = aRB[aTmax - 1].mg, dots = sp.dots(a4, a4.map(() => HUE.ok), k => tmr + 3.2 + .05 * k), to = sp.at(a6);
+    const cap = aTx(p, `margen de cada par con f / ‖α‖_{1},   T = ${aTs}`, 760, SY - 78, tmr + 3, { size: 22, fill: COL.dim, font: UI });
+    dots.forEach((e, k) => tw(e, { x: to[k][0], y: to[k][1] }, tt + 1.4, 1.2)); aAt(() => cap._set(`margen de cada par con f / ‖α‖_{1},   T = ${aTmax}`), tt + 1.4);
+    aTx(p, 'T no aparece en la cota:  solo ρ, m y la complejidad de H', RX, 808, tt, { size: 26, font: UI, weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Ranking:  una puntuación h; el error es la fracción de pares mal ordenados.', 'w1'], ['Cota por margen:  la de clasificación, con Rademacher sobre x y sobre x′.', 'w2'],
+      ['Ranking con SVM:  una SVM sobre los vectores diferencia Φ(x′) − Φ(x).', 'w3'], ['RankBoost:  una distribución sobre los pares, que carga los mal ordenados.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['En el escenario basado en puntuaciones, cada par de la muestra lleva una etiqueta +1, −1 o 0.'], ans: ['v'], why: 'La etiqueta dice cuál de los dos debe ir antes, o que no hay preferencia.' },
+      { parts: ['Si las preferencias forman un ciclo, alguna función de puntuación ordena bien todos los pares.'], ans: ['f'], why: 'El orden que induce una puntuación es transitivo: algún par del ciclo falla.' },
+      { parts: ['Ranking con SVM es una SVM sobre los vectores diferencia de los pares.'], ans: ['v'], why: 'Es el problema (10.9): la SVM de siempre, con una recta por el origen.' },
+      { parts: ['En RankBoost, tras cada ronda baja el peso de los pares que el ranker base invirtió.'], ans: ['f'], why: 'Al revés: esos pares ganan peso, y los bien ordenados lo pierden.' },
+      { parts: ['La cota por margen de RankBoost empeora al aumentar el número de rondas.'], ans: ['f'], why: 'El número de rondas no aparece en (10.19): cuentan el margen, m y H.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

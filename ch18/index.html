@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>De on-line a batch y teoría de juegos</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 18, title: 'De on-line a batch y teoría de juegos', minutes: 6, language: 'es', next: '../ch19/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 17) ---------- */
+// salmón = etiqueta 1, azul = etiqueta 0 · ámbar = lo que da el algoritmo (sus hipótesis, la hipótesis promedio y su error; en el juego, el jugador de filas) ·
+// blanco = lo observado o la referencia (pérdida on-line promedio, ínfimo sobre H; en el juego, el jugador de columnas) · violeta = términos de confianza y de regret ·
+// rojo = la pérdida de una ronda · rosa (local) = promedio de los errores de generalización R(h_t)
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, cx: COL.real, avg: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'r^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηφρσλμ‖ℜ√∑∏⟹⟺≈∼∞⊤∈→])/;                                            // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aNum = v => String(+v.toFixed(2)).replace('-', '−');                           // sin ceros de relleno: 2, −0.25
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aSum = v => v.reduce((s, u) => s + u, 0);
+// --- Primera mitad: de on-line a batch. X = [0, 1] con x uniforme; y = 1 si x > aStar, con una fracción aNoise de etiquetas cambiadas.
+// H: 2 · aK umbrales sobre la grilla de paso 1/aK. Los aK primeros predicen 1 a la derecha de su umbral; los otros aK son sus opuestos (1 a la izquierda).
+const aK = 20, aNN = 2 * aK, aStar = .6, aNoise = .1, aDl = .05, aTT = 200, aSeed = 18;
+const aExp = Array.from({ length: aNN }, (_, i) => i < aK ? { th: i / aK, s: 1 } : { th: (i - aK) / aK, s: 0 });
+const aHi = (i, x) => x > aExp[i].th ? aExp[i].s : 1 - aExp[i].s;
+// Una hipótesis es una mezcla p de los umbrales: h(x) = ∑ p_i h_i(x), constante en cada tramo de la grilla. aVals da su valor por tramo.
+const aVals = p => Array.from({ length: aK }, (_, k) => { let s = 0; for (let i = 0; i < aNN; i++) s += p[i] * aHi(i, (k + .5) / aK); return s; });
+const aHx = (p, x) => { let s = 0; for (let i = 0; i < aNN; i++) s += p[i] * aHi(i, x); return s; };
+// Error de generalización exacto con la pérdida cuadrática L(ŷ, y) = (ŷ − y)²: suma por tramos de P[y = 1] (1 − c)² + P[y = 0] c².
+const aRiskV = vals => vals.reduce((s, c, k) => { const p1 = (k + .5) / aK > aStar ? 1 - aNoise : aNoise; return s + (p1 * (1 - c) ** 2 + (1 - p1) * c * c) / aK; }, 0);
+const aRisk = p => aRiskV(aVals(p));
+const aUnit = i => Array.from({ length: aNN }, (_, j) => j === i ? 1 : 0);
+const aDrawS = (seed, n) => { const r = aRng(seed); return Array.from({ length: n }, () => { const x = r(), c = x > aStar ? 1 : 0; return [x, r() < aNoise ? 1 - c : c]; }); };
+const aEtaOpt = (n, tt) => Math.sqrt(8 * Math.log(n) / tt);                          // η del teorema 8.6
+// Pesos exponenciales (cap. 16) sobre los umbrales. Por ronda (si keep): p y vals de h_t, su predicción, su pérdida, R(h_t) exacto,
+// los promedios hasta t de las pérdidas (avgL) y de los R(h_s) (avgR), y la hipótesis promedio hasta t (pbar, vbar) con su error (Rbar).
+const aEWA = (seq, eta, keep = true) => {
+  let w = Array(aNN).fill(1), cum = 0, cumR = 0; const Li = Array(aNN).fill(0), ps = Array(aNN).fill(0), rows = [];
+  seq.forEach(([x, y], t) => {
+    const W = aSum(w), p = w.map(v => v / W), yh = aHx(p, x), loss = (yh - y) ** 2; cum += loss; p.forEach((v, i) => ps[i] += v);
+    if (keep) { const vals = aVals(p), R = aRiskV(vals), pbar = ps.map(v => v / (t + 1)), vbar = aVals(pbar); cumR += R; rows.push({ p, vals, yh, loss, R, avgL: cum / (t + 1), avgR: cumR / (t + 1), pbar, vbar, Rbar: aRiskV(vbar) }); }
+    w = p.map((v, i) => { const l = (aHi(i, x) - y) ** 2; Li[i] += l; return v * Math.exp(-eta * l); });
+  });
+  const n = seq.length, pbar = ps.map(v => v / n);
+  return { rows, n, avgL: cum / n, pbar, Rbar: aRisk(pbar), best: Math.min(...Li), regret: cum - Math.min(...Li) };
+};
+const aConf = (tt, d) => Math.sqrt(2 * Math.log(1 / d) / tt);                        // término de (8.26) y (8.27), con M = 1
+const aConf2 = (tt, d) => 2 * Math.sqrt(2 * Math.log(2 / d) / tt);                   // término de (8.28), con M = 1
+const aRegB = (n, tt) => Math.sqrt(Math.log(n) / (2 * tt));                          // R_T/T ≤ √(log N / 2T): teorema 8.6
+const aSeq = aDrawS(aSeed, aTT), aRun = aEWA(aSeq, aEtaOpt(aNN, aTT)), aEnd = aRun.rows[aTT - 1];
+const aInf = Math.min(...aExp.map((_, i) => aRisk(aUnit(i))));                       // ínfimo sobre H de R(h)
+const aAvgL = aRun.rows.map(q => q.avgL), aAvgR = aRun.rows.map(q => q.avgR), aRbar = aRun.rows.map(q => q.Rbar);
+// Al crecer T: la misma semilla con más puntos (los 200 primeros son los del ejemplo), y η ajustado a cada T.
+const aLong = [aTT, 10 * aTT, 100 * aTT].map(n => { const run = n === aTT ? aRun : aEWA(aDrawS(aSeed, n), aEtaOpt(aNN, n), false); return { n, Rbar: run.Rbar, avgL: run.avgL, reg: run.regret / n, regB: aRegB(aNN, n), conf: aConf2(n, aDl), bound: aInf + aRegB(aNN, n) + aConf2(n, aDl) }; });
+// --- Segunda mitad: juego de suma cero. aGM[i][j] = pérdida del jugador de filas si juega la fila i y el de columnas la columna j.
+const aSolve = (A, b) => { const n = b.length, a = A.map((r, i) => [...r, b[i]]); for (let c = 0; c < n; c++) { let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(a[r][c]) > Math.abs(a[p][c])) p = r; if (Math.abs(a[p][c]) < 1e-10) return null; [a[c], a[p]] = [a[p], a[c]]; for (let r = 0; r < n; r++) if (r !== c) { const k = a[r][c] / a[c][c]; for (let j = c; j <= n; j++) a[r][j] -= k * a[c][j]; } } return a.map((r, i) => r[n] / r[i]); };
+const aSubsets = (n, k) => { const res = [], go = (s, cur) => { if (cur.length === k) { res.push(cur); return; } for (let i = s; i < n; i++) go(i + 1, [...cur, i]); }; go(0, []); return res; };
+// max_q min_i (A q)_i con q en el símplex (cap. 15): programa lineal chico, resuelto probando todos los vértices. Devuelve { v, q }.
+const aGame = A => { const n = A[0].length, cons = [...A.map(r => [...r, -1]), ...Array.from({ length: n }, (_, j) => Array.from({ length: n + 1 }, (_, k) => k === j ? 1 : 0))]; let best = null; aSubsets(cons.length, n).forEach(idx => { const x = aSolve([[...Array(n).fill(1), 0], ...idx.map(i => cons[i])], [1, ...idx.map(() => 0)]); if (!x) return; const q = x.slice(0, n), v = x[n]; if (q.some(u => u < -1e-9) || A.some(r => r.reduce((s, u, j) => s + u * q[j], 0) < v - 1e-9)) return; if (!best || v > best.v + 1e-9) best = { v, q }; }); return best; };
+const aTr = A => A[0].map((_, j) => A.map(r => r[j]));
+const aPay = (A, p, q) => aSum(p.map((u, i) => u * aSum(q.map((v, j) => v * A[i][j]))));   // p⊤ A q
+// El jugador de filas corre pesos exponenciales sobre las filas (la pérdida de la fila i en la ronda t es A[i][j_t]);
+// el de columnas responde con la columna que más le cobra a p_t (si empatan, la primera). Por ronda: p_t, j_t, la pérdida p_t⊤ A q_t,
+// su promedio (avg), las mezclas promedio (pbar, qbar) y low = min_p p⊤ A qbar. Siempre low ≤ valor ≤ avg, y avg − low = R_t/t.
+const aHedge = (A, rounds, eta) => { const n = A.length, k = A[0].length, ps = Array(n).fill(0), qs = Array(k).fill(0), Li = Array(n).fill(0), rows = []; let w = Array(n).fill(1), cum = 0; for (let t = 0; t < rounds; t++) { const W = aSum(w), p = w.map(v => v / W), col = A[0].map((_, j) => aSum(p.map((v, i) => v * A[i][j]))); let j = 0; col.forEach((v, c) => { if (v > col[j] + 1e-12) j = c; }); cum += col[j]; qs[j]++; p.forEach((v, i) => { ps[i] += v; Li[i] += A[i][j]; }); rows.push({ p, j, col, loss: col[j], avg: cum / (t + 1), pbar: ps.map(v => v / (t + 1)), qbar: qs.map(v => v / (t + 1)), low: Math.min(...Li) / (t + 1) }); w = p.map((v, i) => v * Math.exp(-eta * A[i][j])); } return rows; };
+const aGM = [[1, 0], [.25, .75]], aGT = 200;
+const aColG = aGame(aGM), aRowG = aGame(aTr(aGM).map(r => r.map(v => -v))), aVal = aColG.v;   // q*, p* y el valor del juego
+const aPureMin = Math.min(...aGM.map(r => Math.max(...r))), aPureMax = Math.max(...aTr(aGM).map(c => Math.min(...c)));   // con jugadas puras: min max y max min
+const aHg = aHedge(aGM, aGT, aEtaOpt(aGM.length, aGT)), aHend = aHg[aGT - 1];
+// Comprobación 2: tres formas de crecer del regret; solo la lineal deja R_T/T sin bajar.
+const aQ2 = [['R_{T}  =  √T', tt => 1 / Math.sqrt(tt)], ['R_{T}  =  T / 10', () => .1], ['R_{T}  =  log T', tt => Math.log(tt) / tt]], aQ2r = 1;
+/* aMATH:end */
+
+const aF3 = v => v.toFixed(3);
+const aInt = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');                       // 20 000, con espacio fino
+const aFr = v => { for (let d = 1; d <= 12; d++) if (Math.abs(v * d - Math.round(v * d)) < 1e-9) return d === 1 ? String(Math.round(v)) : `${Math.round(v * d)}/${d}`; return aF2(v); };   // 0.3333… → 1/3
+// Plano de hipótesis sobre [0, 1]: eje horizontal x, eje vertical el valor h(x) entre 0 y 1; línea de trazos en el umbral aStar.
+// sp.curve(col, { sw, o }) devuelve una escalera (constante en cada tramo de la grilla) que se fija con e._set(vals).
+// sp.pts(seq, op) crea los puntos de la muestra, fuera de la banda (y = 1 arriba, y = 0 abajo), y devuelve n => muestra los n primeros.
+// sp.step(cur, upTo, r): estado en la ronda real r del ejemplo: anillo en el punto que llega, segmento rojo desde su etiqueta
+// hasta la predicción (su cuadrado es la pérdida) y, al final de la ronda, la escalera pasa de h_t a h_{t+1}.
+const aStair = (p, x0, y0, w, hh, { t0 = .4 } = {}) => {
+  const SX = v => x0 + v * w, SY = v => y0 - v * hh, PY = y => y ? SY(1) - 15 : y0 + 15, g = G(p, { o: t0 == null ? 1 : 0 }), sp = { SX, SY, g };
+  mk('path', { d: `M${x0} ${SY(1)}h${w}M${x0} ${y0}h${w}M${x0} ${SY(1) - 26}V${y0 + 26}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  mk('path', { d: `M${SX(aStar)} ${SY(1) - 26}V${y0 + 26}`, stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '4 8', fill: 'none' }, g);
+  [[0, '0'], [.5, '0.5'], [1, '1']].forEach(([v, s]) => { mk('path', { d: `M${x0 - 8} ${SY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, s, { x: x0 - 16, y: SY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  [[0, '0'], [aStar, String(aStar)], [1, '1']].forEach(([v, s]) => T(g, s, { x: SX(v), y: y0 + 60, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+  T(g, 'x', { x: x0 + w + 26, y: y0 + 60, size: 24, fill: COL.dim, anchor: 'middle', font: MATH });
+  sp.pg = G(g); sp.cg = G(g); sp.og = G(g);
+  sp.curve = (col, { sw = 5, o = 1 } = {}) => { const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round', 'stroke-opacity': o }, sp.cg); e._set = vals => e.setAttribute('d', vals.map((c, k) => (k ? 'V' : `M${x0} `) + SY(c).toFixed(1) + 'H' + SX((k + 1) / aK).toFixed(1)).join('')); return e; };
+  sp.pts = (seq, op = .9) => { const els = seq.map(([x, y]) => put(mk('circle', { cx: SX(x), cy: PY(y), r: 7, fill: y ? HUE.pos : HUE.neg, 'fill-opacity': op }, sp.pg), { o: 0 })); let was = 0; return n => { for (let i = Math.min(n, was); i < Math.max(n, was); i++) put(els[i], { o: i < n ? 1 : 0 }); was = n; }; };
+  sp.ring = put(mk('circle', { r: 14, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, sp.og), { o: 0 });
+  sp.seg = mk('path', { stroke: COL.bad, 'stroke-width': 6, fill: 'none', 'stroke-linecap': 'round' }, sp.og);
+  sp.step = (cur, upTo, r) => {
+    const rr = Math.max(0, Math.min(aTT, r)), k = Math.min(aTT - 1, Math.floor(rr)), f = rr >= aTT ? 1 : rr - k, q = aRun.rows[k], [x, y] = aSeq[k], live = rr < aTT && f > .04;
+    const nx = aRun.rows[Math.min(aTT - 1, k + 1)].vals, u = rr >= aTT ? 0 : Math.max(0, Math.min(1, (f - .65) / .35));
+    cur._set(q.vals.map((c, i) => c + (nx[i] - c) * u));
+    upTo(rr >= aTT ? aTT : k + (live ? 1 : 0));
+    put(sp.ring, { x: SX(x), y: PY(y), o: live ? 1 : 0 });
+    sp.seg.setAttribute('d', live && f > .3 && f < .92 ? `M${SX(x).toFixed(1)} ${SY(y)}V${SY(q.yh).toFixed(1)}` : '');
+    return { k, q, paid: rr >= aTT || f > .3 };
+  };
+  if (t0 != null) show(g, t0);
+  return sp;
+};
+const aMainSt = (p, opts) => aStair(p, 150, 580, 560, 270, opts);
+// Gráfica por rondas (0 … tmax), como la del cap. 17. ch.line(vals, col, t, dur, { dash, from }) traza vals[from … ];
+// ch.live(vals, col, { from }) devuelve r => dibuja hasta la ronda r; ch.hline(v, col, t) traza una horizontal de trazos.
+const aPlot = (p, x0, y0, w, hh, { t0 = .4, tmax = 10, v0 = 0, v1 = 1, yt = [], xt = [], xlab = 'rondas' } = {}) => {
+  const CX = t => x0 + t / tmax * w, VY = v => y0 - (v - v0) / (v1 - v0) * hh, g = G(p, { o: t0 == null ? 1 : 0 }), ch = { CX, VY, g };
+  mk('path', { d: `M${x0} ${y0 - hh - 12}V${y0}H${x0 + w + 10}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  yt.forEach(([v, s]) => { mk('path', { d: `M${x0 - 8} ${VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, s, { x: x0 - 16, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  xt.forEach(t => { mk('path', { d: `M${CX(t)} ${y0}v8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(t), { x: CX(t), y: y0 + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  T(g, xlab, { x: x0 + w + 10, y: y0 + 62, size: 22, fill: COL.dim, anchor: 'end' });
+  const dOf = (vals, from, upto) => { let d = ''; const n = Math.min(vals.length - 1, Math.floor(upto + 1e-9)); for (let t = from; t <= n; t++) d += (t > from ? 'L' : 'M') + CX(t).toFixed(1) + ' ' + VY(vals[t]).toFixed(1); return d; };
+  ch.line = (vals, col, tt, dur, { dash = null, from = 0, sw = 4 } = {}) => {
+    const d = dOf(vals, from, vals.length - 1);
+    if (dash) { const e = put(mk('path', { d, fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-dasharray': dash }, p), { o: 0 }); show(e, tt, dur); return e; }
+    const e = path(p, d, { stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round' }, { d: 0 }); draw(e, tt, dur); return e;
+  };
+  ch.live = (vals, col, { from = 0, sw = 4 } = {}) => { const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round' }, g); return r => e.setAttribute('d', r >= from ? dOf(vals, from, r) : ''); };
+  ch.hline = (v, col, tt, { dash = '10 8', sw = 3 } = {}) => { const e = put(mk('path', { d: `M${x0} ${VY(v).toFixed(1)}h${w}`, fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-dasharray': dash }, p), { o: 0 }); show(e, tt); return e; };
+  if (t0 != null) show(g, t0);
+  return ch;
+};
+// Matriz de pérdidas del juego como tabla: filas rotuladas en ámbar (el jugador de filas) y columnas en blanco.
+// mt.CX(j), mt.CY(i): centro de cada casilla; mt.ring(i, j, col): marco sobre una casilla (oculto hasta que se muestre).
+const aMatG = (p, cx0, cy0, cw, chh, { t0 = .4, size = 34 } = {}) => {
+  const CX = j => cx0 + j * cw, CY = i => cy0 + i * chh, g = G(p, { o: t0 == null ? 1 : 0 }), mt = { CX, CY, g, cw, chh };
+  aGM.forEach((row, i) => {
+    aTx(g, `fila ${i + 1}`, cx0 - cw / 2 - 20, CY(i) + 8, null, { size: 22, fill: HUE.hyp, font: UI, weight: 600, anchor: 'end' });
+    row.forEach((v, j) => { mk('rect', { x: CX(j) - cw / 2, y: CY(i) - chh / 2, width: cw, height: chh, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g); T(g, aNum(v), { x: CX(j), y: CY(i) + size * .34, size, anchor: 'middle', font: MATH, weight: 600 }); });
+  });
+  aGM[0].forEach((_, j) => aTx(g, `columna ${j + 1}`, CX(j), cy0 - chh / 2 - 18, null, { size: 22, font: UI, weight: 600, anchor: 'middle' }));
+  mt.ring = (i, j, col) => put(mk('rect', { x: CX(j) - cw / 2 + 6, y: CY(i) - chh / 2 + 6, width: cw - 12, height: chh - 12, fill: 'none', stroke: col, 'stroke-width': 5 }, g), { o: 0 });
+  if (t0 != null) show(g, t0);
+  return mt;
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 18', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'De on-line a batch y teoría de juegos', { x: 800, y: 450, size: 64, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Un regret pequeño sirve para dos cosas más: aprender de una muestra y demostrar el teorema minimax.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['conv', 'De on-line a batch', (m) => {
+    const p = panel(0), tb = m('batch'), tr = m('run'), th = m('h1'), tl = m('loss'), ta = m('all'), tq = m('q'), RX = 800;
+    aNote(p, `datos ilustrativos (semilla fija): x uniforme en [0, 1]; y = 1 si x > ${aStar}, con ${Math.round(aNoise * 100)} % de etiquetas cambiadas`);
+    aTitle(p, 'De on-line (en línea) a batch (por lotes)');
+    const sp = aMainSt(p), cur = sp.curve(HUE.hyp), upTo = sp.pts(aSeq);
+    put(cur, { o: 0 }); show(cur, th + 4, .5);
+    const all = sp.pts(aSeq, .28); prog(q => all(Math.round(q * aTT)), tb + 1, 2.4, lin);   // la muestra entera, tenue: después se enciende punto por punto
+    const info = aTx(p, '', 150, 700, tl, { size: 24, font: UI, weight: 600 });
+    const setR = r => { const s = sp.step(cur, upTo, r); info._set(`ronda ${s.k + 1} de ${aTT}        pérdida de la ronda:  ${s.paid ? aF2(s.q.loss) : '…'}`); };
+    setR(0);
+    prog(q => setR(4 * q), tl + .2, ta - tl - .6, lin);            // cuatro rondas despacio
+    prog(q => setR(4 + (aTT - 4) * q), ta, tq - ta - .4, lin);     // y el resto de la muestra
+    const gl = G(p, { o: 0 }); show(gl, .5);
+    aSq(gl, 150, 752, HUE.pos, 'y = 1', { dot: true }); aSq(gl, 270, 752, HUE.neg, 'y = 0', { dot: true });
+    const gl2 = G(p, { o: 0 }); show(gl2, th + 4);
+    aSq(gl2, 390, 752, HUE.hyp, 'hipótesis h_{t}', { line: true });
+    const gl3 = G(p, { o: 0 }); show(gl3, tl + .6);
+    aSq(gl3, 150, 796, COL.bad, 'h_{t}(x_{t}) − y_{t}: su cuadrado es la pérdida de la ronda', { line: true });
+    aRow(p, [['S = ((x_{1}, y_{1}), …, (x_{T}, y_{T}))'], ['      i.i.d. según D', COL.dim, UI, 24]], RX, 262, tb + 3, { size: 28, weight: 600 });
+    aRow(p, [['el algoritmo la recorre en orden:      ', COL.dim, UI, 24], ['h_{1}, h_{2}, …, h_{T}', HUE.hyp]], RX, 340, tr, { size: 28, weight: 600 });
+    aTx(p, `aquí: pesos exponenciales (cap. 16), N = ${aNN} umbrales, T = ${aTT}`, RX, 418, th, { size: 24, fill: COL.dim, font: UI });
+    aRow(p, [['L(h_{t}(x_{t}), y_{t})  =  (h_{t}(x_{t}) − y_{t})^{2}'], ['      convexa, M = 1', COL.dim, UI, 24]], RX, 496, tl + 3, { size: 28, weight: 600 });
+    aRow(p, [['R(h)  =  E[L(h(x), y)]'], ['      ¿cuánto vale?', HUE.hyp, UI, 26]], RX, 590, tq, { size: 30, weight: 600 });
+  }],
+
+  ['lema', 'El lema: dos promedios', (m) => {
+    const p = panel(0), t2 = m('two'), tr = m('avgR'), tk = m('key'), tz = m('azuma'), tb = m('bound'), tn = m('num'), RX = 800, cf = aConf(aTT, aDl);
+    aNote(p, `el mismo ejemplo · los R(h_{t}) son exactos (se integran por tramos) · δ = ${aDl}, logaritmo natural`);
+    aTitle(p, 'Lema 8.14: lo que el algoritmo pagó y lo que valen sus hipótesis');
+    const ch = aPlot(p, 170, 700, 520, 440, { tmax: aTT, v1: .5, yt: [0, .1, .2, .3, .4, .5].map(v => [v, aNum(v)]), xt: [0, 50, 100, 150, 200], xlab: 'rondas t' });
+    const L = [null, ...aAvgL], Rr = [null, ...aAvgR], B = L.map((v, t) => t ? v + aConf(t, aDl) : null), from = B.findIndex((v, t) => t && v <= .5);
+    const lv = ch.live(L, COL.chalk, { from: 1 }), rv = ch.live(Rr, HUE.avg, { from: 1 });
+    lv(0); rv(0);
+    prog(q => lv(q * aTT), t2 + .3, tr - t2 - .8, lin);
+    prog(q => rv(q * aTT), tr + .3, tk - tr - .8, lin);
+    ch.line(B, HUE.cx, tb + 9, 1.2, { dash: '10 8', from, sw: 3 });
+    aHalo(aTx(p, 'pérdida promedio + término', ch.CX(118), ch.VY(B[118]) - 16, tb + 9, { size: 22, fill: HUE.cx, font: UI, weight: 600 }));
+    aRow(p, [['(1/T) ∑_{t} L(h_{t}(x_{t}), y_{t})'], ['      pérdida on-line promedio', COL.dim, UI, 22]], RX, 256, t2, { size: 28, weight: 600 });
+    aRow(p, [['(1/T) ∑_{t} R(h_{t})', HUE.avg], ['      promedio de los errores de generalización', COL.dim, UI, 22]], RX, 326, tr, { size: 28, weight: 600 });
+    const gk = G(p);
+    aTx(gk, 'h_{t} queda fijada antes de ver (x_{t}, y_{t}):', RX, 430, tk, { size: 24, fill: COL.dim, font: UI });
+    aTx(gk, 'E[ L(h_{t}(x_{t}), y_{t}) | h_{t} ]  =  R(h_{t})', RX, 488, tk + 4.5, { size: 30, weight: 600 });
+    aTx(gk, 'las diferencias se compensan al promediar: desigualdad de Azuma', RX, 552, tz, { size: 22, fill: COL.dim, font: UI });
+    hide(gk, tb - .5, .4);
+    aRow(p, [['Lema 8.14', HUE.hyp, UI], ['      (8.26)  ·  con probabilidad ≥ 1 − δ:', COL.dim, UI, 22]], RX, 430, tb, { size: 26, weight: 600 });
+    aRow(p, [['(1/T) ∑_{t} R(h_{t})', HUE.avg], ['  ≤  '], ['(1/T) ∑_{t} L(h_{t}(x_{t}), y_{t})'], ['  +  M √(2 log(1/δ) / T)', HUE.cx]], RX, 492, [tb + 3, tb + 3, tb + 5.5, tb + 8], { size: 26, weight: 600 });
+    aRow(p, [[`T = ${aTT},  M = 1:      `, COL.dim, UI, 22], [aF3(aEnd.avgR), HUE.avg], ['  ≤  '], [aF3(aEnd.avgL)], [`  +  ${aF3(cf)}`, HUE.cx]], RX, 590, tn, { size: 30, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [100, 580, 1060], W = 440;
+    T(p, 'Tres cantidades', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Se conoce la muestra S; la distribución D, no.', 100, 210, null, { size: 26, fill: COL.dim, font: UI });
+    const items = [['(1/T) ∑_{t} L(h_{t}(x_{t}), y_{t})', 'pérdida on-line promedio', COL.chalk], ['(1/T) ∑_{t} R(h_{t})', 'promedio de los errores', HUE.avg], ['R( (1/T) ∑_{t} h_{t} )', 'error de la hipótesis promedio', HUE.hyp]];
+    S.q1 = items.map(([f, nm, col], j) => {
+      const g = G(p, { x: BX[j], y: 280 });
+      mk('rect', { x: 0, y: 0, width: W, height: 300, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+      mk('circle', { cx: 44, cy: 44, r: 22, fill: COL.chalk }, g); T(g, String(j + 1), { x: 44, y: 53, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, f, W / 2, 166, null, { size: 30, fill: col, weight: 600, anchor: 'middle' });
+      aTx(g, nm, W / 2, 236, null, { size: 24, fill: COL.dim, font: UI, anchor: 'middle' });
+      return g;
+    });
+    S.q1B = BX.map(x => [x, 280, W, 300]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-muestra', prompt: ['¿Cuál se puede calcular solo con la muestra S, sin conocer D?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'cantidad ' + (j + 1) })), 0,
+      'Solo suma las pérdidas pagadas en las T rondas, sobre los puntos de S.',
+      () => 'R(h) es una esperanza sobre D: sin conocer D, no se puede calcular.'),
+  }], done) }],
+
+  ['prom', 'La hipótesis promedio', (m) => {
+    const p = panel(0), tf = m('fan'), ta = m('avg'), tc = m('conv'), tt = m('thm'), tn = m('num'), RX = 800, cf = aConf(aTT, aDl), FAN = [1, 3, 6, 10, 15, 25, 50, 100, 200];
+    aNote(p, `se dibujan ${FAN.length} de las ${aTT} hipótesis (rondas ${FAN.join(', ')}); el promedio es sobre las ${aTT} · errores exactos`);
+    aTitle(p, 'Teorema 8.15: se devuelve el promedio de las hipótesis');
+    const sp = aMainSt(p), upTo = sp.pts(aSeq, .28); upTo(aTT);
+    FAN.forEach((t, i) => { const e = sp.curve(HUE.hyp, { sw: 2.5, o: .6 }); e._set(aRun.rows[t - 1].vals); put(e, { o: 0 }); show(e, tf + .3 * i, .4); });
+    const av = sp.curve(HUE.hyp, { sw: 8 }); av._set(aRun.rows[0].vbar); put(av, { o: 0 }); show(av, ta + .6, .5);
+    prog(q => av._set(aRun.rows[Math.round(q * (aTT - 1))].vbar), ta + 1.2, 3.4, lin);   // el promedio de las t primeras, hasta t = T
+    aHalo(aTx(p, 'promedio', sp.SX(.3), sp.SY(.16), ta + 4.6, { size: 24, fill: HUE.hyp, font: UI, weight: 700, anchor: 'middle' }));
+    const gl = G(p, { o: 0 }); show(gl, tf);
+    mk('path', { d: 'M150 744h30', stroke: HUE.hyp, 'stroke-width': 2.5, 'stroke-opacity': .6, fill: 'none' }, gl); aTx(gl, 'hipótesis h_{t}', 192, 752, null, { size: 22, fill: COL.dim, font: UI });
+    const gl2 = G(p, { o: 0 }); show(gl2, ta + .6);
+    mk('path', { d: 'M390 744h30', stroke: HUE.hyp, 'stroke-width': 8, fill: 'none' }, gl2); aTx(gl2, 'su promedio', 432, 752, null, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['(1/T) ∑_{t} h_{t}', HUE.hyp], ['      hipótesis promedio', COL.dim, UI, 24]], RX, 256, ta, { size: 30, weight: 600 });
+    aRow(p, [['R( (1/T) ∑_{t} h_{t} )', HUE.hyp], ['  ≤  '], ['(1/T) ∑_{t} R(h_{t})', HUE.avg], ['      L convexa', COL.dim, UI, 22]], RX, 346, tc, { size: 28, weight: 600 });
+    aRow(p, [['aquí:      ', COL.dim, UI, 22], [aF3(aEnd.Rbar), HUE.hyp], ['  ≤  '], [aF3(aEnd.avgR), HUE.avg]], RX, 400, tc + 3.4, { size: 26, weight: 600 });
+    aRow(p, [['Teorema 8.15', HUE.hyp, UI], ['      (8.27)  ·  con probabilidad ≥ 1 − δ:', COL.dim, UI, 22]], RX, 500, tt, { size: 26, weight: 600 });
+    aRow(p, [['R( (1/T) ∑_{t} h_{t} )', HUE.hyp], ['  ≤  '], ['(1/T) ∑_{t} L(h_{t}(x_{t}), y_{t})'], ['  +  M √(2 log(1/δ) / T)', HUE.cx]], RX, 562, [tt + 3, tt + 3, tt + 7, tt + 9.5], { size: 26, weight: 600 });
+    aRow(p, [['aquí:      ', COL.dim, UI, 22], [aF3(aEnd.Rbar), HUE.hyp], ['  ≤  '], [aF3(aEnd.avgL)], [`  +  ${aF3(cf)}`, HUE.cx], [`  =  ${aF3(aEnd.avgL + cf)}`]], RX, 650, [tn, tn, tn + 3, tn + 3, tn + 3, tn + 3], { size: 30, weight: 600 });
+  }],
+
+  ['cota', 'El regret entra en la cota', (m) => {
+    const p = panel(0), td = m('def'), tt = m('thm'), te = m('ewa'), ts = [m('t1'), m('t2'), m('t3')], tm = m('moral'), LX = 100, BX0 = 470, SC = 1650, RY = k => 580 + k * 62;
+    aNote(p, `misma semilla con más puntos, η ajustado a cada T · δ = ${aDl} · la hipótesis promedio no está en H: su error puede quedar bajo el ínfimo`);
+    aTitle(p, 'Teorema 8.15, segunda parte: del regret a la generalización');
+    aRow(p, [['∑_{t} L(h_{t}(x_{t}), y_{t})'], ['  =  min_{h∈H} ∑_{t} L(h(x_{t}), y_{t})'], ['  +  R_{T}', HUE.cx], ['        definición de regret (8.25)', COL.dim, UI, 22]], LX, 226, [td, td + 2.4, td + 6, td], { size: 28, weight: 600 });
+    aRow(p, [['R( (1/T) ∑_{t} h_{t} )', HUE.hyp], ['  ≤  '], ['inf_{h∈H} R(h)'], ['  +  R_{T}/T', HUE.cx], ['  +  2M √(2 log(2/δ) / T)', HUE.cx], ['        (8.28)', COL.dim, UI, 22]], LX, 322, [tt + 5.6, tt + 5.6, tt + 8.6, tt + 11, tt + 12.8, tt + 5.6], { size: 34, weight: 600 });
+    aRow(p, [['pesos exponenciales, M = 1 (teorema 8.6):      ', COL.dim, UI, 24], ['R_{T}/T  ≤  √(log N / 2T)', HUE.cx]], LX, 410, te, { size: 28, weight: 600 });
+    const gh = G(p, { o: 0 }); show(gh, ts[0] - .5);
+    aTx(gh, 'error exacto', 350, 512, null, { size: 22, fill: HUE.hyp, font: UI, anchor: 'middle' });
+    aTx(gh, 'del promedio', 350, 538, null, { size: 22, fill: HUE.hyp, font: UI, anchor: 'middle' });
+    [[0, COL.chalk, 1, `ínfimo sobre H:  ${aF2(aInf)}`], [270, HUE.cx, 1, 'cota de R_{T}/T'], [500, HUE.cx, .4, 'término de confianza']].forEach(([dx, col, op, lab]) => { mk('rect', { x: BX0 + dx, y: 508, width: 20, height: 20, fill: col, 'fill-opacity': op }, gh); aTx(gh, lab, BX0 + dx + 32, 526, null, { size: 22, fill: COL.dim, font: UI }); });
+    aLong.forEach((q, k) => {
+      const y = RY(k), t0 = ts[k], g = G(p, { o: 0 }), w = [aInf, q.regB, q.conf].map(v => v * SC); show(g, t0, .4);
+      aTx(g, `T = ${aInt(q.n)}`, LX, y + 9, null, { size: 28, weight: 600 });
+      aTx(g, aF3(q.Rbar), 350, y + 9, null, { size: 28, weight: 600, fill: HUE.hyp, anchor: 'middle' });
+      const rs = [[COL.chalk, 1], [HUE.cx, 1], [HUE.cx, .4]].map(([col, op]) => mk('rect', { x: BX0, y: y - 18, width: 0, height: 36, fill: col, 'fill-opacity': op }, g));
+      const grow = u => { let x = BX0, left = u * (w[0] + w[1] + w[2]); rs.forEach((e, i) => { const d = Math.max(0, Math.min(w[i], left)); e.setAttribute('x', x.toFixed(1)); e.setAttribute('width', d.toFixed(1)); x += d; left -= d; }); };
+      grow(0); prog(grow, t0 + .2, 1.4, out);
+      mk('path', { d: `M${(BX0 + q.Rbar * SC).toFixed(1)} ${y - 27}v54`, stroke: HUE.hyp, 'stroke-width': 5, fill: 'none' }, g);
+      aTx(p, aF2(q.bound), BX0 + (w[0] + w[1] + w[2]) + 18, y + 10, t0 + 1.4, { size: 30, weight: 700 });
+    });
+    aTx(p, 'regret sublineal:   R_{T}/T → 0      ⟹      una garantía de generalización', LX, 808, tm, { size: 30, weight: 600, fill: HUE.hyp, font: UI });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [100, 580, 1060], W = 440, HH = 350, BY = 250, OX = 90, OY = 290, PW = 300, PH = 180, VM = .35;
+    T(p, 'Tres regrets distintos', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Cada gráfica muestra R_{T}/T al crecer T, de 10 a 1 000.', 100, 208, null, { size: 26, fill: COL.dim, font: UI });
+    S.q2 = aQ2.map(([f, fn], j) => {
+      const g = G(p, { x: BX[j], y: BY }); let d = '';
+      mk('rect', { x: 0, y: 0, width: W, height: HH, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+      aTx(g, f, W / 2, 62, null, { size: 32, fill: HUE.hyp, weight: 600, anchor: 'middle' });
+      mk('path', { d: `M${OX} ${OY - PH - 10}V${OY}H${OX + PW + 10}M${OX - 8} ${OY - .1 / VM * PH}h8`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+      T(g, '0.1', { x: OX - 14, y: OY - .1 / VM * PH + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); T(g, '0', { x: OX - 14, y: OY + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH });
+      T(g, '10', { x: OX, y: OY + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); T(g, '1 000', { x: OX + PW, y: OY + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH });
+      aTx(g, 'R_{T}/T', OX + 110, OY - PH + 18, null, { size: 22, fill: HUE.cx });
+      for (let k = 0; k <= 120; k++) { const tt = 10 + 990 * k / 120; d += (k ? 'L' : 'M') + (OX + PW * k / 120).toFixed(1) + ' ' + (OY - Math.min(VM, fn(tt)) / VM * PH).toFixed(1); }
+      mk('path', { d, stroke: HUE.cx, 'stroke-width': 4, fill: 'none', 'stroke-linejoin': 'round' }, g);
+      return g;
+    });
+    S.q2B = BX.map(x => [x, BY, W, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-regret', prompt: ['¿Con cuál regret la cota (8.28) no se acerca al ínfimo al crecer T?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'regret ' + (j + 1) })), aQ2r,
+      'Dividido por T, vale 1/10 para todo T: un regret lineal no da garantía.',
+      () => 'Ese regret es sublineal: dividido por T, tiende a cero.'),
+  }], done) }],
+
+  ['juego', 'Juego de suma cero', (m) => {
+    const p = panel(0), tma = m('mat'), tp1 = m('pure'), tp2 = m('pure2'), tmx = m('mix'), tv = m('vn'), tl = m('val'), RX = 860, MXX = 760, MNY = 590;
+    const rmax = aGM.map(r => Math.max(...r)), cmin = aTr(aGM).map(c => Math.min(...c)), ir = rmax.indexOf(aPureMin), jc = cmin.indexOf(aPureMax);
+    aNote(p, 'matriz ilustrativa · valor y estrategias óptimas calculados en la página (programa lineal)');
+    aTitle(p, 'Juego de suma cero: la fila paga, la columna cobra');
+    const mt = aMatG(p, 440, 350, 180, 120, { size: 38 });
+    aTx(p, 'M_{ij}: lo que paga la fila i contra la columna j', 90, 730, tma + 5, { size: 22, fill: COL.dim, font: UI });
+    // jugadas puras: lo peor de cada fila, lo peor (para la columna) de cada columna
+    const g1 = G(p, { o: 0 }); show(g1, tp1 + .4); hide(g1, tmx - .4, .4);
+    aTx(g1, 'máx.', MXX, mt.CY(0) - 78, null, { size: 22, fill: COL.dim, font: UI, anchor: 'middle' });
+    rmax.forEach((v, i) => aTx(g1, aNum(v), MXX, mt.CY(i) + 11, null, { size: 32, weight: 600, anchor: 'middle', fill: i === ir ? HUE.hyp : COL.dim }));
+    const r1 = mt.ring(ir, aGM[ir].indexOf(aPureMin), HUE.hyp); show(r1, tp1 + 3, .4); hide(r1, tmx - .4, .4);
+    const g2 = G(p, { o: 0 }); show(g2, tp2 + .4); hide(g2, tmx - .4, .4);
+    aTx(g2, 'mín.', mt.CX(0) - mt.cw / 2 - 20, MNY, null, { size: 22, fill: COL.dim, font: UI, anchor: 'end' });
+    cmin.forEach((v, j) => aTx(g2, aNum(v), mt.CX(j), MNY + 3, null, { size: 32, weight: 600, anchor: 'middle', fill: j === jc ? COL.chalk : COL.dim }));
+    const r2 = mt.ring(aTr(aGM)[jc].indexOf(aPureMax), jc, COL.chalk); show(r2, tp2 + 2.4, .4); hide(r2, tmx - .4, .4);
+    // estrategias mixtas: p sobre las filas, q sobre las columnas
+    aGM.forEach((_, i) => aRow(p, [[`p_{${i + 1}}`, HUE.hyp], [`  =  ${aFr(aRowG.q[i])}`, HUE.hyp]], 90, mt.CY(i) + 10, [tmx, tl + 5], { size: 28, weight: 600 }));
+    aGM[0].forEach((_, j) => aRow(p, [[`q_{${j + 1}}`], [`  =  ${aFr(aColG.q[j])}`]], mt.CX(j) - 58, 226, [tmx, tl + 7], { size: 28, weight: 600 }));
+    const g3 = G(p, { o: 0 }); show(g3, tl + 5);
+    aTx(g3, 'con esa p:', mt.CX(0) - mt.cw / 2 - 20, MNY, null, { size: 22, fill: HUE.hyp, font: UI, anchor: 'end' });
+    aGM[0].forEach((_, j) => aTx(g3, aNum(aPay(aGM, aRowG.q, aGM[0].map((_, k) => k === j ? 1 : 0))), mt.CX(j), MNY + 3, null, { size: 32, weight: 600, anchor: 'middle', fill: HUE.hyp }));
+    aTx(g3, 'pérdida esperada contra cada columna', 90, MNY + 56, null, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['la fila se muestra primero:      ', COL.dim, UI, 24], ['min_{i} max_{j} M_{ij}  =  '], [aNum(aPureMin), HUE.hyp]], RX, 262, [tp1, tp1 + .4, tp1 + 5], { size: 28, weight: 600 });
+    aRow(p, [['la columna, primero:      ', COL.dim, UI, 24], ['max_{j} min_{i} M_{ij}  =  '], [aNum(aPureMax)]], RX, 332, [tp2, tp2 + .4, tp2 + 3.6], { size: 28, weight: 600 });
+    aRow(p, [['estrategias mixtas p y q:  pérdida esperada      ', COL.dim, UI, 24], ['p^{⊤}Mq']], RX, 424, tmx, { size: 30, weight: 600 });
+    aRow(p, [['Teorema 8.16 (von Neumann)', HUE.hyp, UI], ['      (8.29)', COL.dim, UI, 22]], RX, 520, tv, { size: 26, weight: 600 });
+    aTx(p, 'min_{p} max_{q} p^{⊤}Mq   =   max_{q} min_{p} p^{⊤}Mq', RX, 584, tv + 6.5, { size: 34, weight: 600 });
+    aRow(p, [['valor del juego:      ', COL.dim, UI, 24], [aFr(aVal), HUE.hyp]], RX, 680, tl, { size: 34, weight: 700 });
+  }],
+
+  ['prueba', 'La prueba, con un algoritmo sin regret', (m) => {
+    const p = panel(0), tg = m('alg'), tb = m('br'), tr = m('run'), tu = m('up'), tlo = m('low'), ts = m('sq'), tn = m('num'), RX = 840, PL = 130, QH = 80, BR = 250, QY = 440;
+    aNote(p, `pesos exponenciales con η = ${aF2(aEtaOpt(aGM.length, aGT))} (teorema 8.6, T = ${aGT}) · si las columnas empatan, responde la primera`);
+    aTitle(p, 'La prueba: un algoritmo sin regret contra la mejor respuesta');
+    const mt = aMatG(p, 420, 300, 140, 84, { size: 30 });
+    // p_t: barras ámbar a la izquierda de las filas (llena = ronda en curso; contorno = promedio). Promedio de q_t: barras blancas bajo las columnas.
+    const gp = G(p, { o: 0 }); show(gp, tg + 4);
+    const pb = aGM.map((_, i) => mk('rect', { y: mt.CY(i) - 15, height: 30, fill: HUE.hyp }, gp)), pa = aGM.map((_, i) => put(mk('rect', { y: mt.CY(i) - 21, height: 42, fill: 'none', stroke: COL.chalk, 'stroke-width': 2.5 }, gp), { o: 0 }));
+    mk('path', { d: `M${BR} ${mt.CY(0) - 34}V${mt.CY(aGM.length - 1) + 34}`, stroke: COL.faint, 'stroke-width': 2 }, gp);
+    const gq = G(p, { o: 0 }); show(gq, tb + 1.6);
+    mk('path', { d: `M${mt.CX(0) - 60} ${QY}H${mt.CX(aGM[0].length - 1) + 60}`, stroke: COL.faint, 'stroke-width': 2 }, gq);
+    const qb = aGM[0].map((_, j) => mk('rect', { x: mt.CX(j) - 26, y: QY, width: 52, height: 0, fill: COL.chalk }, gq));
+    const cr = put(mk('rect', { x: -mt.cw / 2 + 4, y: mt.CY(0) - mt.chh / 2 + 4, width: mt.cw - 8, height: mt.chh * aGM.length - 8, fill: 'none', stroke: COL.chalk, 'stroke-width': 5 }, gq), { o: 0 });
+    const ch = aPlot(p, RX + 70, 470, 550, 250, { t0: tr - .6, tmax: aGT, v0: .2, v1: .7, yt: [.3, .4, .5, .6, .7].map(v => [v, aNum(v)]), xt: [0, 50, 100, 150, 200], xlab: 'rondas t' });
+    const A = [null, ...aHg.map(q => q.avg)], Bl = [null, ...aHg.map(q => q.low)], la = ch.live(A, HUE.hyp, { from: 1 }), lb = ch.live(Bl, COL.chalk, { from: 1 });
+    ch.hline(aVal, COL.dim, tr - .6);
+    const info = aTx(p, '', 100, 706, tb + 1.6, { size: 24, font: UI, weight: 600 }), avs = aTx(p, '', 100, 750, tr, { size: 24, font: UI, fill: COL.dim });
+    const setG = r => {
+      const rr = Math.max(0, Math.min(aGT, r)), k = Math.min(aGT - 1, Math.floor(rr)), f = rr >= aGT ? 1 : rr - k, q = aHg[k], nx = aHg[Math.min(aGT - 1, k + 1)], u = rr >= aGT ? 0 : Math.max(0, Math.min(1, (f - .6) / .4)), n = rr >= aGT ? aGT : k + (f > .6 ? 1 : 0), a = n ? aHg[n - 1] : null;
+      pb.forEach((b, i) => { const v = (q.p[i] + (nx.p[i] - q.p[i]) * u) * PL; b.setAttribute('x', (BR - v).toFixed(1)); b.setAttribute('width', v.toFixed(1)); });
+      pa.forEach((b, i) => { const v = (a ? a.pbar[i] : 0) * PL; b.setAttribute('x', (BR - v).toFixed(1)); b.setAttribute('width', v.toFixed(1)); put(b, { o: a ? 1 : 0 }); });
+      qb.forEach((b, j) => b.setAttribute('height', ((a ? a.qbar[j] : 0) * QH).toFixed(1)));
+      put(cr, { x: mt.CX(q.j), o: rr < aGT && f > .25 ? 1 : 0 });
+      la(n); lb(n);
+      info._set(`ronda ${k + 1} de ${aGT}:    p_{t} = (${q.p.map(aF2).join(', ')}),    responde la columna ${q.j + 1}`);
+      avs._set(a ? `promedios:    p = (${a.pbar.map(aF2).join(', ')})      q = (${a.qbar.map(aF2).join(', ')})` : '');
+    };
+    setG(0);
+    prog(q => setG(q), tb + .4, 2.6, lin);                         // ronda 1: la columna responde y los pesos cambian
+    prog(q => setG(1 + 9 * q), tr, tu - tr - .4, lin);
+    prog(q => setG(10 + (aGT - 10) * q), tu, ts - tu, lin);
+    aTx(p, 'fila: pesos exponenciales (sin regret), p_{t}', 100, 586, tg + 4, { size: 24, font: UI, weight: 600, fill: HUE.hyp });
+    aTx(p, 'columna: la mejor respuesta,  q_{t} = argmax_{q} p_{t}^{⊤}Mq', 100, 630, tb, { size: 24, font: UI, weight: 600 });
+    aTx(p, 'barra ámbar: p_{t}; contorno: su promedio  ·  barras blancas: promedio de las q_{t}', 100, 812, tr, { size: 22, font: UI, fill: COL.dim });
+    aHalo(aTx(p, 'pérdida promedio del algoritmo', ch.CX(30), ch.VY(.62), tu, { size: 22, fill: HUE.hyp, font: UI, weight: 600 }));
+    aHalo(aTx(p, 'lo mejor contra la columna promedio', ch.CX(30), ch.VY(.31), tlo, { size: 22, font: UI, weight: 600 }));
+    aHalo(aTx(p, `valor del juego: ${aNum(aVal)}`, ch.CX(aGT), ch.VY(aVal) + 48, ts, { size: 22, fill: COL.dim, font: UI, weight: 600, anchor: 'end' }));
+    aTx(p, aF2(aHend.avg), ch.CX(aGT) + 14, ch.VY(aHend.avg) - 8, tn, { size: 24, fill: HUE.hyp, weight: 700 });
+    aTx(p, aF2(aHend.low), ch.CX(aGT) + 14, ch.VY(aHend.low) + 24, tn + 2, { size: 24, weight: 700 });
+    aRow(p, [['min_{p} max_{q} p^{⊤}Mq'], ['   ≤   '], ['(1/T) ∑_{t} p_{t}^{⊤}Mq_{t}', HUE.hyp]], RX, 590, tu + 1, { size: 28, weight: 600 });
+    aRow(p, [['(1/T) ∑_{t} p_{t}^{⊤}Mq_{t}', HUE.hyp], ['   ≤   '], ['max_{q} min_{p} p^{⊤}Mq'], ['  +  R_{T}/T', HUE.cx]], RX, 656, [tlo + 1, tlo + 1, tlo + 9, tlo + 3], { size: 28, weight: 600 });
+    aTx(p, 'R_{T}/T → 0      ⟹      min max  ≤  max min', RX, 748, ts + 5.5, { size: 32, weight: 600, fill: HUE.hyp });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Muestra i.i.d.:  el promedio de los errores R(h_{t}) queda cerca de la pérdida on-line promedio.', 'w1'], ['Pérdida convexa:  la hipótesis promedio hereda esa cota.', 'w2'],
+      ['Su error  ≤  ínfimo sobre H  +  R_{T}/T  +  un término de confianza.', 'w3'], ['Regret sublineal  ⟹  teorema minimax:  min max = max min.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['La conversión de on-line a batch supone una muestra i.i.d. de una distribución fija.'], ans: ['v'], why: 'Sin esa distribución no hay error de generalización que acotar.' },
+      { parts: ['El lema 8.14 exige que la pérdida sea convexa.'], ans: ['f'], why: 'Solo pide que sea acotada; la convexidad hace falta para promediar.' },
+      { parts: ['Con regret sublineal, el error de la hipótesis promedio se acerca al ínfimo sobre H.'], ans: ['v'], why: 'El regret sobre T y el término de confianza tienden a cero.' },
+      { parts: ['Con estrategias mixtas, en un juego de suma cero conviene jugar segundo.'], ans: ['f'], why: 'Por el teorema minimax, el orden no importa: min max = max min.' },
+      { parts: ['En la prueba, la pérdida promedio del algoritmo queda por debajo del valor del juego.'], ans: ['f'], why: 'Queda por encima: la columna responde lo peor en cada ronda.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

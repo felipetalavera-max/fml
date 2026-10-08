@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qué es aprender de datos</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 1, title: 'Qué es aprender de datos', minutes: 6, language: 'es', next: '../ch02/' };
+
+/* ---------- helpers de dibujo del capítulo ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, none: COL.dim, hyp: COL.task };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+const aBox = (p, x, y, w, h, stroke, o = 1, extra = {}) => put(mk('rect', { x, y, width: w, height: h, rx: 14, fill: COL.board, stroke, 'stroke-width': 3, ...extra }, p), { o });
+const aArrow = (p, x1, y1, x2, y2, col = COL.dim) => {
+  const a = Math.atan2(y2 - y1, x2 - x1), hd = d => `M${x2} ${y2}L${x2 - 18 * Math.cos(a + d)} ${y2 - 18 * Math.sin(a + d)}`;
+  return path(p, `M${x1} ${y1}L${x2} ${y2}${hd(.45)}${hd(-.45)}`, { stroke: col, 'stroke-width': 3 }, { d: 0 });
+};
+
+// Plano de características. Cada punto es [u, v, etiqueta]: u corre a lo largo de la recta verdadera y v es la
+// distancia a ella; +1 = spam, -1 = no spam. Los puntos son ilustrativos; los conteos salen de aErr.
+const TRAIN = [[-210,50,-1],[-70,-50,1],[80,55,-1],[220,-45,1],[90,-130,-1],[-150,-60,-1],[-10,60,1],[-130,-130,-1],[-10,-180,-1],[80,-80,-1],[260,-90,-1],[-20,-130,-1],[-220,-140,-1],[150,170,1],[-80,140,1],[30,160,1],[-240,100,1],[-180,110,1],[240,180,1],[-20,150,1]];
+const TEST = [[-195,30,1],[-80,-35,-1],[95,40,1],[205,-30,-1],[-140,70,-1],[150,-80,1],[280,80,1],[0,-60,-1],[-280,-130,-1],[-270,-180,-1],[120,100,1],[-50,-160,-1],[60,-170,-1],[270,-160,-1],[260,130,1],[-130,160,1],[50,100,1],[230,100,1],[-230,-60,-1],[90,180,1]];
+const SPIKES = [[-210, 120], [-70, -120], [80, 120], [220, -120]], aSW = 55;   // picos del zigzag: [u, altura]
+const aCS = Math.cos(25 * Math.PI / 180), aSN = Math.sin(25 * Math.PI / 180);
+const aL = (u, v) => [u * aCS + v * aSN, u * aSN - v * aCS];                  // (u, v) -> pantalla, girado 25°
+const aZ = u => SPIKES.reduce((z, [ui, h]) => z + h * Math.max(0, 1 - Math.abs(u - ui) / aSW), 0);
+const aF = { line: (u, v) => v > 0 ? 1 : -1, zig: (u, v) => v > aZ(u) ? 1 : -1, none: () => -1 };
+const aErr = (kind, pts) => pts.filter(([u, v, y]) => aF[kind](u, v) !== y);
+const aFill = y => y > 0 ? HUE.pos : y < 0 ? HUE.neg : HUE.none;
+const aDot = (p, x, y, lab, o = 0, r = 11) => put(mk('circle', { r, fill: aFill(lab) }, p), { x, y, o });
+const aAdd = (g, pts, o = 0) => pts.map(pt => { const [x, y] = aL(pt[0], pt[1]), c = aDot(g, x, y, pt[2], o); c._p = pt; return c; });
+const aCloud = (p, x, y, s, pts, o = 0) => { const g = G(p, { x, y, s }); g._dots = aAdd(g, pts, o); return g; };
+const aBound = (g, kind) => {
+  const pts = kind === 'line' ? [[-320, 0], [320, 0]] : [[-320, 0], ...SPIKES.flatMap(([u, h]) => [[u - aSW, 0], [u, h], [u + aSW, 0]]), [320, 0]];
+  return path(g, 'M' + pts.map(([u, v]) => aL(u, v).map(n => n.toFixed(1)).join(' ')).join('L'), { stroke: HUE.hyp, 'stroke-width': 4, 'stroke-linejoin': 'round', fill: 'none' }, { d: 0 });
+};
+const aRings = (g, kind, pts, t0) => aErr(kind, pts).map((pt, i) => {
+  const [x, y] = aL(pt[0], pt[1]), c = put(mk('circle', { r: 20, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, g), { x, y, o: 0 });
+  show(c, t0 + i * .12, .25); return c;
+});
+const aN = (kind, pts) => aErr(kind, pts).length;
+
+// Fichas de las cinco tareas: cada dibujo va alrededor de (0,0), dentro de ±110.
+const TASKS = [['Clasificación', ['asignar una categoría', 'a cada elemento']], ['Regresión', ['predecir un', 'valor real']], ['Ranking', ['ordenar según', 'un criterio']],
+  ['Clustering', ['partir en grupos', 'homogéneos']], ['Reducción de dimensión', ['menos dimensiones,', 'mismas propiedades']]];
+const aLine = (g, x1, y1, x2, y2) => path(g, `M${x1} ${y1}L${x2} ${y2}`, { stroke: HUE.hyp, 'stroke-width': 4 });
+const AT = [
+  g => { aLine(g, -105, 45, 105, -45); [[-50, -60, 1], [10, -85, 1], [60, -70, 1], [-60, 70, -1], [0, 55, -1], [70, 30, -1]].forEach(([x, y, l]) => aDot(g, x, y, l, 1, 10)); },
+  g => { aLine(g, -105, 65, 105, -70); [[-90, 60], [-55, 30], [-20, 25], [15, -10], [50, -20], [85, -65]].forEach(([x, y]) => put(mk('circle', { r: 9, fill: COL.chalk }, g), { x, y })); },
+  g => [150, 115, 80, 45].forEach((w, i) => { mk('rect', { x: -60, y: -92 + i * 48, width: w, height: 28, rx: 6, fill: COL.chalk }, g); T(g, String(i + 1), { x: -88, y: -69 + i * 48, size: 24, fill: COL.dim, anchor: 'middle' }); }),
+  g => [[-60, -60], [55, -40], [-5, 65]].forEach(([cx, cy]) => { mk('circle', { cx, cy, r: 40, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-dasharray': '8 7' }, g); [[-14, -8], [14, -6], [0, 14]].forEach(([dx, dy]) => aDot(g, cx + dx, cy + dy, 0, 1, 9)); }),
+  (g, t) => { aLine(g, -100, 70, 100, -70);
+    [[-85, 30], [-50, -28], [-15, 22], [20, -30], [55, 26], [88, -20]].forEach(([a, b]) => {
+      const c = put(mk('circle', { r: 9, fill: COL.chalk }, g), { x: a * .819 + b * .574, y: -a * .574 + b * .819 });
+      if (t != null) tw(c, { x: a * .819, y: -a * .574 }, t, .8);
+    }); },
+];
+const aTile = (p, i, t) => {
+  const g = G(p, { x: 180 + i * 310, y: 330, o: 0 });
+  aBox(g, -135, -150, 270, 300, COL.faint);
+  g._in = G(g, { o: 0 });
+  T(g._in, TASKS[i][0], { y: 200, size: 26, anchor: 'middle', weight: 600 });
+  TASKS[i][1].forEach((s, k) => T(g._in, s, { y: 238 + k * 28, size: 22, fill: COL.dim, anchor: 'middle' }));
+  AT[i](g._in, t); return g;
+};
+
+// Reparto de 20 ejemplos en entrenamiento (12), validación (4) y prueba (4).
+const LAB = [1, -1, -1, 1, 1, -1, 1, -1, -1, 1, -1, 1, 1, -1, -1, 1, -1, 1, 1, -1];
+const PERM = [3, 14, 7, 0, 18, 10, 5, 16, 1, 12, 8, 19, 2, 11, 6, 15, 9, 4, 17, 13];   // punto i de la fila -> casilla
+const GROUPS = [['entrenamiento', 160, 280], ['validación', 700, 200], ['prueba', 1200, 200]];
+const aSlot = i => i < 12 ? [190 + (i % 6) * 44, 310 + Math.floor(i / 6) * 44] : [(i < 16 ? 778 : 1278) + (i % 2) * 44, 310 + Math.floor((i % 4) / 2) * 44];
+const aGroupBox = (p, k) => { const [name, x, w] = GROUPS[k], g = G(p, { o: 0 }); aBox(g, x, 270, w, 124, COL.dim); T(g, name, { x: x + w / 2, y: 250, size: 26, anchor: 'middle', weight: 600 }); return g; };
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 1', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Qué es aprender de datos', { x: 800, y: 430, size: 88, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'De ejemplos conocidos a predicciones sobre casos nunca vistos.', 800, 600, m('sub'), { size: 34, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['ejemplos', 'Ejemplos, características, etiquetas', (m) => {
+    const p = panel(0), card = G(p, { o: 0 });
+    aBox(card, 90, 210, 420, 250, COL.chalk);
+    T(card, 'De: promo@oferta.example', { x: 114, y: 256, size: 24, fill: COL.dim });
+    T(card, 'GANE dinero YA', { x: 114, y: 308, size: 32, weight: 600 });
+    [0, 1, 2].forEach(i => path(card, `M114 ${352 + i * 32}H${i === 2 ? 330 : 480}`, { stroke: COL.faint, 'stroke-width': 6 }));
+    show(card, .3);
+    text(p, 'ejemplo', 300, 506, m('mail'), { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'cuántas palabras sospechosas', 300, 580, m('feat', .8), { size: 26, anchor: 'middle' });
+    text(p, 'cuántos enlaces', 300, 620, m('feat', 2.6), { size: 26, anchor: 'middle' });
+    text(p, 'características', 300, 672, m('feat'), { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+    const ax = G(p, { o: 0 });
+    path(ax, 'M760 710H1450M760 710V150', { stroke: COL.dim, 'stroke-width': 3 });
+    T(ax, 'palabras sospechosas →', { x: 1450, y: 748, size: 24, fill: COL.dim, anchor: 'end' });
+    T(ax, '↑ enlaces', { x: 772, y: 138, size: 24, fill: COL.dim });
+    show(ax, m('dot', -.6));
+    const cl = aCloud(p, 1100, 425, .9, TRAIN), ME = 13, [mx, my] = aL(TRAIN[ME][0], TRAIN[ME][1]);
+    const me = aDot(p, 300, 335, 0);
+    show(me, m('dot', -.2), .2); tw(me, { x: 1100 + .9 * mx, y: 425 + .9 * my }, m('dot'), 1);
+    tw(me, { c_fill: HUE.pos }, m('label', 1.6), .3); pulse(me, m('label', 1.6));
+    const lg = G(p, { o: 0 }); mk('circle', { cx: 1150, cy: 130, r: 10, fill: HUE.pos }, lg); T(lg, 'spam', { x: 1170, y: 138, size: 24, fill: HUE.pos });
+    const lg2 = G(p, { o: 0 }); mk('circle', { cx: 1270, cy: 130, r: 10, fill: HUE.neg }, lg2); T(lg2, 'no spam', { x: 1290, y: 138, size: 24, fill: HUE.neg });
+    show(lg, m('label', 1.6)); show(lg2, m('many', .4));
+    text(p, 'etiqueta', 1210, 96, m('label', 1), { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+    cl._dots.forEach((c, i) => { if (i !== ME) show(c, m('many', .2 + i * .07), .25); });
+    text(p, 'muestra de entrenamiento: 20 ejemplos etiquetados', 1105, 800, m('sample'), { size: 28, anchor: 'middle' });
+    const [nx, ny] = aL(TEST[10][0], TEST[10][1]), nu = aDot(p, 1100 + .9 * nx, 425 + .9 * ny, 0);
+    show(nu, m('new', 1.8), .25); pulse(nu, m('new', 2));
+    text(p, '?', 1100 + .9 * nx + 18, 425 + .9 * ny + 12, m('new', 2), { size: 36, weight: 700 });
+    text(p, 'correo nuevo: ¿spam o no?', 1105, 850, m('new', 2.2), { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['tareas', 'Cinco tareas estándar', (m) => {
+    const p = panel(0);
+    TASKS.forEach((_, i) => { const g = aTile(p, i, i === 4 ? m('c5', 3.4) : null); show(g, .2 + i * .08); show(g._in, m('c' + (i + 1))); });
+    text(p, 'El objetivo común: predicciones precisas sobre elementos no vistos.', 800, 800, m('goal'), { size: 32, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    S.q1 = TASKS.map((_, i) => { const g = aTile(p, i); put(g._in, { o: 1 }); show(g, .2); return g; });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-tarea', prompt: ['Predecir el valor de una acción mañana. ¿Qué tarea es? Elegirla en el dibujo.'],
+    build: pickEls(S.q1.map((el, i) => ({ el, box: [45 + i * 310, 180, 270, 430], label: TASKS[i][0] })), 1,
+      'Se predice un valor real, y el error depende de qué tan lejos queda la predicción: es regresión.',
+      i => ['Clasificar asigna una categoría; aquí se pide un número.', '', 'Ordenar acciones sería ranking; aquí se pide el valor de una sola.', 'El clustering agrupa elementos; no predice un valor.', 'Reducir dimensión cambia la representación de los datos; no predice un valor.'][i]),
+  }], done) }],
+
+  ['etapas', 'Las etapas del aprendizaje', (m) => {
+    const p = panel(0), ts = m('split');
+    [0, 1, 2].forEach(g => show(aGroupBox(p, g), ts + 1.6 + g * .7));   // antes que los puntos: las cajas tienen relleno
+    const dots = LAB.map((l, i) => { const c = aDot(p, 382 + i * 44, 170, l); show(c, .2 + i * .03, .25); return c; });
+    const head = text(p, 'datos etiquetados', 800, 120, m('data'), { size: 28, fill: COL.dim, anchor: 'middle' });
+    const k = s => s < 12 ? 0 : s < 16 ? 1 : 2;
+    dots.forEach((c, i) => { const [x, y] = aSlot(PERM[i]); tw(c, { x, y }, ts + 1.7 + k(PERM[i]) * .7 + (i % 5) * .05, .8); });
+    hide(head, ts + 1.4, .4);
+    const al = G(p, { o: 0 });
+    aBox(al, 180, 480, 240, 100, COL.chalk); T(al, 'algoritmo A', { x: 300, y: 540, size: 28, anchor: 'middle', weight: 600 });
+    draw(aArrow(p, 300, 400, 300, 474), m('algo'), .4); show(al, m('algo', .2));
+    text(p, 'hiperparámetro Θ', 300, 622, m('hp', .8), { size: 24, fill: COL.dim, anchor: 'middle' });
+    draw(aArrow(p, 426, 530, 644, 544), m('hyp', -.2), .5);
+    const chips = [2, 0, 1].map((e, i) => {
+      const g = G(p, { o: 0 });
+      g._b = aBox(g, 650, 446 + i * 70, 300, 56, COL.dim);
+      T(g, `h con Θ = ${i + 1}`, { x: 670, y: 483 + i * 70, size: 22 });
+      g._e = T(g, e === 1 ? '1 error' : `${e} errores`, { x: 930, y: 483 + i * 70, size: 22, fill: COL.dim, anchor: 'end', o: 0 });
+      show(g, m('hyp', 1 + i * .35)); return g;
+    });
+    draw(aArrow(p, 800, 398, 800, 440), m('best'), .3);
+    chips.forEach((g, i) => show(g._e, m('best', .4 + i * .25), .3));
+    text(p, 'errores en validación', 800, 690, m('best', .4), { size: 22, fill: COL.dim, anchor: 'middle' });
+    tw(chips[1]._b, { c_stroke: COL.good }, m('best', 1.6), .3);
+    text(p, 'Θ₀', 966, 600, m('best', 1.6), { size: 30, fill: COL.good, weight: 700 });
+    draw(aArrow(p, 956, 530, 1196, 404, COL.good), m('test'), .6);
+    const [ex, ey] = aSlot(16);
+    show(put(mk('circle', { r: 19, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, p), { x: ex, y: ey, o: 0 }), m('loss', 1.4), .25);
+    text(p, 'pérdida cero-uno', 1300, 470, m('loss'), { size: 26, anchor: 'middle', weight: 600 });
+    text(p, '1 si la predicción falla, 0 si acierta', 1300, 506, m('loss', .3), { size: 22, fill: COL.dim, anchor: 'middle' });
+    text(p, 'error de prueba: 1 de 4', 1300, 566, m('loss', 1.6), { size: 28, fill: COL.bad, anchor: 'middle', weight: 600 });
+    text(p, 'El desempeño se mide con el error de prueba, no con el de entrenamiento.', 800, 800, m('rule'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0);
+    S.q2 = [0, 1, 2].map(g => { const b = aGroupBox(p, g); show(b, .2); return b; });
+    LAB.forEach((l, s) => { const [x, y] = aSlot(s); aDot(S.q2[s < 12 ? 0 : s < 16 ? 1 : 2], x, y, l, 1); });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-prueba', prompt: ['¿Con qué muestra se mide el desempeño final del algoritmo? Elegirla en el dibujo.'],
+    build: pickEls(S.q2.map((el, i) => ({ el, box: [GROUPS[i][1] - 10, 222, GROUPS[i][2] + 20, 184], label: GROUPS[i][0] })), 2,
+      'La muestra de prueba se mantiene aparte durante todo el aprendizaje; por eso su error es una medida honesta.',
+      i => i === 0 ? 'El algoritmo ya vio esos ejemplos al entrenar; su error ahí resulta optimista.' : 'La validación ya se usó para elegir los hiperparámetros.'),
+  }], done) }],
+
+  ['escenarios', 'Escenarios de aprendizaje', (m) => {
+    const p = panel(0), cl = aCloud(p, 470, 440, .9, TRAIN), D = cl._dots;
+    D.forEach((c, i) => show(c, .2 + i * .02, .25));
+    const NAMES = [['sup', 'Supervisado', 'todos los ejemplos traen etiqueta'], ['unsup', 'No supervisado', 'ninguna etiqueta'], ['semi', 'Semisupervisado', 'pocas etiquetas, muchos ejemplos sin etiquetar'],
+      ['trans', 'Transductivo', 'solo interesan unos puntos de prueba ya conocidos'], ['active', 'Activo', 'el aprendiz elige qué etiquetas pedir'],
+      ['online', 'On-line', 'por rondas: predecir, ver la etiqueta, pagar la pérdida'], ['rl', 'Por refuerzo', 'actuar sobre el entorno y recibir recompensas']];
+    let prev = null;
+    NAMES.forEach(([k, n, d], i) => {
+      const g = G(p, { x: 900, y: 150 + i * 96, o: 0 });
+      T(g, n, { size: 32, weight: 600, fill: COL.task }); T(g, d, { y: 36, size: 22, fill: COL.dim });
+      show(g, m(k)); if (prev) tw(prev, { o: .4 }, m(k), .4); prev = g;
+    });
+    D.forEach((c, i) => tw(c, { c_fill: HUE.none }, m('unsup', .2 + i * .02), .3));
+    [6, 8, 13, 5].forEach((i, j) => tw(D[i], { c_fill: aFill(TRAIN[i][2]) }, m('semi', .3 + j * .15), .3));
+    const rings = [9, 15, 17].map((i, j) => {
+      const [x, y] = aL(TRAIN[i][0], TRAIN[i][1]), r = put(mk('circle', { r: 20, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, cl), { x, y, o: 0 });
+      show(r, m('trans', 1.6 + j * .15), .25); hide(r, m('active', -.2), .3); return r;
+    });
+    const [qx, qy] = aL(TRAIN[10][0], TRAIN[10][1]), q = T(cl, '?', { x: qx + 18, y: qy + 12, size: 38, weight: 700, o: 0 });
+    show(q, m('active', .6), .25); pulse(D[10], m('active', .6));
+    tw(D[10], { c_fill: aFill(TRAIN[10][2]) }, m('active', 2.2), .3); hide(q, m('active', 2.2), .3);
+    // on-line: la nube se vacía y los ejemplos llegan de a uno
+    const to = m('online');
+    D.forEach(c => hide(c, to, .4));
+    const late = TEST.slice(6, 10), L2 = aAdd(cl, late.map(([u, v]) => [u, v, 0]));
+    L2.forEach((c, i) => { const t = to + 1.6 + i * 1.5; show(c, t, .2); pulse(c, t); tw(c, { c_fill: aFill(late[i][2]) }, t + .8, .25); });
+    // refuerzo: un agente se mueve y recibe recompensas
+    const tr = m('rl'), way = [[300, 560], [470, 400], [640, 520], [560, 300]];
+    L2.forEach(c => hide(c, tr, .4));
+    const ag = put(mk('circle', { r: 15, fill: HUE.hyp }, p), { x: way[0][0], y: way[0][1], o: 0 });
+    show(ag, tr + .4, .3);
+    way.slice(1).forEach(([x, y], i) => {
+      const t = tr + 1.4 + i * 1.2, r = text(p, '+1', x + 24, y - 18, t + .7, { size: 30, fill: COL.good, weight: 700 });
+      draw(path(p, `M${way[i][0]} ${way[i][1]}L${x} ${y}`, { stroke: COL.faint, 'stroke-width': 3, 'stroke-dasharray': '6 8' }, { d: 0 }), t, .7);
+      tw(ag, { x, y }, t, .7);
+    });
+  }],
+
+  ['generalizar', 'Memorizar no es generalizar', (m) => {
+    const p = panel(0), A = aCloud(p, 410, 400, .9, TRAIN), B = aCloud(p, 1190, 400, .9, TRAIN), tn = m('new');
+    [A, B].forEach(c => c._dots.forEach((d, i) => show(d, .2 + i * .02, .25)));
+    text(p, 'datos ilustrativos', 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+    text(p, 'Familia compleja: zigzag', 410, 96, m('zig', -.3), { anchor: 'middle', weight: 600 });
+    draw(aBound(A, 'zig'), m('zig'), 1.6);
+    text(p, `entrenamiento: ${aN('zig', TRAIN)} errores de ${TRAIN.length}`, 410, 730, m('z0'), { size: 28, fill: COL.good, anchor: 'middle' });
+    text(p, 'Familia simple: recta', 1190, 96, m('lin', -.3), { anchor: 'middle', weight: 600 });
+    draw(aBound(B, 'line'), m('lin'), .8);
+    const r1 = aRings(B, 'line', TRAIN, m('l4'));
+    text(p, `entrenamiento: ${aN('line', TRAIN)} errores de ${TRAIN.length}`, 1190, 730, m('l4', .3), { size: 28, fill: COL.bad, anchor: 'middle' });
+    // llegan los ejemplos nuevos
+    [A, B].forEach(c => { c._dots.forEach(d => tw(d, { o: .22 }, tn, .5)); aAdd(c, TEST).forEach((d, i) => show(d, tn + .3 + i * .04, .25)); });
+    r1.forEach(r => hide(r, tn, .3));
+    aRings(A, 'zig', TEST, m('zt'));
+    text(p, `ejemplos nuevos: ${aN('zig', TEST)} errores de ${TEST.length}`, 410, 780, m('zt', .4), { size: 28, fill: COL.bad, anchor: 'middle', weight: 600 });
+    aRings(B, 'line', TEST, m('lt'));
+    text(p, `ejemplos nuevos: ${aN('line', TEST)} errores de ${TEST.length}`, 1190, 780, m('lt', .4), { size: 28, fill: COL.good, anchor: 'middle', weight: 600 });
+    text(p, 'Memorizar la muestra no es generalizar.', 800, 850, m('moral', 1.4), { size: 32, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['equilibrio', 'Ni muy simple ni muy compleja', (m) => {
+    const p = panel(0);
+    [['none', 'Demasiado simple', 'responde siempre «no spam»', 'subajuste (underfitting)', COL.bad, 'simple'], ['line', 'Equilibrio', 'una recta', 'generaliza mejor', COL.good, 'mid'],
+      ['zig', 'Demasiado compleja', 'un zigzag', 'sobreajuste (overfitting)', COL.bad, 'complex']].forEach(([k, title, sub, tag, col, mark], i) => {
+      const x = 290 + i * 510, c = aCloud(p, x, 335, .6, TRAIN), t0 = m(mark);
+      c._dots.forEach((d, j) => show(d, .2 + j * .01, .25));
+      text(p, title, x, 92, t0, { anchor: 'middle', weight: 600 }); text(p, sub, x, 126, t0, { size: 22, fill: COL.dim, anchor: 'middle' });
+      if (k !== 'none') draw(aBound(c, k), t0, .9);
+      text(p, `errores en entrenamiento: ${aN(k, TRAIN)} de ${TRAIN.length}`, x, 560, t0 + .8, { size: 24, anchor: 'middle' });
+      text(p, `errores en ejemplos nuevos: ${aN(k, TEST)} de ${TEST.length}`, x, 596, t0 + 1.3, { size: 24, anchor: 'middle' });
+      text(p, tag, x, 652, t0 + 1.9, { size: 28, fill: col, anchor: 'middle', weight: 600 });
+    });
+    text(p, 'Lo que decide: el tamaño de la muestra frente a la complejidad del conjunto de hipótesis H.', 800, 780, m('size'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Aprender: usar ejemplos conocidos para predecir sobre ejemplos nuevos.', 'w1'], ['Entrenar, validar y probar usan muestras separadas.', 'w2'],
+      ['Los escenarios difieren en qué datos se reciben y cuándo.', 'w3'], ['Generalizar no es memorizar la muestra de entrenamiento.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 200, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 200, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 260, size: 32, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-escenario', prompt: ['Para cada situación, ¿qué escenario de aprendizaje es?'],
+    build: grid([
+      { parts: ['Correos, cada uno marcado como spam o no spam'], ans: ['sup'], why: 'Todos los ejemplos de entrenamiento traen etiqueta.' },
+      { parts: ['Agrupar usuarios en comunidades, sin etiquetas'], ans: ['uns'], why: 'El clustering trabaja con datos sin etiquetar.' },
+      { parts: ['Por rondas: predecir, ver la etiqueta, pagar la pérdida'], ans: ['onl'], why: 'En el escenario on-line, entrenamiento y prueba se mezclan ronda a ronda.' },
+      { parts: ['Predecir precios a partir de ventas con precio conocido'], ans: ['sup'], why: 'El precio conocido es la etiqueta: regresión supervisada.' },
+    ], [['sup', 'Supervisado', COL.whole], ['uns', 'No supervisado', COL.irr], ['onl', 'On-line', COL.real]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-general', prompt: ['Una frontera compleja no comete errores en la muestra de entrenamiento. ¿Qué se sabe de su error en ejemplos nuevos?'],
+    build: choice([['Nada seguro: puede haber memorizado la muestra.'], ['Que también será cero.'], ['Que será menor que el de cualquier frontera más simple.']], 0,
+      'Un predictor de una familia muy compleja puede memorizar los datos; el error de entrenamiento no mide la generalización.',
+      [null, 'El zigzag no tenía errores en la muestra y falló en seis de veinte ejemplos nuevos.', 'La recta se equivocaba más en la muestra y menos en los ejemplos nuevos.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

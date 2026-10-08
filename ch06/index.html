@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cotas inferiores</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 6, title: 'Cotas inferiores', minutes: 6, language: 'es', next: '../ch07/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 5) ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, rad: COL.real, low: COL.bad };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R_{D}(h_{S})'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    mk('tspan', { dy: dy - prev, ...(k ? { 'font-size': size * .68 } : {}) }, e).textContent = k ? s.slice(2, -1) : s;
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+const aFmt = v => v.toFixed(2).replace('-', '−');
+const aN = v => String(+v.toFixed(4));                                             // número sin ceros de más
+const aBar = (p, x, y, w, t0, fill = COL.chalk) => { const e = put(mk('rect', { x, y: y - 20, width: 0, height: 22, fill, 'fill-opacity': .8 }, p), {}); tw(e, { a_width: w }, t0, .7, out); return e; };
+const aNote = (p, str) => text(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;                                       // etiqueta 1 = salmón, etiqueta 0 = azul
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aSum = l => l.reduce((s, v) => s + v, 0);
+// Cotas del capítulo.
+const aLow = (d, m) => (d - 1) / (32 * m);                                         // (d − 1)/(32m), teorema 3.20
+const aLowN = (d, m) => Math.sqrt(d / (320 * m));                                  // √(d/(320m)), teorema 3.23
+const aVC = (m, d) => Math.sqrt(2 * d * Math.log(Math.E * m / d) / m);             // √(2d log(em/d)/m), corolario 3.19
+// Caso realizable: la distribución (3.32) sobre d puntos fragmentados, con ε = (d − 1)/(32m) como en la demostración.
+const aD = 9, aM = 20, aEps = aLow(aD, aM), aP0 = 1 - 8 * aEps, aPi = 8 * aEps / (aD - 1), aIdx = Array.from({ length: aD }, (_, i) => i);
+const aS = (() => { const r = aRng(114); return Array.from({ length: aM }, () => { const u = r(); return u < aP0 ? 0 : Math.min(aD - 1, 1 + Math.floor((u - aP0) / aPi)); }); })();   // la muestra: índices de los puntos
+const aF = (() => { const r = aRng(1114); return aIdx.map(() => r() < .5 ? 1 : 0); })();     // la función objetivo: un etiquetado cualquiera (todos están en H)
+const aCnt = aIdx.map(i => aS.filter(v => v === i).length);                        // cuántas veces aparece cada punto
+const aSeen = aIdx.filter(i => i && aCnt[i]), aUn = aIdx.filter(i => i && !aCnt[i]);   // puntos raros vistos y sin ver
+const aExp = .5 * aUn.length * aPi;                                                // error esperado sobre los no vistos, como en (3.33)
+// Dos monedas con P[1] = ½ ± α/2: distribución del número de unos y error de la mejor regla para decidir cuál se tiró.
+const aAl = .2;
+const aBinom = (n, q) => { const o = []; let lc = 0; for (let k = 0; k <= n; k++) { o.push(Math.exp(lc + k * Math.log(q) + (n - k) * Math.log(1 - q))); lc += Math.log(n - k) - Math.log(k + 1); } return o; };
+const aBay = n => { const u = aBinom(n, .5 + aAl / 2), v = aBinom(n, .5 - aAl / 2); return aSum(u.map((x, k) => Math.min(x, v[k]))) / 2; };
+const aNs = [10, 40, 160];
+const aToss = (() => { const r = aRng(22); return [.5 + aAl / 2, .5 - aAl / 2].map(q => Array.from({ length: 10 }, () => r() < q ? 1 : 0)); })();
+// Caso no realizable: la distribución (3.43) sobre d puntos; el voto por mayoría es un algoritmo de ejemplo.
+const aD2 = 8, aM2 = 80, aI2 = Array.from({ length: aD2 }, (_, i) => i);
+const aNR = (() => {
+  const r = aRng(46), sg = aI2.map(() => r() < .5 ? 1 : -1), seq = [];
+  for (let j = 0; j < aM2; j++) { const i = Math.floor(r() * aD2); seq.push([i, r() < .5 + sg[i] * aAl / 2 ? 1 : 0]); }
+  const labs = aI2.map(i => seq.filter(e => e[0] === i).map(e => e[1])), pred = labs.map(l => 2 * aSum(l) > l.length ? 1 : 0), best = sg.map(v => v > 0 ? 1 : 0);
+  return { sg, seq, labs, pred, best, wrong: aI2.filter(i => pred[i] !== best[i]) };
+})();
+const aExc = aAl / aD2 * aNR.wrong.length;                                         // exceso de error, (3.44)
+/* aMATH:end */
+
+const aRX = i => i ? 300 + (i - 1) * 95 : 160, aRY = 520;
+// Punto que puede quedar como «moneda»: círculo con una mitad de otro color (oculta al inicio).
+const aCoinPt = (p, x, y, r, fill = COL.dim) => {
+  const g = G(p, { x, y }), c = mk('circle', { r, fill }, g), h = put(mk('path', { d: `M0 ${-r}A${r} ${r} 0 0 1 0 ${r}Z`, fill: HUE.neg }, g), { o: 0 });
+  return { g, c, h };
+};
+const aCross = (p, x, y, k = 12, o = 0) => put(mk('path', { d: `M${-k} ${-k}L${k} ${k}M${k} ${-k}L${-k} ${k}`, fill: 'none', stroke: COL.bad, 'stroke-width': 5, 'stroke-linecap': 'round' }, p), { x, y, o });
+// Histograma en escalones del número de unos en n tiradas, sobre el eje «fracción de unos».
+const aHist = (g, pmf, x, w, base, h, max, fill) => {
+  const n = pmf.length, bw = w / n; let d = `M${x} ${base}`;
+  pmf.forEach((v, k) => { const y = (base - h * v / max).toFixed(1); d += `L${(x + k * bw).toFixed(1)} ${y}L${(x + (k + 1) * bw).toFixed(1)} ${y}`; });
+  return mk('path', { d: d + `L${x + w} ${base}Z`, fill, 'fill-opacity': .5, stroke: fill, 'stroke-width': 2 }, g);
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 6', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Cotas inferiores', { x: 800, y: 430, size: 72, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'El piso: lo que ningún algoritmo de aprendizaje puede evitar.', 800, 600, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['que', 'Qué afirma una cota inferior', (m) => {
+    const p = panel(0), tu = m('up'), ta = m('all'), tl = m('low'), tg = m('alg'), te = m('exist'), tf = m('floor'), AX = 180, YB = 760, YT = 300, RISE = 170;
+    text(p, 'error de generalización de la hipótesis que devuelve el algoritmo', 100, 130, .3, { size: 22, fill: COL.dim });
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${AX} 180V${YB}H720`, fill: 'none', stroke: COL.dim, 'stroke-width': 3 }, ax);
+    T(ax, '0', { x: AX - 16, y: YB + 8, size: 24, fill: COL.dim, anchor: 'end', font: MATH });
+    aTx(ax, 'R(h_{S})', AX - 14, 204, null, { size: 26, fill: COL.dim, anchor: 'end' });
+    show(ax, .2);
+    // el piso (rojo) sube desde el eje; el techo (violeta) baja; la hipótesis queda entre los dos
+    const sh = mk('rect', { x: AX, y: YB, width: 540, height: 0, fill: HUE.low, 'fill-opacity': .22 }, p);
+    const fl = G(p, { y: YB, o: 0 });
+    mk('path', { d: `M${AX} 0H720`, stroke: HUE.low, 'stroke-width': 5 }, fl);
+    const ce = G(p, { y: YT - 70, o: 0 });
+    mk('path', { d: `M${AX} 0H720`, stroke: HUE.rad, 'stroke-width': 5 }, ce);
+    T(ce, 'techo: garantía para toda D', { x: AX + 20, y: -16, size: 24, fill: HUE.rad, weight: 600 });
+    tw(ce, { o: 1, y: YT }, tu, .9, out);
+    const dot = G(p, { x: 450, y: YB - 60, o: 0 });
+    mk('circle', { r: 16, fill: HUE.hyp }, dot); aTx(dot, 'h_{S}', 28, 9, null, { size: 28, fill: HUE.hyp });
+    show(dot, .5);
+    show(fl, tl, .4);
+    tw(fl, { y: YB - RISE }, te, 1.4); tw(dot, { y: YB - RISE - 40 }, te, 1.4);
+    prog(q => { sh.setAttribute('y', YB - RISE * q); sh.setAttribute('height', RISE * q); }, te, 1.4);
+    text(p, 'piso: ningún algoritmo lo evita', AX + 20, YB - RISE + 36, te + 1.4, { size: 24, fill: HUE.low, weight: 600 });
+    text(p, 'Cota superior · corolario 3.19', 800, 160, tu, { size: 30, fill: HUE.rad, weight: 600 });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + √[ 2d log(em/d) / m ] + √[ log(1/δ) / 2m ]', 800, 214, tu + .8, { size: 26 });
+    text(p, 'con probabilidad ≥ 1 − δ, para toda h ∈ H y toda distribución D', 800, 256, ta, { size: 22, fill: COL.dim });
+    text(p, '¿Se puede mejorar?', 800, 340, ta + 1.8, { size: 28, weight: 600 });
+    text(p, 'Cota inferior', 800, 440, tl, { size: 30, fill: HUE.low, weight: 600 });
+    text(p, 'para todo algoritmo de aprendizaje A', 800, 494, tg, { size: 26 });
+    text(p, 'existen una distribución D y una función objetivo f ∈ H', 800, 536, te, { size: 26 });
+    aTx(p, 'tales que  R_{D}(h_{S}, f) > piso,  con probabilidad ≥ constante', 800, 578, te + 3.2, { size: 26, font: UI });
+    aTx(p, 'h_{S}: la hipótesis que A devuelve al recibir la muestra S', 800, 624, te + 3.8, { size: 22, fill: COL.dim, font: UI });
+    text(p, 'No es el defecto de un algoritmo: es un límite de todos.', 800, 836, tf, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['trampa', 'La distribución difícil', (m) => {
+    const p = panel(0), ts = m('set'), tm = m('mass'), td = m('draw'), tn = m('seen'), tu = m('unseen'), tc = m('coin'), th = m('half'), K = 170 / aP0, RX = 1090;
+    aNote(p, `datos ilustrativos: d = ${aD}, m = ${aM} · muestra extraída en la página`);
+    text(p, 'cómo se construye la distribución difícil (demostración del teorema 3.20)', 100, 120, .3, { size: 22, fill: COL.dim });
+    text(p, `X: d = ${aD} puntos que H fragmenta`, 100, 168, ts, { size: 30, fill: COL.task, weight: 600 });
+    const pts = aIdx.map(i => { const q = aCoinPt(p, aRX(i), aRY, i ? 15 : 22); put(q.g, { o: 0 }); show(q.g, .2 + i * .04, .3); return q; });
+    aIdx.forEach(i => aTx(p, `x_{${i}}`, aRX(i), aRY + 54, ts + .4, { size: 24, fill: COL.dim, anchor: 'middle' }));
+    // la masa de cada punto, a escala
+    aIdx.forEach(i => { const e = put(mk('rect', { x: aRX(i) - 20, y: 594, width: 40, height: 0, fill: COL.chalk, 'fill-opacity': .8 }, p), {}); tw(e, { a_height: (i ? aPi : aP0) * K }, tm + (i ? 2.6 : .2), .8, out); });
+    aTx(p, `P[x_{0}] = ${aFmt(aP0)}`, aRX(0), 804, tm + .8, { size: 24, anchor: 'middle', font: UI });
+    aTx(p, `P[x_{i}] = ${aN(aPi)} cada uno · barras a escala`, aRX(1) - 20, 638, tm + 3.2, { size: 24, font: UI });
+    text(p, 'D: casi toda la probabilidad en un punto', RX, 200, tm, { size: 24, weight: 600 });
+    aTx(p, 'P[x_{0}] = 1 − 8ε', RX, 246, tm + .6, { size: 28 });
+    aTx(p, 'P[x_{i}] = 8ε / (d − 1),   i ≥ 1', RX, 290, tm + 2.6, { size: 28 });
+    text(p, `ecuación (3.32) · aquí ε = ${aN(aEps)}`, RX, 326, tm + 3.2, { size: 22, fill: COL.dim });
+    // la muestra: cada ejemplo cae sobre su punto y muestra la etiqueta
+    const stack = aIdx.map(() => 0);
+    aS.forEach((i, j) => {
+      const t = td + .3 + j * .12, e = put(mk('circle', { r: 7, fill: aHue(aF[i]) }, p), { x: aRX(i), y: 190, o: 0 });
+      tw(e, { o: 1, y: aRY - (i ? 34 : 42) - stack[i]++ * 15 }, t, .35, out);
+      if (stack[i] === 1) tw(pts[i].c, { c_fill: aHue(aF[i]) }, t + .3, .2);
+    });
+    text(p, `muestra S: m = ${aM} ejemplos`, RX, 400, td, { size: 26, weight: 600 });
+    aTx(p, `${aCnt[0]} caen en x_{0}`, RX, 440, td + 2.9, { size: 26, font: UI });
+    text(p, `puntos raros vistos: ${aSeen.length} de ${aD - 1}`, RX, 480, tn, { size: 26 });
+    aSeen.forEach(i => pulse(pts[i].g, tn + .2, 1.6));
+    text(p, `sin ver: ${aUn.length}`, RX, 520, tu, { size: 26, fill: HUE.low, weight: 600 });
+    aUn.forEach((i, k) => {
+      text(p, '?', aRX(i), aRY - 30, tu + k * .08, { size: 36, weight: 700, anchor: 'middle' });
+      for (let n = 0; n < 6; n++) tw(pts[i].c, { c_fill: aHue((n + k) % 2) }, tc + .6 + n * .75, .3);
+      tw(pts[i].c, { c_fill: HUE.pos }, th, .3); show(pts[i].h, th, .3);
+    });
+    aTx(p, `2^{${aUn.length}} = ${2 ** aUn.length} etiquetados de los no vistos:`, RX, 600, tc + 1.6, { size: 22, font: UI });
+    text(p, 'todos en H y compatibles con S', RX, 630, tc + 4.6, { size: 22 });
+    text(p, 'Sobre los puntos no vistos, cualquier algoritmo acierta en promedio la mitad.', 860, 850, th + 1, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['teo320', 'Cota inferior, caso realizable', (m) => {
+    const p = panel(0), tc = m('cnt'), th = m('half'), te = m('exp'), tt = m('thm'), tg = m('grow'), tf = m('fall'), ti = m('inf'), X = i => 130 + i * 74, Y = 196, k = 75000;
+    aNote(p, 'la muestra del dibujo anterior · valores calculados en la página');
+    text(p, 'la misma muestra: puntos raros vistos y sin ver', 100, 130, .3, { size: 22, fill: COL.dim });
+    const rings = [];
+    aIdx.forEach(i => {
+      const q = aCoinPt(p, X(i), Y, i ? 14 : 19, aCnt[i] ? aHue(aF[i]) : HUE.pos);
+      if (!aCnt[i]) { put(q.h, { o: 1 }); rings.push(put(mk('circle', { r: 23, fill: 'none', stroke: HUE.low, 'stroke-width': 3 }, p), { x: X(i), y: Y, o: 0 })); }
+      put(q.g, { o: 0 }); show(q.g, .2, .4);
+      aTx(p, `x_{${i}}`, X(i), Y + 50, .3, { size: 22, fill: COL.dim, anchor: 'middle' });
+    });
+    text(p, 'ε se elige para que, casi siempre,', 800, 180, tc, { size: 24 });
+    text(p, 'la muestra vea a lo sumo (d − 1)/2 puntos raros', 800, 214, tc + 1.6, { size: 24 });
+    rings.forEach(e => show(e, th, .3));
+    text(p, `aquí: ${aUn.length} sin ver de ${aD - 1} · en cada uno, el algoritmo falla con probabilidad ½`, 130, 300, th, { size: 24, fill: HUE.low, weight: 600 });
+    aTx(p, 'E_{f} [ R_{D}(h_{S}, f) ]  ≥  ½ · (d − 1)/2 · 8ε/(d − 1)  =  2ε', 130, 372, te, { size: 34, weight: 600 });
+    text(p, '½: moneda al aire · (d − 1)/2: puntos no vistos, como mínimo · 8ε/(d − 1): probabilidad de cada uno · (3.33)', 130, 412, te + 1.4, { size: 22, fill: COL.dim });
+    text(p, `en el dibujo:  ½ · ${aUn.length} · ${aN(aPi)} = ${aN(aExp)}  ≥  2ε = ${aN(2 * aEps)}`, 130, 446, te + 2.6, { size: 22, fill: COL.dim });
+    text(p, 'Teorema 3.20 · caso realizable', 130, 520, tt, { size: 30, fill: COL.task, weight: 600 });
+    text(p, 'VCdim(H) = d > 1 · para todo algoritmo A y todo m ≥ 1 existen D y f ∈ H tales que', 610, 520, tt + 1.4, { size: 22, fill: COL.dim });
+    aTx(p, 'S ∼ D^{m}:    P[ R_{D}(h_{S}, f) > (d − 1) / (32m) ]  ≥  1/100', 130, 582, tt + 5.4, { size: 38, fill: COL.task, weight: 600 });
+    text(p, '(3.31)', 1180, 580, tt + 5.4, { size: 22, fill: COL.dim });
+    const rows = (x, head, list, t) => {
+      text(p, head, x, 654, t, { size: 24, weight: 600 });
+      list.forEach(([lab, v], i) => { const y = 694 + i * 36, t1 = t + .4 + i * .35; aTx(p, lab, x, y, t1, { size: 24 }); aBar(p, x + 160, y, v * k, t1, HUE.low); text(p, v.toFixed(3), x + 174 + v * k, y, t1 + .3, { size: 24, weight: 600 }); });
+    };
+    rows(130, 'el piso (d − 1)/(32m) crece con d  ·  m = 1 000', [33, 65, 129].map(d => [`d = ${d}`, aLow(d, 1000)]), tg);
+    rows(840, 'y baja con m  ·  d = 129', [[1000, '1 000'], [2000, '2 000'], [4000, '4 000']].map(([n, s]) => [`m = ${s}`, aLow(129, n)]), tf);
+    text(p, 'VCdim(H) = +∞: el piso no baja con m. No hay aprendizaje PAC, ni en el caso realizable.', 800, 838, ti, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), Y = 430, pick = [0, aSeen[0], aUn.find(i => i > aSeen[0])];
+    T(p, `La muestra del ejemplo: m = ${aM} ejemplos sobre ${aD} puntos fragmentados`, { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'sobre cada punto, cuántas veces apareció en la muestra · color: la etiqueta que mostró', { x: 100, y: 176, size: 22, fill: COL.dim });
+    S.q1 = [];
+    aIdx.forEach(i => {
+      const g = G(p), n = pick.indexOf(i);
+      mk('circle', { cx: aRX(i), cy: Y, r: i ? 17 : 24, fill: aCnt[i] ? aHue(aF[i]) : COL.dim }, g);
+      T(g, String(aCnt[i]), { x: aRX(i), y: Y - 46, size: 28, anchor: 'middle', weight: 600, fill: aCnt[i] ? COL.chalk : COL.dim });
+      if (n >= 0) { T(g, 'ABC'[n], { x: aRX(i), y: Y + 78, size: 34, weight: 700, fill: HUE.hyp, anchor: 'middle' }); S.q1[n] = g; }
+    });
+    T(p, 'gris: sin ver', { x: 1090, y: Y + 8, size: 22, fill: COL.dim });
+    S.q1i = pick;
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-novisto', prompt: ['¿En cuál de los puntos A, B o C el algoritmo solo puede adivinar la etiqueta?'],
+    build: pickEls(S.q1i.map((i, n) => ({ el: S.q1[n], box: [aRX(i) - 45, 350, 90, 180], label: 'punto ' + 'ABC'[n] })), 2,
+      'No apareció en la muestra y el conjunto está fragmentado: las dos etiquetas siguen siendo posibles.',
+      n => `Ese punto apareció ${aCnt[S.q1i[n]] === 1 ? 'una vez' : aCnt[S.q1i[n]] + ' veces'} en la muestra: su etiqueta ya se conoce.`),
+  }], done) }],
+
+  ['ruido', 'Dos monedas casi iguales', (m) => {
+    const p = panel(0), tn = m('noise'), t2 = m('two'), tl = m('look'), tf = m('few'), tm = m('more'), ty = m('many'), te = m('lem'), tx = m('exp'), ts = [tf, tm, ty];
+    aNote(p, `curvas exactas (binomial) con α = ${aAl} · tiradas con semilla`);
+    text(p, 'Caso no realizable: la etiqueta de un punto es una moneda', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    const one = put(mk('circle', { cx: 1040, cy: 120, r: 16, fill: COL.dim }, p), { o: 0 });
+    show(one, tn, .3);
+    for (let n = 0; n < 6; n++) tw(one, { c_fill: aHue(n % 2) }, tn + .5 + n * .6, .25);
+    text(p, 'el mismo punto, con etiqueta 1 o 0', 1076, 128, tn + .4, { size: 22, fill: COL.dim });
+    aToss.forEach((row, r) => {
+      const y = 204 + r * 56, c = aHue(1 - r);
+      aTx(p, `moneda ${r ? '−' : '+'}:   P[1] = ½ ${r ? '−' : '+'} α/2 = ${aFmt(.5 + (r ? -1 : 1) * aAl / 2)}`, 100, y + 9, t2 + (r ? 4.6 : 1.6), { size: 26, fill: c, weight: 600, font: UI });
+      row.forEach((v, k) => { const e = put(mk('circle', { cx: 660 + k * 46, cy: y, r: 14, fill: aHue(v) }, p), { o: 0 }); show(e, tl + 1.6 + r * .5 + k * .07, .2); });
+      text(p, `${aSum(row)} unos de 10`, 1140, y + 9, tl + 3.2, { size: 24 });
+    });
+    aNs.forEach((n, i) => {
+      const g = G(p, { o: 0 }), x = 100 + i * 490, w = 420, base = 566, u = aBinom(n, .5 + aAl / 2), v = aBinom(n, .5 - aAl / 2), mx = Math.max(...u);
+      aHist(g, v, x, w, base, 170, mx, HUE.neg); aHist(g, u, x, w, base, 170, mx, HUE.pos);
+      mk('path', { d: `M${x} ${base}H${x + w}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+      [['0', 0], ['½', .5], ['1', 1]].forEach(([s, f]) => T(g, s, { x: x + f * w, y: base + 28, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+      T(g, `n = ${n} tiradas`, { x, y: 366, size: 26, weight: 600 });
+      T(g, `la mejor regla falla el ${(100 * aBay(n)).toFixed(1)} %`, { x: x + w / 2, y: base + 70, size: 24, anchor: 'middle', weight: 600, fill: HUE.low });
+      show(g, ts[i], .5);
+    });
+    text(p, 'eje: fracción de unos', 520, 366, tf + .6, { size: 22, fill: COL.dim, anchor: 'end' });
+    text(p, 'Lema 3.21', 100, 724, te, { size: 28, fill: COL.task, weight: 600 });
+    aTx(p, 'distinguir las dos monedas exige del orden de 1/α^{2} tiradas', 270, 724, te + .8, { size: 28, font: UI });
+    aTx(p, `aquí 1/α^{2} = ${Math.round(1 / aAl ** 2)}`, 1130, 724, te + 3, { size: 22, fill: COL.dim, font: UI });
+    text(p, 'Lema 3.22', 100, 784, tx, { size: 28, fill: COL.task, weight: 600 });
+    aTx(p, 'Z ∈ [0, 1]   ⟹   P[ Z > γ ] > E[Z] − γ', 270, 784, tx + 1.6, { size: 28 });
+    text(p, 'promedio alto: valores altos con probabilidad apreciable', 830, 784, tx + 5, { size: 22, fill: COL.dim });
+  }],
+
+  ['teo323', 'Cota inferior, caso no realizable', (m) => {
+    const p = panel(0), tp = m('pts'), ts = m('samp'), tr = m('per'), tj = m('maj'), tg = m('wrong'), tc = m('cost'), ta = m('alpha'), tt = m('thm'), tx = m('cplx'), CX = i => 340 + i * 95, PY = 560, RX = 1110, nw = aNR.wrong.length;
+    aNote(p, `datos ilustrativos: d = ${aD2}, m = ${aM2}, α = ${aAl} · votos contados en la página`);
+    text(p, `X: d = ${aD2} puntos fragmentados, cada uno con probabilidad 1/d y su propia moneda`, 100, 130, .3, { size: 26, fill: COL.task, weight: 600 });
+    aI2.forEach(i => {
+      show(put(mk('circle', { cx: CX(i), cy: PY, r: 15, fill: COL.dim }, p), { o: 0 }), .2 + i * .04, .3);
+      text(p, aFmt(.5 + aNR.sg[i] * aAl / 2), CX(i), PY + 52, tp + 5 + i * .08, { size: 22, fill: aHue(aNR.best[i]), anchor: 'middle', weight: 600 });
+      const sq = put(mk('rect', { x: CX(i) - 16, y: PY + 76, width: 32, height: 32, fill: aHue(aNR.pred[i]) }, p), { o: 0 });
+      show(sq, tj + i * .06, .3);
+    });
+    aTx(p, 'P[1 | x_{i}]', 100, PY + 52, tp + 5, { size: 24, fill: COL.dim });
+    text(p, 'etiquetas vistas', 100, 420, ts, { size: 22, fill: COL.dim });
+    text(p, 'voto por mayoría', 100, PY + 100, tj, { size: 22, fill: COL.dim });
+    const stack = aI2.map(() => 0);
+    aNR.seq.forEach(([i, v], j) => { const e = put(mk('circle', { r: 8, fill: aHue(v) }, p), { x: CX(i), y: 170, o: 0 }); tw(e, { o: 1, y: PY - 34 - stack[i]++ * 19 }, ts + .3 + j * .04, .3, out); });
+    aNR.wrong.forEach(i => { show(put(mk('rect', { x: CX(i) - 24, y: PY + 68, width: 48, height: 48, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, p), { o: 0 }), tg, .3); show(aCross(p, CX(i), PY + 138, 9), tg, .3); });
+    aTx(p, 'P[(x_{i}, 1)] = (1/d) (½ + σ_{i} α/2)', RX, 206, tp + 5, { size: 26 });
+    aTx(p, `(3.43) · σ_{i} = ±1 · aquí α = ${aAl}`, RX, 242, tp + 6, { size: 22, fill: COL.dim, font: UI });
+    text(p, `m = ${aM2} ejemplos entre d = ${aD2} puntos`, RX, 314, ts, { size: 24, weight: 600 });
+    text(p, `unas m/d = ${aM2 / aD2} tiradas por moneda`, RX, 350, tr, { size: 24 });
+    text(p, `mayoría equivocada en ${nw} puntos`, RX, 422, tg, { size: 24, fill: COL.bad, weight: 600 });
+    text(p, `exceso de error = (α/d) · ${nw} = ${aN(aExc)}`, RX, 470, tc, { size: 24, weight: 600 });
+    text(p, '(3.44): error por encima del de Bayes', RX, 504, tc + 1.6, { size: 22, fill: COL.dim });
+    text(p, 'α del orden de', RX, 566, ta + 3.4, { size: 24, weight: 600 }); aTx(p, '√[ d/m ]', RX + 186, 566, ta + 3.4, { size: 26, weight: 600 });
+    aTx(p, 'm/d tiradas no alcanzan para 1/α^{2}', RX, 600, ta, { size: 22, font: UI });
+    text(p, 'Teorema 3.23 · caso no realizable', 100, 742, tt, { size: 28, fill: COL.task, weight: 600 });
+    text(p, 'VCdim(H) = d > 1 · para todo A y todo m ≥ 1 existe D sobre X × {0, 1} tal que', 600, 742, tt + 1.2, { size: 22, fill: COL.dim });
+    aTx(p, 'S ∼ D^{m}:    P[ R_{D}(h_{S}) − inf_{h∈H} R_{D}(h) > √[ d / (320m) ] ]  ≥  1/64', 100, 798, tt + 3.4, { size: 36, fill: COL.task, weight: 600 });
+    text(p, '(3.41)', 1330, 796, tt + 3.4, { size: 22, fill: COL.dim });
+    aTx(p, 'equivalente:   m ≥ d / (320 ε^{2})', 100, 852, tx, { size: 28 });
+    text(p, '(3.42)', 560, 850, tx, { size: 22, fill: COL.dim });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), opts = [['n', 'las mismas'], ['2n', 'el doble'], ['4n', 'cuatro veces más']];
+    T(p, 'Dos monedas:  P[1] = ½ + α/2  y  ½ − α/2', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, `Con α = ${aAl}, distinguirlas exige unas n tiradas.`, { x: 100, y: 190, size: 26 });
+    T(p, `Se cambia a α = ${aAl / 2}: las monedas se parecen más. ¿Cuántas tiradas hacen falta ahora?`, { x: 100, y: 232, size: 26 });
+    S.q2 = opts.map(([big, cap], i) => {
+      const x = 100 + i * 480, g = G(p);
+      mk('rect', { x, y: 290, width: 420, height: 250, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+      T(g, 'ABC'[i], { x: x + 24, y: 336, size: 32, weight: 700, fill: HUE.hyp });
+      T(g, big, { x: x + 210, y: 440, size: 76, anchor: 'middle', font: MATH, weight: 600 });
+      T(g, cap, { x: x + 210, y: 506, size: 26, anchor: 'middle', fill: COL.dim });
+      return g;
+    });
+    S.q2r = G(p, { o: 0 });
+    aTx(S.q2r, `1/α^{2}:   ${Math.round(1 / aAl ** 2)}  →  ${Math.round(1 / (aAl / 2) ** 2)}`, 800, 610, null, { size: 32, fill: COL.good, anchor: 'middle', weight: 600 });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-monedas', prompt: ['Si α baja a la mitad, ¿cuántas tiradas hacen falta? Elegir la tarjeta.'],
+    build: pickEls(S.q2.map((el, i) => ({ el, box: [100 + i * 480, 290, 420, 250], label: 'tarjeta ' + 'ABC'[i] })), 2,
+      'El número de tiradas va como 1/α²: con α a la mitad, se multiplica por 4.',
+      i => i ? 'No va como 1/α sino como 1/α²: la mitad de α no da solo el doble.' : 'Monedas más parecidas son más difíciles de distinguir: hacen falta más tiradas.',
+      () => fx(S.q2r, { o: 1 }, 0, .4)),
+  }], done) }],
+
+  ['dos', 'Techo y piso', (m) => {
+    const p = panel(0), tu = m('up'), tn = m('nr'), ts = m('same'), tr = m('re'), tv = m('vc'), ti = m('inf'), d = 10, RX = 860;
+    const X = l => 150 + (l - 1) * 150, Y = l => 200 + (.5 - l) * 68, L = Array.from({ length: 41 }, (_, i) => 1 + i * .1);
+    const curve = f => 'M' + L.map(l => `${X(l).toFixed(1)} ${Y(Math.log10(f(10 ** l))).toFixed(1)}`).join('L');
+    aNote(p, `curvas calculadas en la página, con d = ${d}`);
+    text(p, `las tres cotas en función de m, con d = ${d} (escala logarítmica en los dos ejes)`, 100, 130, .3, { size: 22, fill: COL.dim });
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${X(1)} ${Y(.5)}V${Y(-6)}H${X(5) + 20}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    [0, -2, -4, -6].forEach(v => { aTx(ax, v ? `10^{−${-v}}` : '1', X(1) - 12, Y(v) + 8, null, { size: 22, fill: COL.dim, anchor: 'end' }); mk('path', { d: `M${X(1) - 6} ${Y(v)}h6`, stroke: COL.dim, 'stroke-width': 2 }, ax); });
+    [1, 2, 3, 4, 5].forEach(l => aTx(ax, l > 1 ? `10^{${l}}` : '10', X(l), Y(-6) + 32, null, { size: 22, fill: COL.dim, anchor: 'middle' }));
+    T(ax, 'm', { x: X(5) + 36, y: Y(-6) + 8, size: 24, fill: COL.dim, font: MATH });
+    show(ax, .2);
+    const sty = c => ({ stroke: c, 'stroke-width': 5 });
+    draw(path(p, curve(n => aVC(n, d)), sty(HUE.rad), { d: 0 }), tu, 2);
+    draw(path(p, curve(n => aLowN(d, n)), sty(HUE.low), { d: 0 }), tn, 2);
+    show(put(mk('path', { d: curve(n => aLow(d, n)), fill: 'none', stroke: HUE.low, 'stroke-width': 4, 'stroke-dasharray': '10 8' }, p), { o: 0 }), tr, .8);
+    text(p, 'techo', X(4.1), Y(Math.log10(aVC(10 ** 4.1, d))) - 18, tu + 1.6, { size: 24, fill: HUE.rad, weight: 600 });
+    text(p, 'piso, no realizable', X(3.5), Y(Math.log10(aLowN(d, 10 ** 3.5))) - 18, tn + 1.6, { size: 24, fill: HUE.low, weight: 600 });
+    text(p, 'piso, realizable', X(3.3) - 10, Y(Math.log10(aLow(d, 10 ** 3.3))) + 44, tr + .8, { size: 24, fill: HUE.low, weight: 600, anchor: 'end' });
+    const key = (y, c, dash, t) => show(put(mk('path', { d: `M${RX} ${y - 9}h56`, stroke: c, 'stroke-width': dash ? 4 : 5, ...(dash ? { 'stroke-dasharray': '10 8' } : {}) }, p), { o: 0 }), t);
+    key(170, HUE.rad, false, tu); text(p, 'Cota superior · corolario 3.19', RX + 72, 170, tu, { size: 26, fill: HUE.rad, weight: 600 });
+    aTx(p, 'término  √[ 2d log(em/d) / m ]', RX + 72, 212, tu + 1.4, { size: 26 });
+    key(300, HUE.low, false, tn); text(p, 'Cota inferior, caso no realizable · teorema 3.23', RX + 72, 300, tn, { size: 26, fill: HUE.low, weight: 600 });
+    aTx(p, '√[ d / (320m) ]', RX + 72, 342, tn + 1.4, { size: 26 });
+    text(p, 'La misma forma, salvo el logaritmo y las constantes:', RX, 410, ts, { size: 24, fill: COL.task, weight: 600 }); aTx(p, '√[ d/m ]', RX + 606, 410, ts, { size: 26, fill: COL.task, weight: 600 });
+    key(500, HUE.low, true, tr); text(p, 'Cota inferior, caso realizable · teorema 3.20', RX + 72, 500, tr, { size: 26, fill: HUE.low, weight: 600 });
+    aTx(p, '(d − 1) / (32m):  del orden de d/m', RX + 72, 542, tr + 1.4, { size: 26 });
+    text(p, 'La dimensión VC, frente al tamaño de la muestra, gobierna el techo y el piso.', 800, 780, tv, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'VCdim(H) = +∞: no hay aprendizaje PAC, ni realizable ni agnóstico.', 800, 830, ti, { size: 26, anchor: 'middle' });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Una cota inferior vale para todo algoritmo: siempre existe una distribución difícil.', 'w1'], ['Caso realizable: el error forzado es del orden de d/m.', 'w2'],
+      ['Caso no realizable: el exceso forzado es del orden de la raíz de d/m.', 'w3'], ['La dimensión VC gobierna el techo y el piso; si es infinita, no hay aprendizaje PAC.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 220, size: 31, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre las cotas inferiores de este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Una cota inferior dice que cierto algoritmo, mal diseñado, aprende despacio.'], ans: ['f'], why: 'Vale para todo algoritmo: para cada uno existe una distribución difícil. Es un límite del problema, no de un método.' },
+      { parts: ['La distribución difícil del caso realizable se apoya en un conjunto de puntos que H fragmenta.'], ans: ['v'], why: 'Al estar fragmentado, cualquier etiquetado de los puntos no vistos está en H y es compatible con la muestra.' },
+      { parts: ['En el caso no realizable, duplicar m reduce el piso a la mitad.'], ans: ['f'], why: 'El piso va como √(d/m): con el doble de datos queda en 1/√2 ≈ ' + aFmt(aLowN(10, 200) / aLowN(10, 100)) + ' de su valor. La mitad es en el caso realizable.' },
+      { parts: ['Con dimensión VC infinita, ningún tamaño de muestra garantiza aprender en el sentido PAC.'], ans: ['v'], why: 'Las dos cotas inferiores crecen con d: si d no tiene límite, el piso no baja al crecer m.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-piso', prompt: ['H tiene dimensión VC 33 y la muestra tiene 100 ejemplos, en el caso realizable. Según el teorema 3.20, ¿qué error no puede evitar ningún algoritmo en el peor caso?'],
+    build: choice([['más de ' + aN(aLow(33, 100))], ['más de ' + aFmt(33 / 100)], ['ninguno: un buen algoritmo llega a 0']], 0,
+      `(d − 1)/(32m) = ${33 - 1}/${32 * 100} = ${aN(aLow(33, 100))}, con probabilidad de al menos 1/100.`,
+      [null, 'Eso es d/m. El teorema da (d − 1)/(32m): el orden es d/m, pero la constante cuenta.', 'La cota vale para todo algoritmo: siempre existen una distribución y una función objetivo difíciles.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

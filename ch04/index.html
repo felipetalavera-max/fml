@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Complejidad de Rademacher</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 4, title: 'Complejidad de Rademacher', minutes: 6, language: 'es', next: '../ch05/' };
+
+/* ---------- helpers de dibujo del capítulo ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, rad: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R(h_{S}) ≤ 4e^{−mε/4}'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    mk('tspan', { dy: dy - prev, ...(k ? { 'font-size': size * .68 } : {}) }, e).textContent = k ? s.slice(2, -1) : s;
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aFmt = v => v.toFixed(2).replace('-', '−');
+const aVal = v => Number.isInteger(v) ? String(v) : '≈ ' + aFmt(v);
+const aSwatch = (p, x, y, fill, t0) => show(put(mk('rect', { x, y: y - 20, width: 26, height: 22, fill, 'fill-opacity': .8 }, p), { o: 0 }), t0);
+const aFall = (d, t0) => { const y = st(d).y; put(d, { y: y - 46 }); tw(d, { o: 1, y }, t0, .45, out); };   // un punto de la muestra que cae
+const aBar = (p, x, y, w, t0, fill = COL.chalk) => { const e = put(mk('rect', { x, y: y - 20, width: 0, height: 22, fill, 'fill-opacity': .8 }, p), {}); tw(e, { a_width: w }, t0, .7, out); return e; };
+const aNote = (p, str = 'datos ilustrativos · una muestra fija de 8 puntos') => text(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+
+// Segmento X = [0, 1]. Muestra fija S de m = 8 puntos (ilustrativa, con semilla). Las hipótesis toman valores en {−1, +1}.
+const aX0 = 100, aXW = 760, aPX = t => aX0 + t * aXW;
+const aM = 8, aIdx = Array.from({ length: aM }, (_, i) => i);
+const aXs = (() => { const r = aRng(1096); return aIdx.map(() => r()).sort((a, b) => a - b); })();
+const aEdge = [0, ...aXs.slice(1).map((x, i) => (x + aXs[i]) / 2), 1];           // 9 cortes: el corte j deja j puntos a su izquierda
+const aSig = seed => { const r = aRng(seed); return aIdx.map(() => r() < .5 ? -1 : 1); };   // vector de signos σ
+const aSum = a => a.reduce((s, v) => s + v, 0);
+const aDotp = (sg, h) => aSum(sg.map((s, i) => s * h[i]));                       // σ · h_S
+const aThrH = j => aIdx.map(i => i < j ? -1 : 1);                                // umbral: −1 a su izquierda, +1 a su derecha
+const aAll = Array.from({ length: 2 ** aM }, (_, n) => aIdx.map(i => n >> i & 1 ? 1 : -1));   // los 256 vectores de signos
+// Cada conjunto de hipótesis, visto sobre la muestra: la lista de vectores h_S que puede producir.
+const aCLS = { one: [aIdx.map(() => 1)], thr: Array.from({ length: aM + 1 }, (_, j) => aThrH(j)), int: [aIdx.map(() => -1)], all: aAll };
+for (let a = 0; a < aM; a++) for (let b = a + 1; b <= aM; b++) aCLS.int.push(aIdx.map(i => i >= a && i < b ? 1 : -1));
+const aBest = (sg, hs) => hs.reduce((b, h) => aDotp(sg, h) > aDotp(sg, b) ? h : b);   // la hipótesis que mejor sigue a σ
+const aSup = (sg, hs) => aDotp(sg, aBest(sg, hs)) / aM;                          // sup_h (1/m) Σ σ_i h(x_i)
+const aBestJ = sg => aCLS.thr.indexOf(aBest(sg, aCLS.thr));
+const aRad = hs => aSum(aAll.map(sg => aSup(sg, hs))) / aAll.length;             // complejidad de Rademacher empírica, exacta (definición 3.1)
+const aRADS = { one: aRad(aCLS.one), thr: aRad(aCLS.thr), int: aRad(aCLS.int), all: aRad(aCLS.all) };
+const aVs = [0, .25, .5, .75, 1], aHist = aVs.map(v => aAll.filter(sg => aSup(sg, aCLS.thr) === v).length);
+// Umbrales con m puntos distintos: la complejidad no depende de dónde caen los puntos. Valor exacto por programación dinámica.
+const aRadThr = m => {
+  let cur = new Map([['0,0', 1]]);
+  for (let i = 0; i < m; i++) { const nx = new Map(); cur.forEach((q, k) => { const [c, mn] = k.split(',').map(Number); [-1, 1].forEach(d => { const kk = `${c + d},${Math.min(mn, c + d)}`; nx.set(kk, (nx.get(kk) || 0) + q / 2); }); }); cur = nx; }
+  let e = 0; cur.forEach((q, k) => { const [c, mn] = k.split(',').map(Number); e += q * (c - 2 * mn); });
+  return e / m;
+};
+const aS1 = aSig(54), aS2 = aSig(44), aS3 = aSig(47);                            // signos de la lección y de la comprobación 1
+const aDraws = [54, 44, 52, 2, 39, 16, 5, 13, 18, 31].map(aSig);                  // diez sorteos que se muestran uno por uno
+const aSeq = [54, 52, 39, 2].map(aSig);                                          // signos del beat que compara conjuntos
+const aQ1 = [1, 3, 6];                                                           // cortes de los umbrales A, B, C de la comprobación 1
+const aConf = (m, d) => Math.sqrt(Math.log(1 / d) / (2 * m));                    // término de confianza de (3.3) y (3.17)
+const aTermH = (n, m, d) => Math.sqrt((Math.log(n) + Math.log(2 / d)) / (2 * m)); // término del teorema 2.13 (cap. 3)
+const aQM = 128, aQD = .05, aQ2 = [['una sola hipótesis', .30, 0], ['umbrales', .10, aRadThr(aQM)], ['todas las funciones', 0, 1]];   // comprobación 2: [conjunto, error empírico ilustrativo, complejidad]
+
+const aSign = (p, x, y, size = 40) => {                                          // signo + o − que se puede cambiar en el tiempo
+  const e = { 1: T(p, '+', { x, y: y + size * .33, size, fill: HUE.pos, anchor: 'middle', weight: 700, o: 0 }), '-1': T(p, '−', { x, y: y + size * .33, size, fill: HUE.neg, anchor: 'middle', weight: 700, o: 0 }) };
+  let cur = 0;
+  return (v, t, dur = .25) => { if (v === cur) return; if (cur) tw(e[cur], { o: 0 }, t, dur); if (v) tw(e[v], { o: 1 }, t, dur); cur = v; };
+};
+const aMark = (p, x, y) => {                                                     // marca de coincide (verde) o difiere (rojo)
+  const e = { 1: put(mk('path', { d: 'M-11 0l7 8l14 -17', fill: 'none', stroke: COL.good, 'stroke-width': 5 }, p), { x, y, o: 0 }), '-1': put(mk('path', { d: 'M-9 -9L9 9M9 -9L-9 9', fill: 'none', stroke: COL.bad, 'stroke-width': 5 }, p), { x, y, o: 0 }) };
+  let cur = 0;
+  return (v, t, dur = .2) => { if (v === cur) return; if (cur) tw(e[cur], { o: 0 }, t, dur); if (v) tw(e[v], { o: 1 }, t, dur); cur = v; };
+};
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;
+// Tablero: la muestra sobre el eje, la fila de signos σ arriba, la franja con los signos de h abajo y el umbral.
+const aBoard = (p, y, { r = 14, top = 48, hy = 72, size = 40, ends = true } = {}) => {
+  const b = { y }, gh = b.gh = G(p, { o: 0 }), ga = b.ga = G(p, { o: 0 });
+  const cells = aIdx.map(i => mk('rect', { x: aPX(aEdge[i]), y: y + hy - 30, width: (aEdge[i + 1] - aEdge[i]) * aXW + .5, height: 50, fill: HUE.pos, 'fill-opacity': .25 }, gh));
+  mk('path', { d: `M${aPX(0)} ${y}H${aPX(1)}`, stroke: COL.dim, 'stroke-width': 3 }, ga);
+  if (ends) { T(ga, '0', { x: aPX(0) - 14, y: y + 9, size: 24, fill: COL.dim, anchor: 'end', font: MATH }); T(ga, '1', { x: aPX(1) + 14, y: y + 9, size: 24, fill: COL.dim, font: MATH }); }
+  b.line = put(mk('path', { d: `M0 ${y - top - 30}V${y + hy + 26}`, stroke: HUE.hyp, 'stroke-width': 5 }, p), { x: aPX(0), o: 0 });
+  b.dots = aXs.map(x => put(mk('circle', { r, fill: COL.dim }, p), { x: aPX(x), y, o: 0 }));
+  const sg = aXs.map(x => aSign(p, aPX(x), y - top, size)), hs = aXs.map(x => aSign(gh, aPX(x), y + hy - 5, size * .85)), ms = aXs.map(x => aMark(p, aPX(x), y + hy + 62));
+  let first = true;
+  b.sig = (v, t, dur = .3) => aIdx.forEach(i => { sg[i](v[i], t, dur); if (v[i]) tw(b.dots[i], { c_fill: aHue(v[i]) }, t, dur); });
+  b.hyp = (h, t, dur = .2) => { aIdx.forEach(i => { hs[i](h[i], t, dur); if (first) cells[i].setAttribute('fill', aHue(h[i])); else tw(cells[i], { c_fill: aHue(h[i]) }, t, dur); }); first = false; };
+  b.marks = (v, h, t, dur = .2) => aIdx.forEach(i => ms[i](v ? v[i] * h[i] : 0, t, dur));
+  b.cut = (j, t, dur = .2) => tw(b.line, { x: aPX(aEdge[j]) }, t, dur);
+  b.label = (str, dy, t0) => aTx(p, str, 62, y + dy, t0, { size: 30, fill: COL.dim, anchor: 'end' });
+  return b;
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 4', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Complejidad de Rademacher', { x: 800, y: 430, size: 80, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Para medir un conjunto infinito de hipótesis, se le pide que imite el ruido.', 800, 600, m('sub'), { size: 34, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['infinito', 'Cuando H es infinito', (m) => {
+    const p = panel(0), ti = m('inf'), tv = ti + 7, tr = m('rect'), mm = 200, d = .05, ns = [50, 5000, 1e12], k = 1400;
+    const full = put(mk('rect', { x: aPX(0), y: 170, width: aXW, height: 160, fill: HUE.hyp, 'fill-opacity': .5 }, p), { o: 0 });
+    show(full, ti, 1.2);
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${aPX(0)} 250H${aPX(1)}`, stroke: COL.dim, 'stroke-width': 3 }, ax);
+    T(ax, '0', { x: aPX(0) - 14, y: 259, size: 24, fill: COL.dim, anchor: 'end', font: MATH }); T(ax, '1', { x: aPX(1) + 14, y: 259, size: 24, fill: COL.dim, font: MATH });
+    show(ax, .2);
+    for (let i = 1; i <= 50; i++) tw(put(mk('path', { d: `M${aPX(i / 50)} 170V330`, stroke: HUE.hyp, 'stroke-width': 3 }, p), { o: 0 }), { o: .6 }, .2 + i * .012, .3);
+    const h1 = text(p, 'H: 50 umbrales', aX0, 130, .3, { size: 28, fill: COL.task, weight: 600 });
+    hide(h1, ti, .4); text(p, 'H: todos los umbrales de [0, 1]', aX0, 130, ti + .4, { size: 28, fill: COL.task, weight: 600 });
+    aTx(p, `el término de la cota, con m = ${mm} y δ = ${d}:`, aX0, 410, m('term'), { size: 22, fill: COL.dim, font: UI });
+    const row = (i, lab, w, val, t, fill) => {
+      const y = 462 + i * 50;
+      aTx(p, lab, aX0, y, t, { size: 28 }); aBar(p, 300, y, w, t, fill);
+      aTx(p, val, 314 + w, y, t + .4, { size: 28, weight: 600, fill: fill === COL.bad ? COL.bad : COL.chalk });
+    };
+    ns.forEach((n, i) => row(i, ['|H| = 50', '|H| = 5 000', '|H| = 10^{12}'][i], aTermH(n, mm, d) * k, aFmt(aTermH(n, mm, d)), i ? m('grow') + (i - 1) * 1.2 : m('term') + .6, COL.chalk));
+    row(3, '|H| = ∞', 470, '››  ∞', tv, COL.bad);
+    text(p, 'Capítulo 3: contar hipótesis', 940, 150, .3, { size: 32, fill: COL.task, weight: 600 });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + √[ (log|H| + log(2/δ)) / 2m ]', 940, 204, .5, { size: 27 });
+    text(p, 'teorema 2.13 del libro', 940, 238, .5, { size: 22, fill: COL.dim });
+    aTx(p, 'Con H infinito:  log|H| = ∞', 940, 308, tv, { size: 30, fill: COL.bad, weight: 600 });
+    text(p, 'la cota no dice nada', 940, 344, tv + .6, { size: 22, fill: COL.dim });
+    const rg = G(p, { o: 0 }), rr = aRng(7);                                   // recuerdo del cap. 2: rectángulos
+    mk('rect', { x: 940, y: 420, width: 300, height: 190, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, rg);
+    mk('rect', { x: 1010, y: 462, width: 160, height: 104, fill: HUE.hyp, 'fill-opacity': .12, stroke: HUE.hyp, 'stroke-width': 3 }, rg);
+    for (let i = 0; i < 22; i++) { const x = 954 + rr() * 272, y = 434 + rr() * 162; mk('circle', { cx: x, cy: y, r: 6, fill: x > 1010 && x < 1170 && y > 462 && y < 566 ? HUE.pos : HUE.neg }, rg); }
+    T(rg, 'rectángulos (cap. 2):', { x: 1262, y: 500, size: 24 }); T(rg, 'infinitos, y aun así', { x: 1262, y: 536, size: 24 }); T(rg, 'PAC-aprendibles', { x: 1262, y: 572, size: 24, fill: COL.good, weight: 600 });
+    show(rg, tr);
+    text(p, 'Hace falta otra medida de H:', 800, 760, m('idea'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'no cuántas hipótesis tiene, sino cuánto pueden hacer sobre una muestra.', 800, 806, m('idea', 2.2), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['ruido', 'Seguir el ruido', (m) => {
+    const p = panel(0), b = aBoard(p, 300), th = m('hyp'), tc = m('corr'), ts = m('sweep'), tb = m('best'), ta = m('again'), j0 = 3;
+    aNote(p);
+    show(b.ga, .2);
+    text(p, `S: una muestra fija de m = ${aM} puntos, sin etiquetas`, aX0, 130, m('sample'), { size: 26, fill: COL.dim });
+    b.dots.forEach((e, i) => aFall(e, m('sample') + i * .1));
+    b.label('σ', -38, m('sigma')); aIdx.forEach(i => b.sig(aS1.map((v, n) => n <= i ? v : 0), m('sigma') + .4 + i * .32));
+    b.label('h', 78, th); show(b.gh, th); show(b.line, th); put(b.line, { x: aPX(aEdge[j0]) }); b.hyp(aThrH(j0), th);
+    const seq = [[tc, aS1, j0], ...aCLS.thr.map((_, j) => [ts + j * .25, aS1, j]), [tb, aS1, aBestJ(aS1)], [ta + 1, aS2, aBestJ(aS2)]];
+    seq.forEach(([t, sg, j], n) => {
+      const h = aThrH(j), dp = aDotp(sg, h), a = (aM + dp) / 2, g = G(p, { o: 0 }), t1 = n === seq.length - 2 ? ta : seq[n + 1]?.[0];
+      T(g, `coincide en ${a} puntos, difiere en ${aM - a}`, { x: aX0, y: 520, size: 26 });
+      const f = aTx(g, `correlación = (${a} − ${aM - a})/${aM} = ${aFmt(dp / aM)}`, aX0, 568, null, { size: 32, weight: 600 });
+      if (!n) { put(f, { o: 0 }); show(f, t + 6); }
+      show(g, t, .1); if (t1 != null) hide(g, t1, .1);
+      if (n === seq.length - 1) { b.sig(aS2, ta); b.marks(null, null, ta); }
+      if (n) { b.cut(j, t); b.hyp(h, t, .15); }
+      b.marks(sg, h, t, .15);
+    });
+    aTx(p, 'Signos al azar:  σ = (σ_{1}, …, σ_{m})', 940, 150, m('sigma'), { size: 30, fill: COL.task, weight: 600 });
+    text(p, 'cada uno +1 o −1, con probabilidad ½', 940, 188, m('sigma', 2), { size: 22, fill: COL.dim });
+    text(p, 'H: todos los umbrales de [0, 1]', 940, 258, th, { size: 26, weight: 600 });
+    text(p, 'cada uno: +1 a su derecha, −1 a su izquierda', 940, 294, th + 3, { size: 22, fill: COL.dim });
+    text(p, 'Correlación de h con el ruido:', 940, 364, tc, { size: 24 });
+    aTx(p, '(1/m) Σ_{i} σ_{i} h(x_{i})', 940, 412, tc + 5.5, { size: 32 });
+    text(p, 'El umbral que mejor sigue al ruido:', 940, 486, tb, { size: 24 });
+    aTx(p, 'sup_{h∈H} (1/m) Σ_{i} σ_{i} h(x_{i})', 940, 536, tb + .6, { size: 34, fill: COL.task, weight: 600 });
+    text(p, `con estos signos:  ${aFmt(aSup(aS1, aCLS.thr))}`, 940, 602, tb + 5, { size: 26, weight: 600 });
+    text(p, `con otros signos:  ${aFmt(aSup(aS2, aCLS.thr))}`, 940, 644, ta + 3.4, { size: 26, weight: 600 });
+    text(p, 'En el ruido no hay nada que aprender: seguirlo solo mide la flexibilidad de H.', 800, 790, ta + 4.6, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), b = aBoard(p, 300);
+    put(b.ga, { o: 1 }); b.dots.forEach(e => put(e, { o: 1 })); b.sig(aS3, 0, .01);
+    aTx(p, 'σ', 62, 262, null, { size: 30, fill: COL.dim, anchor: 'end' });
+    S.q1 = aQ1.map((j, i) => {
+      const g = G(p, { x: aPX(aEdge[j]) });
+      mk('path', { d: 'M0 215V398', stroke: HUE.hyp, 'stroke-width': 5 }, g);
+      T(g, 'ABC'[i], { y: 200, size: 32, anchor: 'middle', weight: 700, fill: HUE.hyp });
+      return g;
+    });
+    T(p, 'Tres umbrales de H', { x: 940, y: 240, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'cada uno: +1 a su derecha, −1 a su izquierda', { x: 940, y: 282, size: 24 });
+    T(p, 'correlación = (coincidencias − diferencias) / m', { x: 940, y: 344, size: 24, fill: COL.dim });
+  }, { ask: done => {
+    const vs = aQ1.map(j => aDotp(aS3, aThrH(j))), right = vs.indexOf(Math.max(...vs)), cnt = v => `coincide con el ruido en ${(aM + v) / 2} de los ${aM} puntos: (${(aM + v) / 2} − ${(aM - v) / 2})/${aM} = ${aFmt(v / aM)}`;
+    return quiz(BAND, [{
+      id: 'c-ruido', prompt: ['¿Cuál de los tres umbrales tiene la mayor correlación con estos signos? Elegirlo en el dibujo.'],
+      build: pickEls(aQ1.map((j, i) => ({ el: S.q1[i], box: [aPX(aEdge[j]) - 34, 166, 68, 240], label: 'umbral ' + 'ABC'[i] })), right,
+        `El umbral ${'ABC'[right]} ${cnt(vs[right])}. Ningún otro umbral de H lo supera con estos signos.`,
+        i => `Ese umbral ${cnt(vs[i])}. Otro de los tres coincide en más puntos.`),
+    }], done);
+  } }],
+
+  ['promedio', 'El promedio sobre los signos', (m) => {
+    const p = panel(0), b = aBoard(p, 215, { r: 11, top: 42, hy: 56, size: 32 }), tm = m('many'), ta = m('all'), tn = m('mean');
+    const HX = k => 190 + k * 150, HB = 640, HS = 1.8, col = v => aVs.indexOf(v);
+    aNote(p);
+    put(b.ga, { o: 1 }); put(b.gh, { o: 1 }); put(b.line, { o: 1, x: aPX(aEdge[aBestJ(aDraws[0])]) });
+    b.dots.forEach((e, i) => show(e, .2 + i * .03, .3)); b.sig(aDraws[0], .2); b.hyp(aBest(aDraws[0], aCLS.thr), .2);
+    b.label('σ', -32, .2); b.label('h', 62, .2);
+    const hx = G(p, { o: 0 });                                                 // eje del histograma
+    mk('path', { d: `M${HX(0) - 80} ${HB}H${HX(4) + 80}`, stroke: COL.dim, 'stroke-width': 2 }, hx);
+    aVs.forEach((v, k) => T(hx, String(v), { x: HX(k), y: HB + 32, size: 24, fill: COL.dim, anchor: 'middle', font: MATH }));
+    T(hx, 'correlación del mejor umbral con cada σ', { x: HX(2), y: HB + 68, size: 22, fill: COL.dim, anchor: 'middle' });
+    show(hx, tm);
+    const stack = aVs.map(() => 0);
+    aDraws.forEach((sg, n) => {
+      const t = tm + .5 + n * .55, k = col(aSup(sg, aCLS.thr));
+      if (n) { b.sig(sg, t, .2); b.hyp(aBest(sg, aCLS.thr), t, .2); b.cut(aBestJ(sg), t, .25); }
+      const tok = put(mk('rect', { x: HX(k) - 30, y: -22, width: 60, height: 20, fill: HUE.rad }, p), { y: HB - 4 - stack[k]++ * 26 - 46, o: 0 });
+      tw(tok, { o: 1, y: st(tok).y + 46 }, t + .2, .35, out); hide(tok, ta, .4);
+    });
+    Array.from({ length: 14 }, (_, n) => aSig(60 + n)).forEach((sg, n) => { const t = ta + .5 + n * .2; b.sig(sg, t, .1); b.hyp(aBest(sg, aCLS.thr), t, .1); b.cut(aBestJ(sg), t, .12); });
+    aHist.forEach((c, k) => {
+      const e = put(mk('rect', { x: HX(k) - 45, y: HB, width: 90, height: 0, fill: COL.dim }, p), {});
+      tw(e, { a_y: HB - c * HS, a_height: c * HS }, ta + .5, 2.6, out);
+      text(p, String(c), HX(k), HB - c * HS - 10, ta + 3.1, { size: 22, anchor: 'middle' });
+    });
+    const mx = HX(0) + aRADS.thr / .25 * 150;
+    show(put(mk('path', { d: `M${mx} 392V${HB}`, stroke: HUE.rad, 'stroke-width': 4, 'stroke-dasharray': '10 7' }, p), { o: 0 }), tn);
+    text(p, `promedio ${aVal(aRADS.thr)}`, mx, 378, m('val'), { size: 26, fill: HUE.rad, anchor: 'middle', weight: 600 });
+    text(p, 'Muchos vectores de signos', 940, 150, tm, { size: 32, fill: COL.task, weight: 600 });
+    text(p, 'cada vez: la correlación del mejor umbral', 940, 188, tm + 2.4, { size: 22, fill: COL.dim });
+    aTx(p, `m = ${aM}:  2^{${aM}} = ${aAll.length} vectores σ posibles`, 940, 258, ta, { size: 26 });
+    text(p, 'Complejidad de Rademacher empírica', 940, 336, tn + 2, { size: 30, fill: HUE.rad, weight: 600 });
+    text(p, 'de H sobre la muestra S: el promedio de esas correlaciones', 940, 372, tn + 2, { size: 22, fill: COL.dim });
+    aTx(p, `umbrales, esta muestra:  ℜ̂_{S}(H) ${aVal(aRADS.thr)}`, 940, 436, m('val'), { size: 28, weight: 600 });
+    aTx(p, 'ℜ̂_{S}(H) = E_{σ}[ sup_{h∈H} (1/m) Σ_{i} σ_{i} h(x_{i}) ]', 940, 522, m('form'), { size: 30, fill: COL.task, weight: 600 });
+    text(p, 'definición 3.1 del libro', 940, 558, m('form'), { size: 22, fill: COL.dim });
+    aTx(p, 'σ_{1}, …, σ_{m}: variables de Rademacher', 940, 628, m('name'), { size: 26 });
+    text(p, 'independientes, uniformes en {−1, +1}', 940, 664, m('name'), { size: 22, fill: COL.dim });
+    text(p, 'No usa etiquetas: solo los puntos de la muestra y signos al azar.', 800, 800, m('name', 1.6), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['riqueza', 'Conjuntos pobres y ricos', (m) => {
+    const p = panel(0), tc = m('change'), ts = [0, tc, tc + 1.5, tc + 3];
+    const rows = [['one', 'una sola hipótesis', 'siempre +1', 7.4], ['thr', 'umbrales', '+1 a la derecha, −1 a la izquierda', .9], ['int', 'intervalos', '+1 dentro, −1 fuera', 5.6], ['all', 'todas las funciones', 'cualquier signo en cada punto', 5.4]];
+    aNote(p);
+    text(p, 'puntos: signos σ · franja: la mejor hipótesis del conjunto', aX0, 124, .3, { size: 22, fill: COL.dim });
+    text(p, 'con este σ', 910, 124, m('one'), { size: 22, fill: COL.dim, anchor: 'middle' });
+    text(p, 'complejidad empírica: promedio sobre los 256 σ', 1010, 124, m('thr'), { size: 22, fill: HUE.rad });
+    rows.forEach(([key, name, desc, tv], n) => {
+      const y = 232 + n * 130, t0 = m(key), g = G(p, { o: 0 }), hs = aSeq.map(sg => aBest(sg, aCLS[key]));
+      const nm = T(g, name, { x: aX0, y: y - 40, size: 26, weight: 600 });
+      T(g, desc, { x: aX0 + 30 + name.length * 13.5, y: y - 40, size: 22, fill: COL.dim });
+      const cells = aIdx.map(i => mk('rect', { x: aPX(aEdge[i]), y: y - 22, width: (aEdge[i + 1] - aEdge[i]) * aXW + .5, height: 44, fill: aHue(hs[0][i]), 'fill-opacity': .32 }, g));
+      mk('path', { d: `M${aPX(0)} ${y}H${aPX(1)}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+      const dots = aXs.map((x, i) => put(mk('circle', { r: 10, fill: aHue(aSeq[0][i]), stroke: COL.board, 'stroke-width': 2 }, g), { x: aPX(x), y }));
+      aSeq.forEach((sg, s) => {
+        const v = T(g, aFmt(aDotp(sg, hs[s]) / aM), { x: 910, y: y + 10, size: 28, font: MATH, anchor: 'middle', o: s ? 0 : 1 });
+        if (s) { show(v, ts[s], .2); aIdx.forEach(i => { tw(dots[i], { c_fill: aHue(sg[i]) }, ts[s], .3); tw(cells[i], { c_fill: aHue(hs[s][i]) }, ts[s], .3); }); }
+        if (s < aSeq.length - 1) hide(v, ts[s + 1], .2);
+      });
+      show(g, n ? t0 : .3);
+      aBar(p, 1010, y + 10, aRADS[key] * 420, t0 + tv, HUE.rad);
+      text(p, aVal(aRADS[key]), 1026 + aRADS[key] * 420, y + 12, t0 + tv, { size: 30, weight: 600, fill: HUE.rad });
+    });
+    text(p, 'Cuanto más rico es H, mejor sigue al ruido: mayor complejidad.', 800, 734, m('rich'), { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+    aTx(p, 'Complejidad de Rademacher:   ℜ_{m}(H) = E_{S}[ ℜ̂_{S}(H) ]', 800, 792, m('exp', 3), { size: 30, anchor: 'middle', weight: 600 });
+    text(p, 'esperanza sobre las muestras S de tamaño m extraídas de D · definición 3.2 del libro', 800, 830, m('exp', 3.6), { size: 22, fill: COL.dim, anchor: 'middle' });
+  }],
+
+  ['cota', 'La cota de generalización', (m) => {
+    const p = panel(0), tg = m('G'), tb = m('bound'), tf = m('phi'), tc = m('mcd'), th = m('ghost'), tsw = m('swap'), ts = m('signs');
+    const SY = 440, GY = 560, slot = i => 170 + i * 88, mv = 4, nx = aPX(.63);
+    aNote(p, 'esquema de la demostración · no está a escala');
+    text(p, 'G: una familia de funciones g con valores en [0, 1]', aX0, 120, .3, { size: 26 });
+    aTx(p, 'al aprender:  G = { (x, y) ↦ L(h(x), y) :  h ∈ H },  la pérdida de cada hipótesis', aX0, 162, tg + 5.6, { size: 24, fill: COL.dim });
+    text(p, 'Teorema 3.3 · con probabilidad ≥ 1 − δ, para toda g ∈ G:', aX0, 226, tb, { size: 22, fill: COL.dim });
+    [['E[ g(z) ]', 'promedio verdadero', 100, 4.6, COL.chalk], ['≤', '', 340, 6.4, COL.chalk], ['(1/m) Σ_{i} g(z_{i})', 'promedio en la muestra', 400, 6.6, COL.chalk], ['+', '', 716, 8.8, COL.chalk],
+      ['2ℜ_{m}(G)', 'complejidad', 776, 9, HUE.rad], ['+', '', 990, 11.4, COL.chalk], ['√[ log(1/δ) / 2m ]', 'confianza', 1050, 11.6, COL.chalk]].forEach(([s, lab, x, dt, fill]) => {
+      aTx(p, s, x, 278, tb + dt, { size: 36, fill, weight: 600 });
+      if (lab) text(p, lab, x, 314, tb + dt + .3, { size: 22, fill: fill === COL.chalk ? COL.dim : fill });
+    });
+    // idea de la demostración: Φ(S) y un punto que cambia (McDiarmid)
+    aTx(p, 'S', 84, SY + 10, tf, { size: 30, anchor: 'end' });
+    const sd = aXs.map((x, i) => { const e = put(mk('circle', { r: 11, fill: COL.chalk }, p), { x: aPX(x), y: SY, o: 0 }); show(e, tf + i * .05, .3); return e; });
+    const ring = put(mk('circle', { r: 20, fill: 'none', stroke: HUE.hyp, 'stroke-width': 4 }, p), { x: aPX(aXs[mv]), y: SY, o: 0 });
+    show(ring, tc + .3, .3); tw(ring, { x: nx }, tc + 1.2, .8); tw(sd[mv], { x: nx }, tc + 1.2, .8); hide(ring, th - .4, .3);
+    const fg = G(p, { o: 0 });
+    aTx(fg, 'Φ(S)', aX0, 530, null, { size: 28 });
+    mk('rect', { x: 200, y: 508, width: 330, height: 24, fill: COL.chalk, 'fill-opacity': .8 }, fg);
+    show(fg, tf + .6); hide(fg, th - .4, .3);
+    const ex = put(mk('rect', { x: 530, y: 508, width: 0, height: 24, fill: HUE.hyp }, fg), {});
+    tw(ex, { a_width: 42 }, tc + 1.2, .8);
+    const br = G(fg, { o: 0 });
+    mk('path', { d: 'M530 546v10h42v-10', fill: 'none', stroke: HUE.hyp, 'stroke-width': 2.5 }, br); aTx(br, '≤ 1/m', 551, 590, null, { size: 26, fill: HUE.hyp, anchor: 'middle' });
+    show(br, tc + 2);
+    // segunda muestra y simetrización
+    sd.forEach((e, i) => tw(e, { x: slot(i) }, th, .8));
+    aTx(p, 'S′', 84, GY + 10, th + .3, { size: 30, anchor: 'end', fill: COL.dim });
+    const gd = aIdx.map(i => { const e = put(mk('circle', { r: 11, fill: COL.board, stroke: COL.chalk, 'stroke-width': 3, 'stroke-dasharray': '5 4' }, p), { x: slot(i), y: GY, o: 0 }); show(e, th + .3 + i * .05, .3); return e; });
+    const sgn = aIdx.map(i => aSign(p, slot(i), (SY + GY) / 2, 34));
+    aIdx.forEach(i => {
+      const first = i === 2, t = first ? tsw + .4 : ts + .9 + i * .12;
+      if (first) { const l = put(mk('path', { d: `M${slot(i) - 26} ${SY - 26}V${GY + 26}h52V${SY - 26}Z`, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, p), { o: 0 }); show(l, tsw, .3); hide(l, ts, .4); }
+      sgn[i](aS1[i], first ? tsw + 1.8 : ts + .2 + i * .08);
+      if (aS1[i] < 0) { tw(sd[i], { y: GY }, t, .8); tw(gd[i], { y: SY }, t, .8); }
+    });
+    aTx(p, 'σ', 84, (SY + GY) / 2 + 10, ts, { size: 30, anchor: 'end', fill: COL.dim });
+    aTx(p, '(1/m) Σ_{i} σ_{i} ( g(z′_{i}) − g(z_{i}) )', 478, 650, ts + 1.6, { size: 30, anchor: 'middle' });
+    aTx(p, 'Φ(S) = sup_{g∈G} ( E[g] − Ê_{S}[g] )', 940, 400, tf, { size: 28 });
+    text(p, 'la peor diferencia entre los dos promedios', 940, 436, tf + .4, { size: 22, fill: COL.dim });
+    text(p, 'cambiar un punto la mueve a lo sumo 1/m', 940, 494, tc, { size: 24 });
+    aTx(p, 'McDiarmid: Φ(S) se concentra cerca de E[Φ(S)]', 940, 532, tc + 6.6, { size: 24, weight: 600, font: UI });
+    aTx(p, 'S′: una segunda muestra, imaginaria', 940, 592, th, { size: 24, font: UI });
+    aTx(p, 'intercambiar z_{i} y z′_{i} cambia un signo;', 940, 630, tsw, { size: 24, font: UI });
+    text(p, 'la distribución sigue siendo la misma', 940, 664, tsw + 3.2, { size: 24 });
+    aTx(p, 'E[Φ(S)] ≤ 2ℜ_{m}(G)', 940, 734, ts + 2.4, { size: 36, fill: HUE.rad, weight: 600 });
+    text(p, 'simetrización', 1300, 730, ts + 3.4, { size: 24, fill: COL.dim });
+  }],
+
+  ['clasif', 'Clasificación binaria', (m) => {
+    const p = panel(0), tl = m('loss'), tf = m('flip'), th = m('half'), tt = m('thm'), te = m('emp'), tm = m('m'), ta = m('allf');
+    const ys = aXs.map(x => x >= .45 ? 1 : -1), Y = 250, ms = [8, 32, 128, 512];
+    aNote(p, 'muestra ilustrativa · complejidades calculadas en la página');
+    mk('path', { d: `M${aPX(0)} ${Y}H${aPX(1)}`, stroke: COL.dim, 'stroke-width': 3 }, p);
+    aXs.forEach((x, i) => show(put(mk('circle', { r: 13, fill: aHue(ys[i]) }, p), { x: aPX(x), y: Y, o: 0 }), .2 + i * .04, .3));
+    aTx(p, 'y_{i}', 84, Y + 10, .3, { size: 28, fill: COL.dim, anchor: 'end' });
+    text(p, 'una muestra etiquetada: salmón +1, azul −1', aX0, 130, .3, { size: 22, fill: COL.dim });
+    aTx(p, 'σ_{i}', 84, Y - 52, tf - .6, { size: 28, fill: COL.dim, anchor: 'end' });
+    aTx(p, '−y_{i}σ_{i}', 84, Y + 82, tf + 1.6, { size: 28, fill: COL.dim, anchor: 'end' });
+    aXs.forEach((x, i) => {
+      aSign(p, aPX(x), Y - 60, 36)(aS1[i], tf - .6 + i * .05);
+      aSign(p, aPX(x), Y + 72, 36)(-ys[i] * aS1[i], tf + 1.6 + i * .18);
+    });
+    text(p, 'otro vector de signos al azar: la misma distribución', aX0 + 20, Y + 126, tf + 3.6, { size: 22, fill: COL.dim });
+    aTx(p, 'Clasificación binaria:  h(x), y ∈ {−1, +1}', 940, 150, .3, { size: 28, fill: COL.task, weight: 600 });
+    aTx(p, 'pérdida 0-1:   1_{h(x)≠y} = (1 − y·h(x)) / 2', 940, 208, tl + 3, { size: 28 });
+    text(p, '1 si la hipótesis falla, 0 si acierta', 940, 244, tl + 4.6, { size: 22, fill: COL.dim });
+    aTx(p, 'ℜ̂_{S}(G) = ½ ℜ̂_{S}(H)', 940, 322, th + 2.4, { size: 36, fill: HUE.rad, weight: 600 });
+    text(p, 'lema 3.4 · en H solo cuentan los puntos x de S', 940, 360, th + 3, { size: 22, fill: COL.dim });
+    text(p, 'Teorema 3.5 · con probabilidad ≥ 1 − δ, para toda h ∈ H:', aX0, 470, tt, { size: 22, fill: COL.dim });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + ℜ_{m}(H) + √[ log(1/δ) / 2m ]', aX0, 522, tt + 1, { size: 34, fill: COL.task, weight: 600 });
+    aTx(p, 'R(h) ≤ R̂_{S}(h) + ℜ̂_{S}(H) + 3√[ log(2/δ) / 2m ]', aX0, 596, te, { size: 30 });
+    text(p, 'depende de los datos: se calcula con la muestra que se tiene', aX0, 632, te + 2.6, { size: 22, fill: COL.dim });
+    aTx(p, 'umbrales (H infinito):  ℜ_{m}(H)', 940, 450, tm, { size: 24, fill: HUE.rad, weight: 600 });
+    ms.forEach((n, i) => {
+      const v = aRadThr(n), y = 494 + i * 40, t = tm + .5 + i * .6;
+      aTx(p, `m = ${n}`, 940, y, t, { size: 26 }); aBar(p, 1070, y, v * 420, t, HUE.rad);
+      text(p, aFmt(v), 1084 + v * 420, y, t + .3, { size: 26, weight: 600 });
+    });
+    text(p, 'todas las funciones, con cualquier m:', 940, 668, ta, { size: 22, fill: COL.bad });
+    aBar(p, 1070, 706, 420, ta + .4, COL.bad); text(p, '1', 1504, 706, ta + .8, { size: 26, weight: 600, fill: COL.bad });
+    text(p, 'La cota es útil cuando la complejidad baja al crecer m.', 800, 800, tm + 4, { size: 30, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), k = 560, x0 = 560, c = aConf(aQM, aQD);
+    aTx(p, `R(h) ≤ R̂_{S}(h) + ℜ_{m}(H) + √[ log(1/δ) / 2m ]      m = ${aQM},  δ = ${aQD}`, aX0, 120, null, { size: 28 });
+    [[COL.chalk, 'error empírico'], [HUE.rad, 'complejidad de Rademacher'], [COL.dim, 'término de confianza']].forEach(([fill, s], i) => {
+      const x = aX0 + [0, 250, 640][i];
+      mk('rect', { x, y: 164, width: 26, height: 22, fill }, p); T(p, s, { x: x + 38, y: 184, size: 22 });
+    });
+    mk('path', { d: `M${x0 + k} 214V572`, stroke: COL.chalk, 'stroke-width': 2, 'stroke-dasharray': '8 8' }, p);
+    T(p, '1', { x: x0 + k, y: 206, size: 24, anchor: 'middle', font: MATH }); T(p, '0', { x: x0, y: 206, size: 24, anchor: 'middle', font: MATH, fill: COL.dim });
+    mk('path', { d: `M${x0} 214V572`, stroke: COL.dim, 'stroke-width': 2 }, p);
+    S.q2 = aQ2.map(([name, emp, rad], i) => {
+      const y = 280 + i * 120, g = G(p);
+      T(g, `${'ABC'[i]} · ${name}`, { x: aX0, y: y - 6, size: 28, weight: 600 });
+      aTx(g, `R̂_{S}(h) = ${aFmt(emp)}  ·  ℜ_{m}(H) ${Number.isInteger(rad) ? '= ' + rad : '≈ ' + aFmt(rad)}`, aX0, y + 30, null, { size: 22, fill: COL.dim });
+      let x = x0;
+      [[emp, COL.chalk], [rad, HUE.rad], [c, COL.dim]].forEach(([v, fill]) => { mk('rect', { x, y: y - 26, width: v * k, height: 44, fill }, g); x += v * k; });
+      return g;
+    });
+    T(p, 'errores empíricos ilustrativos · complejidades exactas (puntos distintos)', { x: 1570, y: 640, size: 22, fill: COL.dim, anchor: 'end' });
+  }, { ask: done => {
+    const c = aConf(aQM, aQD), tot = aQ2.map(([, e, r]) => e + r + c), right = tot.indexOf(Math.min(...tot));
+    const no = ['Su complejidad es 0, pero su única hipótesis se equivoca mucho en la muestra: la cota, ≈ ' + aFmt(tot[0]) + ', queda por encima de la de otro conjunto.', '',
+      'Ajusta la muestra sin errores, pero igual ajustaría cualquier ruido: su complejidad es 1 y la cota supera 1, así que no dice nada.'];
+    return quiz(BAND, [{
+      id: 'c-garantia', prompt: ['Cada barra suma los tres términos de la cota para un conjunto de hipótesis. ¿Cuál da la mejor garantía? Elegirlo en el dibujo.'],
+      build: pickEls(aQ2.map(([name], i) => ({ el: S.q2[i], box: [aX0 - 14, 280 + i * 120 - 46, 1440, 96], label: `${'ABC'[i]}, ${name}` })), right,
+        `La suma más baja: ${aFmt(aQ2[right][1])} + ${aFmt(aQ2[right][2])} + ${aFmt(c)} ≈ ${aFmt(tot[right])}. Los umbrales ajustan bien la muestra sin poder seguir el ruido.`,
+        i => no[i]),
+    }], done);
+  } }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Con H infinito, contar no sirve: se mide cuánto puede H seguir al ruido.', 'w1'], ['Complejidad empírica: la mejor correlación, promediada sobre signos al azar.', 'w2'],
+      ['Acota, para toda g a la vez, el promedio verdadero menos el de la muestra.', 'w3'], ['Clasificación binaria: error ≤ error empírico + complejidad de H + confianza.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 200, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 200, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 260, size: 32, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre la complejidad de Rademacher empírica de un conjunto H de hipótesis con valores en {−1, +1}: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Para calcularla hacen falta las etiquetas de la muestra.'], ans: ['f'], why: 'Solo usa los puntos de la muestra y signos al azar: las etiquetas no aparecen en la definición.' },
+      { parts: ['Si H tiene una sola hipótesis, vale 0.'], ans: ['v'], why: 'Una hipótesis fija coincide con un signo al azar la mitad de las veces: su correlación promedio es 0.' },
+      { parts: ['Si H puede copiar cualquier vector de signos sobre la muestra, vale 1.'], ans: ['v'], why: 'Para cada vector de signos hay una hipótesis que coincide en todos los puntos: la mejor correlación siempre es 1.' },
+      { parts: ['La familia de pérdidas 0-1 asociada a H tiene el doble de complejidad que H.'], ans: ['f'], why: 'Es al revés: por el lema 3.4, la complejidad de la familia de pérdidas es la mitad de la de H.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-rico', prompt: ['La cota para clasificación binaria suma el error empírico, la complejidad de Rademacher de H y un término de confianza. Si se cambia H por un conjunto más rico que lo contiene, ¿qué pasa?'],
+    build: choice([['Los dos primeros términos bajan: un conjunto más rico siempre mejora la cota.'], ['El mejor error empírico no sube y la complejidad no baja: hay que equilibrarlos.'], ['La complejidad no cambia: solo depende del tamaño de la muestra.']], 1,
+      'Con más hipótesis para elegir, la mejor correlación con el ruido solo puede crecer y el menor error empírico solo puede bajar. La cota obliga a equilibrar los dos términos.',
+      ['Un conjunto más rico sigue mejor al ruido, así que su complejidad de Rademacher no puede bajar.', null, 'La complejidad mide lo que H puede hacer sobre la muestra. Al agregar hipótesis, la mejor correlación con el ruido solo puede crecer.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multiclase: cotas y algoritmos directos</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 19, title: 'Multiclase: cotas y algoritmos directos', minutes: 7, language: 'es', next: '../ch20/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 18) ---------- */
+// salmón = clase 1, azul = clase 2, verde menta = clase 3 (tercer color, solo en este capítulo) · ámbar = la hipótesis: fronteras, cortes, lo elegido ·
+// violeta = términos de complejidad · rojo = error (✗, margen negativo, pares fallados). En este capítulo no se usa el verde para marcar aciertos.
+const HUE = { c: [COL.nat, COL.whole, COL.irr], hyp: COL.task, cx: COL.real };
+const aHue = y => HUE.c[y];
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'r^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηφρσλμξΦΠΛΩ‖ℜℝ√∑∏⟹⟺≈∼∞⊤∈→↦′])/;                                            // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aNum = v => String(+v.toFixed(2)).replace('-', '−');                           // sin ceros de relleno: 2, −0.25
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aInt = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');                       // 10 000, con espacio fino
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+// --- La muestra: 18 puntos ilustrativos escritos a mano en un marco de 10 × 8. [x1, x2, clase], con las clases 0, 1, 2 (en pantalla: 1, 2, 3).
+const aW = 10, aH = 8, aKc = 3;
+const aP = [[1, 1.6, 0], [1.8, 3.4, 0], [2.6, .9, 0], [3.2, 2.4, 0], [4.2, 3.6, 0], [3.9, 1.3, 0], [7.6, 2.3, 0],
+  [6.2, 1, 1], [6.6, 3.3, 1], [8.6, 1.2, 1], [9, 3, 1], [8.3, 3.9, 1], [6.9, .8, 1],
+  [1.6, 6.6, 2], [3.4, 5.6, 2], [4.8, 7, 2], [6.2, 6, 2], [8.2, 6.8, 2]];
+const aM = aP.length, aAllI = aP.map((_, i) => i);
+// --- Hipótesis con puntuación: h(x, y) = w_y · Φ(x), con Φ(x) = (x1 − 5, x2 − 4, 1) (el marco centrado y una coordenada constante).
+const aPhi = q => [q[0] - aW / 2, q[1] - aH / 2, 1];
+const aDot = (u, v) => u.reduce((s, a, i) => s + a * v[i], 0);
+const aSc = (W, q) => { const f = aPhi(q); return W.map(w => aDot(w, f)); };            // las k puntuaciones de un punto
+const aArg = v => v.reduce((b, u, i) => u > v[b] ? i : b, 0);
+const aMg = (W, q, y) => { const s = aSc(W, q); return s[y] - Math.max(...s.filter((_, l) => l !== y)); };   // margen ρ_h(x, y)
+const aRival = (W, q, y) => { const s = aSc(W, q); let b = -1; s.forEach((v, l) => { if (l !== y && (b < 0 || v > s[b])) b = l; }); return b; };   // la mejor de las otras clases
+// SVM multiclase (§9.3.1) por su dual, con ascenso por bloques: un bloque por punto, con solución exacta (bisección sobre el multiplicador).
+// Dual: max ∑ α_i·e_{y_i} − ½ ∑ (α_i·α_j) K(x_i, x_j), con α_{i y_i} ≤ C, α_{il} ≤ 0 si l ≠ y_i, α_i·1 = 0. w_l = ∑ α_{il} Φ(x_i).
+const aMsvm = (pts, C, sweeps = 4000) => {
+  const k = aKc, F = pts.map(aPhi), al = pts.map(() => Array(k).fill(0)), W = Array.from({ length: k }, () => [0, 0, 0]);
+  for (let s = 0; s < sweeps; s++) pts.forEach((q, i) => {
+    const f = F[i], A = aDot(f, f), y = q[2], B = W.map((w, l) => aDot(w, f) - A * al[i][l] - (l === y ? 1 : 0)), cap = l => l === y ? C : 0;
+    let lo = Math.min(...B) - A * C * k - 1, hi = Math.max(...B) + A * C + 1;
+    for (let it = 0; it < 80; it++) { const th = (lo + hi) / 2; if (aSum(B.map((b, l) => Math.min(cap(l), (th - b) / A))) > 0) hi = th; else lo = th; }
+    const th = (lo + hi) / 2, nw = B.map((b, l) => Math.min(cap(l), (th - b) / A));
+    nw.forEach((v, l) => { const d = v - al[i][l]; al[i][l] += d; for (let c = 0; c < 3; c++) W[l][c] += d * f[c]; });
+  });
+  const xi = pts.map(q => Math.max(0, 1 - aMg(W, q, q[2]))), nrm = aSum(W.map(w => aDot(w, w)));
+  return { W, al, xi, nrm, primal: nrm / 2 + C * aSum(xi), dual: aSum(pts.map((q, i) => al[i][q[2]])) - nrm / 2 };
+};
+const aC = 1, aSvm = aMsvm(aP, aC), aWt = aSvm.W;
+const aMgs = aP.map(q => aMg(aWt, q, q[2]));                                           // los 18 márgenes
+const aErrs = aMgs.filter(v => v <= 0).length;                                         // puntos mal clasificados
+const aRho = 1, aPhiR = (u, rho) => Math.min(1, Math.max(0, 1 - u / rho));             // pérdida de margen Φ_ρ (definición 5.5)
+const aRhat = aSum(aMgs.map(v => aPhiR(v, aRho))) / aM;                                // pérdida de margen empírica (9.5)
+const aLow = aMgs.filter(v => v <= aRho + 1e-7).length;                                // puntos con margen ≤ ρ: la cota de (9.6)
+const aSlackI = aAllI.filter(i => aSvm.xi[i] > 1e-6);                                  // puntos con holgura positiva
+// Región del argmax de la clase y: el marco recortado por los semiplanos h(x, y) ≥ h(x, l). Devuelve el polígono y sus lados interiores.
+const aClip = (poly, a, b, c) => { const out = [], v = q => a * q[0] + b * q[1] + c; poly.forEach((p, i) => { const q = poly[(i + 1) % poly.length], vp = v(p), vq = v(q); if (vp >= 0) out.push(p); if ((vp >= 0) !== (vq >= 0)) { const t = vp / (vp - vq); out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]); } }); return out; };
+const aRegion = (W, y) => W.reduce((poly, w, l) => l === y ? poly : aClip(poly, W[y][0] - w[0], W[y][1] - w[1], (W[y][2] - w[2]) - (W[y][0] - w[0]) * aW / 2 - (W[y][1] - w[1]) * aH / 2), [[0, 0], [aW, 0], [aW, aH], [0, aH]]);
+const aInner = poly => poly.map((p, i) => [p, poly[(i + 1) % poly.length]]).filter(([p, q]) => !((p[0] === q[0] && (p[0] === 0 || p[0] === aW)) || (p[1] === q[1] && (p[1] === 0 || p[1] === aH))));
+// Tres puntos de la muestra para leer el margen: el de mayor margen, el de menor margen positivo y el mal clasificado.
+const aEx = [aMgs.indexOf(Math.max(...aMgs)), aAllI.filter(i => aMgs[i] > 0).reduce((b, i) => aMgs[i] < aMgs[b] ? i : b), aAllI.find(i => aMgs[i] <= 0)];
+// Comprobación 1: tres puntos nuevos con su clase verdadera; solo uno queda del lado equivocado.
+const aQ1 = [[5.6, 2.2, 1], [2.2, 5.2, 0], [7, 5.4, 2]], aQ1m = aQ1.map(q => aMg(aWt, q, q[2])), aQ1r = aQ1m.findIndex(v => v <= 0);
+// --- Cota por margen con kernels (corolario 9.4): el término del medio de (9.11), 4k √(r²Λ²/ρ² / m), con rΛ/ρ = aRL.
+const aRL = 1, aMb = 10000, aTerm = (k, m) => 4 * k * aRL / Math.sqrt(m), aKs = [3, 10, 100];
+const aNeed = (k, v) => Math.ceil((4 * k * aRL / v) ** 2 - 1e-9);                     // m para que el término baje a v: crece como k²
+// --- AdaBoost.MH (§9.3.2): cada punto se parte en k ejemplos binarios ((x_i, l), y_i[l]), con y_i[l] = +1 si l es su clase y −1 si no.
+const aYl = (i, l) => aP[i][2] === l ? 1 : -1;
+const aThr = (idx, c) => { const v = [...new Set(idx.map(i => aP[i][c]))].sort((a, b) => a - b), th = []; for (let j = 1; j < v.length; j++) th.push(+((v[j - 1] + v[j]) / 2).toFixed(4)); return th; };
+// Clasificador base sobre pares (x, l): un corte x_c < th y, de cada lado, un «sí» (+1) o «no» (−1) para cada clase. sg[lado][l].
+const aBh = (b, i, l) => b.sg[aP[i][b.c] < b.th ? 0 : 1][l];
+// El mejor para la distribución D sobre los pares: para cada corte, el signo de cada (lado, clase) va con el mayor peso. Empates: el primero.
+const aBbest = D => { let best = null; [0, 1].forEach(c => aThr(aAllI, c).forEach(th => { const pw = [0, 1].map(() => Array.from({ length: aKc }, () => [0, 0])); aAllI.forEach(i => { const s = aP[i][c] < th ? 0 : 1; for (let l = 0; l < aKc; l++) pw[s][l][aYl(i, l) > 0 ? 0 : 1] += D[i][l]; }); const sg = pw.map(sd => sd.map(([a, b]) => a > b ? 1 : -1)), e = aSum(pw.map(sd => aSum(sd.map(([a, b]) => Math.min(a, b))))); if (!best || e < best.e - 1e-12) best = { c, th, sg, e }; })); return best; };
+const aMH = rounds => { let D = aP.map(() => Array(aKc).fill(1 / (aM * aKc))); const R = []; for (let t = 0; t < rounds; t++) { const b = aBbest(D), eps = b.e, al = .5 * Math.log((1 - eps) / eps), Z = 2 * Math.sqrt(eps * (1 - eps)), Dn = D.map((r, i) => r.map((v, l) => v * Math.exp(-al * aYl(i, l) * aBh(b, i, l)) / Z)); R.push({ b, eps, al, Z, D, Dn, miss: aAllI.flatMap(i => [0, 1, 2].filter(l => aBh(b, i, l) !== aYl(i, l)).map(l => [i, l])) }); D = Dn; } return R; };
+const aMh = aMH(1)[0];
+// --- Árboles de decisión (§9.3.3). Nodo = conjunto de índices de la muestra. Preguntas: x_c < a, con a en los puntos medios del nodo.
+const aCnt = idx => { const c = Array(aKc).fill(0); idx.forEach(i => c[aP[i][2]]++); return c; };
+const aImp = { mis: p => 1 - Math.max(...p), ent: p => -aSum(p.map(u => u > 0 ? u * Math.log2(u) : 0)), gini: p => aSum(p.map(u => u * (1 - u))) };
+const aFn = (F, idx) => aImp[F](aCnt(idx).map(c => c / idx.length));                   // impureza F(n)
+const aSplit = (idx, q) => [idx.filter(i => aP[i][q.c] < q.th), idx.filter(i => aP[i][q.c] >= q.th)];   // [sí, no]
+const aQs = idx => [0, 1].flatMap(c => aThr(idx, c).map(th => ({ c, th })));
+// Baja de impureza de la pregunta q en el nodo: F(n) − [η F(n−) + (1 − η) F(n+)], con η = fracción de puntos que va a n− (aquí, el lado del «sí»).
+const aGain = (F, idx, q) => { const [a, b] = aSplit(idx, q), eta = a.length / idx.length; return aFn(F, idx) - (eta * aFn(F, a) + (1 - eta) * aFn(F, b)); };
+const aLab = idx => aArg(aCnt(idx));                                                  // etiqueta de una hoja: la clase mayoritaria (empate: la primera)
+const aNerr = idx => idx.length - Math.max(...aCnt(idx));                              // puntos de la muestra que la hoja falla: |n| F(n) con el error de clasificación
+// Crecimiento voraz (figura 9.3): en cada ronda, el par (hoja, pregunta) de mayor baja de impureza; para cuando todas las hojas son puras.
+// Devuelve los nodos (id, idx, box, par, side, q, kids, depth) y los pasos (nodo partido, pregunta, baja).
+const aGrow = F => {
+  const nodes = [{ id: 0, idx: aAllI, box: { x0: 0, x1: aW, y0: 0, y1: aH }, par: -1, depth: 0, q: null, kids: null }], steps = [];
+  for (;;) {
+    let best = null;
+    nodes.filter(n => !n.kids && aFn(F, n.idx) > 1e-12).forEach(n => aQs(n.idx).forEach(q => { const g = aGain(F, n.idx, q); if (!best || g > best.g + 1e-12) best = { n, q, g }; }));
+    if (!best || best.g <= 1e-12) break;
+    const { n, q, g } = best, [a, b] = aSplit(n.idx, q), bx = n.box;
+    n.q = q; n.kids = [nodes.length, nodes.length + 1];
+    nodes.push({ id: nodes.length, idx: a, box: q.c ? { ...bx, y1: q.th } : { ...bx, x1: q.th }, par: n.id, side: 0, depth: n.depth + 1, q: null, kids: null });
+    nodes.push({ id: nodes.length, idx: b, box: q.c ? { ...bx, y0: q.th } : { ...bx, x0: q.th }, par: n.id, side: 1, depth: n.depth + 1, q: null, kids: null });
+    steps.push({ n: n.id, q, g });
+  }
+  return { nodes, steps };
+};
+const aTree = aGrow('gini'), aNd = aTree.nodes, aSteps = aTree.steps;
+// Un árbol parcial es el conjunto de nodos partidos. Sus hojas y sus errores en la muestra:
+const aLeaves = (sp, id = 0) => sp.has(id) ? aNd[id].kids.flatMap(c => aLeaves(sp, c)) : [id];
+const aTerr = sp => aSum(aLeaves(sp).map(id => aNerr(aNd[id].idx)));
+const aGrown = t => new Set(aSteps.slice(0, t).map(s => s.n));                         // el árbol tras t rondas
+// Poda (p. 227–228): de tree(i) a tree(i+1) se colapsa el nodo interior de menor r = (|n′| F(n′) − R̂(tree′)) / (|hojas de tree′| − 1). Empates: todos.
+const aPrune = () => { let sp = aGrown(aSteps.length); const seq = [sp]; while (sp.size) { const rs = [...sp].map(id => { const sub = aLeaves(sp, id); return { id, r: (aNerr(aNd[id].idx) - aSum(sub.map(j => aNerr(aNd[j].idx)))) / (sub.length - 1) }; }), rmin = Math.min(...rs.map(u => u.r)), nx = new Set(sp), drop = id => { if (nx.has(id)) { nx.delete(id); aNd[id].kids.forEach(drop); } }; rs.filter(u => u.r <= rmin + 1e-12).forEach(u => drop(u.id)); sp = nx; seq.push(sp); } return seq; };
+const aSeqP = aPrune(), aLam = 1;
+const aGl = sp => aTerr(sp) + aLam * aLeaves(sp).length;                                // G_λ (9.15), con el error de clasificación: errores + λ · hojas
+const aBestP = aSeqP.reduce((b, sp, i) => aGl(sp) < aGl(aSeqP[b]) - 1e-12 ? i : b, 0);
+// Impureza: las tres medidas en la raíz; la mejor pregunta de la raíz según cada una; y un corte que el error de clasificación no premia.
+const aRootQ = aQs(aAllI), aRootG = F => aRootQ.map(q => aGain(F, aAllI, q));
+const aBestQ = F => { const g = aRootG(F); return aRootQ[g.indexOf(Math.max(...g))]; };
+const aFlat = aRootQ.map((q, j) => ({ q, mis: aGain('mis', aAllI, q), gini: aGain('gini', aAllI, q), ent: aGain('ent', aAllI, q) })).filter(u => u.mis < 1e-12).sort((a, b) => b.gini - a.gini)[0] || null;
+// Un nodo donde ningún corte baja el error de clasificación (su mejor baja es 0), y el índice de Gini sí baja.
+const aStuck = aSteps.map(s => ({ ...s, mis: Math.max(...aQs(aNd[s.n].idx).map(q => aGain('mis', aNd[s.n].idx, q))) })).find(u => u.mis < 1e-12) || null;
+// Comprobación 2: tres cortes candidatos en la raíz.
+const aQ2 = [{ c: 0, th: aThr(aAllI, 0)[3] }, aSteps[0].q, { c: 1, th: aThr(aAllI, 1)[5] }], aQ2g = aQ2.map(q => aGain('gini', aAllI, q)), aQ2r = aQ2g.indexOf(Math.max(...aQ2g));
+/* aMATH:end */
+
+// Plano de tres clases, en un marco de aW × aH. pl.bg = regiones teñidas, pl.lg = rectas, pl.dg = puntos, pl.tg = marcas sobre los puntos.
+// Con hid, los puntos nacen ocultos (pl.dots[i] se muestra aparte).
+const aPl = (p, ox, oy, sc, { t0 = .4, ax = false, hid = false, r = sc > 50 ? 11 : 8 } = {}) => {
+  const X = x => ox + x * sc, Y = y => oy - y * sc, g = G(p, { o: t0 == null ? 1 : 0 }), pl = { X, Y, sc, g };
+  pl.bg = G(g);
+  mk('rect', { x: ox, y: oy - aH * sc, width: aW * sc, height: aH * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  if (ax) { aTx(g, 'x_{1}', X(aW), Y(0) + 28, null, { size: 22, fill: COL.dim, anchor: 'end' }); aTx(g, 'x_{2}', X(0) - 12, Y(aH) + 20, null, { size: 22, fill: COL.dim, anchor: 'end' }); }
+  pl.lg = G(g); pl.dg = G(g); pl.tg = G(g);
+  pl.dots = aP.map(q => put(mk('circle', { r, fill: aHue(q[2]), stroke: COL.board, 'stroke-width': 2 }, pl.dg), { x: X(q[0]), y: Y(q[1]), o: hid ? 0 : 1 }));
+  if (t0 != null) show(g, t0);
+  return pl;
+};
+const aMain = (p, o = {}) => aPl(p, 100, 686, 62, { ax: true, ...o });
+const aLeg = (p, x, y, t0 = .5) => { const g = G(p, { o: 0 }); aWt.forEach((_, l) => aSq(g, x + l * 150, y, aHue(l), `clase ${l + 1}`, { dot: true })); show(g, t0); return g; };   // leyenda de las tres clases
+// Regiones del argmax de h(x, y) = w_y · Φ(x): cada una teñida con el color de su clase; las fronteras, en ámbar.
+const aReg = (pl, W, { tint = .2 } = {}) => {
+  const g = G(pl.bg, { o: 0 }), lg = G(pl.lg, { o: 0 }), P = q => pl.X(q[0]).toFixed(1) + ' ' + pl.Y(q[1]).toFixed(1);
+  W.forEach((_, y) => { const poly = aRegion(W, y); if (poly.length < 3) return; mk('path', { d: 'M' + poly.map(P).join('L') + 'Z', fill: aHue(y), 'fill-opacity': tint }, g); aInner(poly).forEach(([a, b]) => mk('path', { d: `M${P(a)}L${P(b)}`, stroke: HUE.hyp, 'stroke-width': 4, 'stroke-linecap': 'round', fill: 'none' }, lg)); });
+  return { g, lg, show: (t, dur = .6) => { show(g, t, dur); show(lg, t, dur); }, hide: (t, dur = .4) => { hide(g, t, dur); hide(lg, t, dur); } };
+};
+// Marca de error (✗ roja) junto a un punto. En este capítulo los aciertos no se marcan en verde: el verde menta es la clase 3.
+const aMark = (g, x, y, t0) => { const e = put(mk('path', { d: 'M-9 -9L9 9M9 -9L-9 9', fill: 'none', stroke: COL.bad, 'stroke-width': 5, 'stroke-linecap': 'round' }, g), { x, y, o: 0 }); show(e, t0, .25); return e; };
+// Barras de las k puntuaciones de un punto: una por clase, hacia arriba si es positiva y hacia abajo si es negativa, con su valor.
+// bs.set(s) las fija; bs.wg = marco blanco de la mayor (la predicción); bs.mg(s, y) coloca el corchete del margen entre la barra
+// de la clase y y la mayor de las otras (ámbar si es positivo, rojo si no) dentro de bs.mgG, que nace oculto.
+const aBars = (p, x0, y0, { bw = 60, gap = 30, u = 48, t0 = null, size = 24, labY = 170 } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), bx = l => x0 + l * (bw + gap), xe = bx(aKc - 1) + bw, bs = { g, bx, xe };
+  mk('path', { d: `M${x0 - 14} ${y0}H${xe + 14}`, stroke: COL.faint, 'stroke-width': 2 }, g);
+  const rs = aWt.map((_, l) => mk('rect', { x: bx(l), y: y0, width: bw, height: 0, fill: aHue(l) }, g));
+  bs.wg = G(g); const ol = mk('rect', { width: bw + 12, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, bs.wg);
+  const ns = aWt.map((_, l) => aTx(g, '', bx(l) + bw / 2, y0, null, { size, anchor: 'middle', weight: 600 }));
+  aWt.forEach((_, l) => aTx(g, `h(x, ${l + 1})`, bx(l) + bw / 2, y0 + labY, null, { size: 22, fill: aHue(l), anchor: 'middle' }));
+  bs.set = s => {
+    s.forEach((v, l) => { const hh = Math.abs(v) * u; rs[l].setAttribute('y', (v >= 0 ? y0 - hh : y0).toFixed(1)); rs[l].setAttribute('height', hh.toFixed(1)); ns[l]._set(aF2(v)); put(ns[l], { y: v >= 0 ? y0 - hh - 12 : y0 + hh + size + 2 }); });
+    const b = aArg(s), hb = Math.abs(s[b]) * u;
+    [['x', bx(b) - 6], ['y', (s[b] >= 0 ? y0 - hb : y0) - 6], ['height', hb + 12]].forEach(([k, v]) => ol.setAttribute(k, v.toFixed(1)));
+  };
+  bs.mgG = G(g, { o: 0 });
+  const ml = mk('path', { fill: 'none', stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '5 6' }, bs.mgG), mv = mk('path', { fill: 'none', 'stroke-width': 6, 'stroke-linecap': 'round' }, bs.mgG), mt = aTx(bs.mgG, '', xe + 42, y0, null, { size: 26, weight: 700 });
+  bs.mg = (s, y) => {
+    const r = aWt.map((_, l) => l).filter(l => l !== y).reduce((b, l) => s[l] > s[b] ? l : b), ya = y0 - s[y] * u, yb = y0 - s[r] * u, xb = xe + 26, col = s[y] > s[r] ? HUE.hyp : COL.bad;
+    ml.setAttribute('d', `M${bx(y) + bw} ${ya.toFixed(1)}H${xb}M${bx(r) + bw} ${yb.toFixed(1)}H${xb}`); mv.setAttribute('d', `M${xb} ${ya.toFixed(1)}V${yb.toFixed(1)}`); mv.setAttribute('stroke', col);
+    mt._set(aF2(s[y] - s[r])); mt.setAttribute('fill', col); put(mt, { y: (ya + yb) / 2 + 9 });
+  };
+  if (t0 != null) show(g, t0);
+  return bs;
+};
+// Flecha de (x0, y0) a (x1, y1), con borde del color de la pizarra para que se lea sobre las regiones.
+const aVec = (g, x0, y0, x1, y1, col) => {
+  const a = Math.atan2(y1 - y0, x1 - x0), hx = x1 - 18 * Math.cos(a), hy = y1 - 18 * Math.sin(a), nx = 8 * Math.sin(a), ny = -8 * Math.cos(a), f = v => v.toFixed(1);
+  mk('path', { d: `M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}`, stroke: COL.board, 'stroke-width': 11, 'stroke-linecap': 'round', fill: 'none' }, g);
+  mk('path', { d: `M${f(x0)} ${f(y0)}L${f(hx)} ${f(hy)}`, stroke: col, 'stroke-width': 5, fill: 'none' }, g);
+  mk('path', { d: `M${f(x1)} ${f(y1)}L${f(hx + nx)} ${f(hy + ny)}L${f(hx - nx)} ${f(hy - ny)}Z`, fill: col }, g);
+};
+// Árbol de decisión dibujado junto al plano pl. Cada nodo tiene dos aspectos: interior (recuadro con su pregunta) y hoja (rectángulo del
+// color de su etiqueta, con los puntos por clase debajo). Como en la figura 9.2, la rama del «sí» va a la izquierda. En el plano, cada hoja
+// tiñe su región y cada pregunta traza su corte. tv.set(sp, t, tk) lleva el dibujo al árbol cuyos nodos partidos son sp: las preguntas
+// cambian en t; los hijos y las regiones, en tk.
+const aTreeV = (p, pl, { x0 = 860, dx = 160, y0 = 262, dy = 92 } = {}) => {
+  const order = aLeaves(aGrown(aSteps.length)), px = {}, NX = id => { if (px[id] == null) px[id] = aNd[id].kids ? (NX(aNd[id].kids[0]) + NX(aNd[id].kids[1])) / 2 : x0 + order.indexOf(id) * dx; return px[id]; };
+  const NY = id => y0 + aNd[id].depth * dy, ng = G(p), els = [], tv = { NX, NY };
+  aNd.forEach(n => {
+    const x = NX(n.id), y = NY(n.id), g = G(ng, { o: 0 }), gi = G(g, { o: 0 }), gf = G(g, { o: 0 }), lab = aLab(n.idx), b = n.box;
+    if (n.par >= 0) { const xa = NX(n.par), ya = NY(n.par) + 28; mk('path', { d: `M${xa} ${ya}L${x} ${y - 28}`, stroke: COL.faint, 'stroke-width': 3, fill: 'none' }, g); aHalo(aTx(g, n.side ? 'no' : 'sí', (xa + x) / 2 + (n.side ? 16 : -16), (ya + y - 28) / 2 + 6, null, { size: 22, fill: COL.dim, font: UI, anchor: n.side ? 'start' : 'end' })); }
+    if (n.q) { mk('rect', { x: x - 84, y: y - 26, width: 168, height: 52, rx: 10, fill: COL.board, stroke: HUE.hyp, 'stroke-width': 3 }, gi); aTx(gi, `x_{${n.q.c + 1}} < ${aNum(n.q.th)}`, x, y + 9, null, { size: 24, anchor: 'middle', weight: 600 }); }
+    mk('rect', { x: x - 52, y: y - 26, width: 104, height: 52, fill: aHue(lab) }, gf); T(gf, `clase ${lab + 1}`, { x, y: y + 8, size: 22, fill: COL.board, weight: 700, anchor: 'middle' });
+    aCnt(n.idx).forEach((c, l) => aTx(gf, String(c), x + (l - 1) * 30, y + 52, null, { size: 22, fill: aHue(l), anchor: 'middle', weight: 600 }));
+    const rg = put(mk('rect', { x: pl.X(b.x0), y: pl.Y(b.y1), width: (b.x1 - b.x0) * pl.sc, height: (b.y1 - b.y0) * pl.sc, fill: aHue(lab), 'fill-opacity': .24 }, pl.bg), { o: 0 });
+    const ct = n.q ? put(mk('path', { d: n.q.c ? `M${pl.X(b.x0)} ${pl.Y(n.q.th)}H${pl.X(b.x1)}` : `M${pl.X(n.q.th)} ${pl.Y(b.y0)}V${pl.Y(b.y1)}`, stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, pl.lg), { o: 0 }) : null;
+    els[n.id] = { all: [g, gi, gf, rg, ct], on: [false, false, false, false, false] };
+  });
+  tv.set = (sp, t, tk = t, dur = .5) => aNd.forEach(n => {
+    const e = els[n.id], vis = n.par < 0 || sp.has(n.par), spl = sp.has(n.id), leaf = vis && !spl;
+    [[vis, tk], [vis && spl, t], [leaf, leaf ? tk : t], [leaf, tk], [vis && spl, t]].forEach(([on, tt], j) => { if (!e.all[j] || e.on[j] === on) return; e.on[j] = on; (on ? show : hide)(e.all[j], tt, dur); });
+  });
+  return tv;
+};
+const aCut = q => `x_{${q.c + 1}} < ${aNum(q.th)}`;                                   // una pregunta, escrita
+const aCutD = (pl, q, b = { x0: 0, x1: aW, y0: 0, y1: aH }) => q.c ? `M${pl.X(b.x0)} ${pl.Y(q.th).toFixed(1)}H${pl.X(b.x1)}` : `M${pl.X(q.th).toFixed(1)} ${pl.Y(b.y0)}V${pl.Y(b.y1)}`;   // su corte dentro de la caja b
+// La cuenta de la baja de impureza (Gini) de una pregunta en un nodo, escrita con sus números.
+const aGainS = (idx, q) => { const [a, b] = aSplit(idx, q), n = idx.length; return `${aF2(aFn('gini', idx))}  −  [ (${a.length}/${n}) · ${aF2(aFn('gini', a))}  +  (${b.length}/${n}) · ${aF2(aFn('gini', b))} ]   =   ${aF2(aGain('gini', idx, q))}`; };
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 19', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Multiclase: cotas y algoritmos directos', { x: 800, y: 450, size: 64, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Con más de dos clases cambian el margen, la cota y los algoritmos.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['prob', 'El problema multiclase', (m) => {
+    const p = panel(0), tk = m('k'), tmo = m('mono'), tmu = m('multi'), td = m('dif'), t2 = m('d2'), t3 = m('d3'), RX = 800, cn = aCnt(aAllI);
+    aNote(p, `muestra ilustrativa de ${aM} puntos, escrita a mano · tercera clase en verde menta: aquí el verde no marca aciertos`);
+    aTitle(p, 'Más de dos clases');
+    const pl = aMain(p, { hid: true });
+    pl.dots.forEach((e, i) => show(e, aP[i][2] < 2 ? .5 + .03 * i : tk + .12 * (i - cn[0] - cn[1]), .4));
+    const l1 = G(p, { o: 0 }), l2 = G(p, { o: 0 }); show(l1, .5); show(l2, tk);
+    aSq(l1, 100, 752, aHue(0), 'clase 1', { dot: true }); aSq(l1, 250, 752, aHue(1), 'clase 2', { dot: true }); aSq(l2, 400, 752, aHue(2), 'clase 3', { dot: true });
+    aTx(l2, `aquí, k = ${aKc}`, 570, 752, null, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['Y = {1, …, k}'], ['          mono-etiqueta: una sola clase por punto', COL.dim, UI, 24]], RX, 262, tmo, { size: 30, weight: 600 });
+    aRow(p, [['Y = {−1, +1}^{k}'], ['          multi-etiqueta: varias a la vez', COL.dim, UI, 24]], RX, 342, tmu, { size: 30, weight: 600 });
+    aRow(p, [['deportes ', COL.dim, UI], ['+1'], ['      negocios ', COL.dim, UI], ['+1'], ['      sociedad ', COL.dim, UI], ['−1']], RX, 398, tmu + 3, { size: 24, weight: 600 });
+    aTx(p, 'Dificultades propias', RX, 510, td, { size: 26, fill: HUE.hyp, font: UI, weight: 600 });
+    [[`k entra en el costo de cómputo`, td + 2], [`clases desbalanceadas: algunas, con muy pocos ejemplos`, t2], ['jerarquías entre clases: no todos los errores pesan igual', t3]].forEach(([str, tt], i) => {
+      const g = G(p, { o: 0 }); show(g, tt);
+      mk('circle', { cx: RX + 12, cy: 570 + i * 62 - 9, r: 7, fill: HUE.hyp }, g);
+      aTx(g, str, RX + 40, 570 + i * 62, null, { size: 28, font: UI, weight: 600 });
+    });
+  }],
+
+  ['marg', 'Puntuación y margen', (m) => {
+    const p = panel(0), ts = m('sc'), tp = m('probe'), ta = m('arg'), tr = m('reg'), tm = m('mg'), tq = [m('p1'), m('p2'), m('p3')], te = m('err'), RX = 800;
+    aNote(p, `h(x, y) = w_{y} · Φ(x), con Φ(x) = (x_{1} − 5, x_{2} − 4, 1) · los w_{y} son los de la SVM multiclase de más adelante (C = ${aC})`);
+    aTitle(p, 'Una puntuación por clase, y el margen');
+    const pl = aMain(p), rg = aReg(pl, aWt); aLeg(p, 100, 752);
+    rg.show(tr + .8, 2);
+    const g1 = G(p);
+    aRow(g1, [['h: X × Y → ℝ'], ['          una puntuación por cada par (x, y)', COL.dim, UI, 24]], RX, 262, ts, { size: 30, weight: 600 });
+    aRow(g1, [['x  ↦  argmax_{y∈Y} h(x, y)'], ['          la predicción', COL.dim, UI, 24]], RX, 336, ta, { size: 30, weight: 600 });
+    hide(g1, tm - .5, .4);
+    aRow(p, [['ρ_{h}(x, y)', HUE.hyp], ['  =  '], ['h(x, y)'], ['  −  '], ['max_{y′≠y} h(x, y′)'], ['          el margen', COL.dim, UI, 24]], RX, 262, [tm, tm, tm + 2, tm + 3.8, tm + 4.1, tm], { size: 30, weight: 600 });
+    // el punto de prueba recorre el plano; al final se posa sobre el primer punto de la muestra y pasa a ser el anillo de selección
+    const bs = aBars(p, 820, 560, { t0: tp }), pg = G(pl.tg, { o: 0 }), pf = put(mk('circle', { r: 8 }, pg), { o: 0 });
+    mk('circle', { r: 17, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, pg);
+    put(bs.wg, { o: 0 }); show(bs.wg, ta, .3); show(pg, tp, .3); show(pf, ta, .3); hide(pf, tm - 1, .3);
+    const at = q => { const s = aSc(aWt, q); put(pg, { x: pl.X(q[0]), y: pl.Y(q[1]) }); pf.setAttribute('fill', aHue(aArg(s))); bs.set(s); return s; };
+    const PTS = [[2.4, 2.9], [7.9, 2.7], [6, 6.5], [2.4, 6.3], aP[aEx[0]]], LEN = PTS.slice(1).map((q, i) => Math.hypot(q[0] - PTS[i][0], q[1] - PTS[i][1])), TOT = aSum(LEN);
+    const along = u => { let d = u * TOT, i = 0; while (i < LEN.length - 1 && d > LEN[i]) d -= LEN[i++]; const f = Math.min(1, d / LEN[i]), a = PTS[i], b = PTS[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]; };
+    at(PTS[0]);
+    prog(u => at(along(u)), tr + .2, tm - tr - 1.2, lin);
+    aEx.forEach((i, k) => {
+      const q = aP[i], t0 = tq[k], mg = aMgs[i], g = G(p, { o: 0 });
+      if (k) { const a = aP[aEx[k - 1]]; hide(bs.mgG, t0 - .1, .2); prog(u => at([a[0] + (q[0] - a[0]) * u, a[1] + (q[1] - a[1]) * u]), t0, .8); }
+      aAt(() => bs.mg(aSc(aWt, q), q[2]), t0 + .85); show(bs.mgG, t0 + .9, .4);
+      show(g, t0 + 1.6);
+      aSq(g, 1210, 450 + k * 60, aHue(q[2]), `clase ${q[2] + 1}`, { dot: true });
+      aTx(g, `ρ_{h}  =  ${aF2(mg)}`, 1380, 452 + k * 60, null, { size: 28, weight: 600, fill: mg > 0 ? HUE.hyp : COL.bad });
+    });
+    aMark(pl.tg, pl.X(aP[aEx[2]][0]) + 24, pl.Y(aP[aEx[2]][1]) - 22, te + .4);
+    aRow(p, [['h se equivoca en (x, y)', COL.chalk, UI, 26], ['   ⟺   '], ['ρ_{h}(x, y) ≤ 0', COL.bad], [`        aquí: ${aErrs} de ${aM}`, COL.dim, UI, 24]], RX, 812, [te, te, te, te + 2.4], { size: 28, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [100, 580, 1060], W = 440;
+    T(p, 'Tres puntos nuevos', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Cada tarjeta muestra las tres puntuaciones de un punto y su clase verdadera.', 100, 194, null, { size: 26, fill: COL.dim, font: UI });
+    S.q1 = aQ1.map((q, j) => {
+      const g = G(p, { x: BX[j], y: 230 });
+      mk('rect', { x: 0, y: 0, width: W, height: 430, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+      mk('circle', { cx: 44, cy: 44, r: 22, fill: COL.chalk }, g); T(g, String(j + 1), { x: 44, y: 53, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+      const bs = aBars(g, 111, 200, { bw: 50, gap: 34, u: 50, labY: 152 }); bs.set(aSc(aWt, q)); put(bs.wg, { o: 0 });
+      aSq(g, 112, 404, aHue(q[2]), `clase verdadera: ${q[2] + 1}`, { dot: true });
+      return g;
+    });
+    S.q1B = BX.map(x => [x, 230, W, 430]);
+  }, { ask: done => { const s = aSc(aWt, aQ1[aQ1r]), y = aQ1[aQ1r][2]; quiz(BAND, [{
+    id: 'c-margen', prompt: ['¿En cuál de los tres puntos el margen es negativo?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'punto ' + (j + 1) })), aQ1r,
+      `Su clase tiene ${aF2(s[y])} y otra llega a ${aF2(Math.max(...s))}: el margen es ${aF2(aQ1m[aQ1r])}.`,
+      () => 'Ahí su clase tiene la mayor puntuación: el margen es positivo.'),
+  }], done); } }],
+
+  ['cota', 'La cota por margen', (m) => {
+    const p = panel(0), tb = m('bin'), tt = m('thm'), tk = m('k'), tpi = m('pi'), tke = m('ker'), ts = [m('b1'), m('b2'), m('b3')], tn = m('need'), LX = 100, BX0 = 330, SC = 280, RY = k => 566 + k * 62;
+    aNote(p, `barras: el término del medio de (9.11) con rΛ/ρ = ${aRL} (valor ilustrativo) y m = ${aInt(aMb)}`);
+    aTitle(p, 'Teorema 9.2: la cota por margen, con k clases');
+    aRow(p, [['binario (cap. 10):        ', COL.dim, UI, 24], ['R(h)  ≤  R̂_{S,ρ}(h)'], ['  +  (2/ρ) ℜ_{m}(H)', HUE.cx], ['  +  √( log(1/δ) / 2m )']], LX, 226, [.5, tb, tb + 2.6, tb + 6], { size: 28, weight: 600 });
+    const th = aRow(p, [['R(h)  ≤  R̂_{S,ρ}(h)  +  '], ['(4k/ρ)', HUE.cx], [' ℜ_{m}(Π_{1}(H))', HUE.cx], ['  +  √( log(1/δ) / 2m )'], ['          (9.10)', COL.dim, UI, 22]], LX, 322, [tt, tk, tk, tt, tt], { size: 34, weight: 600 });
+    tw(th[1], { c_fill: COL.chalk }, tk + 2.6, .3); tw(th[1], { c_fill: HUE.cx }, tk + 3.2, .6);
+    const gp = G(p);
+    aRow(gp, [['Π_{1}(H)  =  { x ↦ h(x, y) :  y ∈ Y,  h ∈ H }', HUE.cx], ['          las puntuaciones, con la clase fija', COL.dim, UI, 24]], LX, 414, tpi, { size: 28, weight: 600 });
+    hide(gp, tke - .5, .4);
+    aRow(p, [['con kernels (corolario 9.4):        ', COL.dim, UI, 24], ['R(h)  ≤  R̂_{S,ρ}(h)  +  '], ['4k √( r^{2}Λ^{2}/ρ^{2} / m )', HUE.cx], ['  +  √( log(1/δ) / 2m )'], ['          (9.11)', COL.dim, UI, 22]], LX, 414, tke, { size: 28, weight: 600 });
+    aTx(p, 'K(x, x) ≤ r^{2}  y  ∑_{l} ‖w_{l}‖^{2} ≤ Λ^{2}', LX, 462, tke + 1.2, { size: 22, fill: COL.dim });
+    const gl = G(p, { o: 0 }); show(gl, ts[0] - .5);
+    mk('path', { d: `M${BX0 + SC} ${RY(0) - 40}V${RY(2) + 34}`, stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '4 8', fill: 'none' }, gl);
+    aTx(gl, '1: desde aquí la cota no informa', BX0 + SC + 12, RY(0) - 30, null, { size: 22, fill: COL.dim, font: UI });
+    aKs.forEach((k, j) => {
+      const y = RY(j), t0 = ts[j], v = aTerm(k, aMb), g = G(p, { o: 0 }); show(g, t0, .4);
+      aTx(g, `k = ${k}`, LX, y + 9, null, { size: 28, weight: 600 });
+      const r = mk('rect', { x: BX0, y: y - 18, width: 0, height: 36, fill: HUE.cx }, g);
+      prog(u => r.setAttribute('width', (u * v * SC).toFixed(1)), t0 + .2, 1.2, out);
+      aTx(p, aF2(v), BX0 + v * SC + 18, y + 10, t0 + 1.2, { size: 30, weight: 700 });
+    });
+    aTx(p, 'más clases      ⟹      más datos (m ∝ k^{2}) o un margen ρ mayor', LX, 800, tn, { size: 30, weight: 600, fill: HUE.hyp, font: UI });
+  }],
+
+  ['svm', 'SVM multiclase', (m) => {
+    const p = panel(0), twt = m('w'), to = m('obj'), tc = m('con'), tx = m('xi'), t1 = m('s1'), t2 = m('s2'), tz = m('size'), RX = 800, sl = [...aSlackI].sort((a, b) => aSvm.xi[b] - aSvm.xi[a]);
+    aNote(p, `problema dual resuelto en la página, C = ${aC} · las puntuaciones y regiones de todo el capítulo son las de esta SVM · flechas: w_{l} a escala ×3`);
+    aTitle(p, 'SVM multiclase: un vector de pesos por clase');
+    const pl = aMain(p), rg = aReg(pl, aWt); aLeg(p, 100, 752); rg.show(.4);
+    const gw = G(pl.tg, { o: 0 }); show(gw, twt + .6); hide(gw, tx - .5, .4);
+    aWt.forEach((w, l) => { const x1 = pl.X(aW / 2 + 3 * w[0]), y1 = pl.Y(aH / 2 + 3 * w[1]); aVec(gw, pl.X(aW / 2), pl.Y(aH / 2), x1, y1, aHue(l)); aHalo(aTx(gw, `w_{${l + 1}}`, x1 + (w[0] > 0 ? 14 : -14), y1 + (w[1] > 0 ? -8 : 28), null, { size: 26, fill: aHue(l), weight: 700, anchor: w[0] > 0 ? 'start' : 'end' })); });
+    aRow(p, [['h(x, y)  =  w_{y} · Φ(x)'], ['          pesos:  ', COL.dim, UI, 24], ['w_{1}', aHue(0)], [',  '], ['w_{2}', aHue(1)], [',  '], ['w_{3}', aHue(2)]], RX, 250, twt, { size: 30, weight: 600 });
+    aRow(p, [['min_{W, ξ}      '], ['½ ∑_{l} ‖w_{l}‖^{2}'], ['   +   '], ['C ∑_{i} ξ_{i}']], RX, 340, [to, to + 1.6, to + 5.2, to + 5.5], { size: 30, weight: 600 });
+    aTx(p, 'h(x_{i}, y_{i})   ≥   h(x_{i}, l)  +  1  −  ξ_{i} ,          ξ_{i} ≥ 0', RX, 430, tc + 1, { size: 30, weight: 600 });
+    aTx(p, 'para cada punto i y cada clase l ≠ y_{i}', RX, 474, tc + 1, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'ξ_{i}   =   max( 1 − ρ_{h}(x_{i}, y_{i}),  0 )', RX, 564, tx, { size: 30, weight: 600, fill: HUE.hyp });
+    aRow(p, [['aquí:        ', COL.dim, UI, 24], ['∑_{i} ξ_{i}   =   '], [aF2(aSvm.xi[sl[0]])], [`  +  ${aF2(aSvm.xi[sl[1]])}`], [`   =   ${aF2(aSum(aSvm.xi))}`]], RX, 654, [t1, t1, t1 + 3.4, t2 + 1.4, t2 + 2.6], { size: 30, weight: 600 });
+    aRow(p, [['un solo problema cuadrático: Ω(mk) variables', COL.chalk, UI, 26], [`        aquí, ${aM} × ${aKc} = ${aM * aKc}`, COL.dim, UI, 22]], RX, 744, tz, { size: 28, weight: 600 });
+    [[sl[0], t1 + 1.6, 18, 34, 'start'], [sl[1], t2 + .4, -18, 32, 'end']].forEach(([i, t0, dx, dy, anchor]) => {
+      const x = pl.X(aP[i][0]), y = pl.Y(aP[i][1]), g = G(pl.tg, { o: 0 }); show(g, t0, .4);
+      mk('circle', { cx: x, cy: y, r: 18, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, g);
+      aHalo(aTx(g, `ξ = ${aF2(aSvm.xi[i])}`, x + dx, y + dy, null, { size: 24, weight: 700, anchor }));
+    });
+  }],
+
+  ['boost', 'AdaBoost.MH', (m) => {
+    const p = panel(0), tsp = m('split'), tr = m('row'), tn = m('sp'), ta = m('ada'), tb = m('base'), tm = m('miss'), tc = m('cost'), RX = 800, CX = i => 862 + i * 38, RY = l => 290 + l * 38, DY = 236, cs = 18, b = aMh.b, mk2 = aM * aKc;
+    aNote(p, 'clasificador base de la ronda 1: un corte y, de cada lado, sí (+1) o no (−1) a cada clase; el de menor error entre todos los cortes');
+    aTitle(p, 'AdaBoost.MH: de k clases a ejemplos binarios');
+    const pl = aMain(p); aLeg(p, 100, 752);
+    aP.forEach((q, i) => { const e = put(mk('circle', { r: 9, fill: aHue(q[2]), stroke: COL.board, 'stroke-width': 2 }, p), { x: pl.X(q[0]), y: pl.Y(q[1]), o: 0 }); show(e, tsp - .2, .2); tw(e, { x: CX(i), y: DY }, tsp + .04 * i, .9); });
+    aWt.forEach((_, l) => aTx(p, `l = ${l + 1}`, CX(0) - 30, RY(l) + 8, tsp + 1.6, { size: 22, fill: aHue(l), anchor: 'end' }));
+    const cell = {}, fr = {};
+    aP.forEach((q, i) => aWt.forEach((_, l) => {
+      const g = G(p, { x: CX(i), y: RY(l), o: 0 }); show(g, tsp + 1.6 + .03 * i + .25 * l, .3);
+      mk('rect', { x: -cs / 2, y: -cs / 2, width: cs, height: cs, fill: COL.board, stroke: COL.faint, 'stroke-width': 2 }, g);
+      if (aYl(i, l) > 0) show(put(mk('rect', { x: -cs / 2, y: -cs / 2, width: cs, height: cs, fill: aHue(l) }, g), { o: 0 }), tr + 1 + .04 * i, .3);
+      cell[i + ',' + l] = g;
+    }));
+    const gk = G(p, { o: 0 }); show(gk, tr + 1);
+    mk('rect', { x: CX(0) - 11, y: RY(2) + 34, width: 22, height: 22, fill: COL.chalk }, gk); aTx(gk, '+1: es de esa clase', CX(0) + 22, RY(2) + 53, null, { size: 22, fill: COL.dim, font: UI });
+    mk('rect', { x: CX(0) + 259, y: RY(2) + 34, width: 22, height: 22, fill: COL.board, stroke: COL.faint, 'stroke-width': 2 }, gk); aTx(gk, '−1: no lo es', CX(0) + 292, RY(2) + 53, null, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, '(x_{i}, y_{i})    →    ((x_{i}, 1), y_{i}[1]),  …,  ((x_{i}, k), y_{i}[k])', RX, 500, tsp + 1, { size: 28, weight: 600 });
+    aRow(p, [['S′:        '], [`m × k  =  ${aM} × ${aKc}  =  ${mk2}`], ['   ejemplos binarios', COL.dim, UI, 24]], RX, 562, tn, { size: 28, weight: 600 });
+    aRow(p, [['AdaBoost (cap. 14) sobre S′', HUE.hyp, UI, 26], ['          D_{1}(i, l)  =  1/(mk)']], RX, 624, ta, { size: 28, weight: 600 });
+    aRow(p, [['ronda 1:        ', COL.dim, UI, 24], [`ε_{1}  =  ${aMh.miss.length}/${mk2}  =  ${aF2(aMh.eps)}`, COL.bad], ['          los pares fallados pesan más', COL.dim, UI, 24]], RX, 686, [tm, tm, tm + 3], { size: 28, weight: 600 });
+    aRow(p, [['costo:        ', COL.dim, UI, 24], ['O( mk log(mk) + mkdN )'], ['          stumps en ℝ^{d}, N rondas', COL.dim, UI, 22]], RX, 748, tc, { size: 28, weight: 600 });
+    // el clasificador base sobre el plano: el corte, y de cada lado las clases a las que dice «sí»
+    const gb = G(pl.bg, { o: 0 }), gt = G(pl.lg, { o: 0 }); show(gb, tb + .6); show(gt, tb + .6);
+    [0, 1].forEach(sd => { const ys = b.sg[sd].map((s, l) => s > 0 ? l : -1).filter(l => l >= 0), x0 = sd ? b.th : 0, x1 = sd ? aW : b.th; if (b.c) return;
+      if (ys.length) mk('rect', { x: pl.X(x0), y: pl.Y(aH), width: (x1 - x0) * pl.sc, height: aH * pl.sc, fill: aHue(ys[0]), 'fill-opacity': .2 }, gb);
+      aTx(gt, ys.length ? `sí: clase ${ys.map(l => l + 1).join(' y ')}` : 'no a todas', pl.X((x0 + x1) / 2), pl.Y(0) + 28, null, { size: 22, fill: ys.length ? aHue(ys[0]) : COL.dim, font: UI, weight: 600, anchor: 'middle' }); });
+    mk('path', { d: aCutD(pl, b), stroke: HUE.hyp, 'stroke-width': 5, fill: 'none' }, gt);
+    aMh.miss.forEach(([i, l], j) => { const e = put(mk('rect', { x: -cs / 2, y: -cs / 2, width: cs, height: cs, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, p), { x: CX(i), y: RY(l), o: 0 }); show(e, tm + .4 + .05 * j, .3); fr[i + ',' + l] = e; });
+    aP.forEach((q, i) => aWt.forEach((_, l) => { const s = Math.sqrt(aMh.Dn[i][l] * mk2), k = i + ',' + l; tw(cell[k], { s }, tm + 3, .9); if (fr[k]) tw(fr[k], { s }, tm + 3, .9); }));
+  }],
+
+  ['arbol', 'Árbol de decisión', (m) => {
+    const p = panel(0), t0r = m('root'), tq1 = m('q1'), tlf = m('leaf'), tq2 = m('q2'), tq3 = m('q3'), tz = m('zero'), tg = m('g'), tpr = m('prune'), RX = 800, full = aSeqP[0], best = aSeqP[aBestP];
+    aNote(p, `crecimiento voraz con el índice de Gini (figura 9.3), umbrales en los puntos medios · en la poda, F = error de clasificación: |n| F(n) = puntos que la hoja falla`);
+    aTitle(p, 'Árbol de decisión: preguntas en los nodos, etiquetas en las hojas');
+    const pl = aMain(p); aLeg(p, 100, 752);
+    const tv = aTreeV(p, pl), info = aTx(p, '', RX, 190, t0r, { size: 24, font: UI, weight: 600 });
+    const say = sp => info._set(`hojas: ${aLeaves(sp).length}          errores en la muestra: ${aTerr(sp)}`);
+    const seq = [[aGrown(0), t0r, t0r], [aGrown(1), tq1 + 2.2, tlf], [aGrown(2), tq2 + .3, tq2 + 1.6], [aGrown(3), tq3 + .2, tq3 + .9], [aGrown(4), tq3 + 1.7, tq3 + 2.4], [best, tpr + 3.3, tpr + 3.3]];
+    say(seq[0][0]);
+    seq.forEach(([sp, t, tk]) => { tv.set(sp, t, tk); aAt(() => say(sp), tk + .2); });
+    aRow(p, [['G_{λ}(árbol)   =   '], ['∑_{n hoja} |n| F(n)'], ['   +   '], ['λ · n.º de hojas'], ['          (9.15)', COL.dim, UI, 22]], RX, 752, [tg, tg, tg + 2, tg + 2.3, tg], { size: 26, weight: 600 });
+    aRow(p, [[`λ = ${aLam}:        `, COL.dim, UI, 24], [`${aLeaves(full).length} hojas:  ${aTerr(full)} + ${aLeaves(full).length} = ${aGl(full)}`], ['              '], [`${aLeaves(best).length} hojas:  ${aTerr(best)} + ${aLeaves(best).length} = ${aGl(best)}`, HUE.hyp]], RX, 814, [tpr, tpr, tpr, tpr + 3.3], { size: 28, weight: 600 });
+  }],
+
+  ['impur', 'Impureza y elección del corte', (m) => {
+    const p = panel(0), ti = m('imp'), tf = [m('f1'), m('f2'), m('f3')], tgn = m('gain'), tsw = m('sweep'), tbe = m('best'), tst = m('stuck'), tpf = m('pref'), RX = 800, nd = aNd[aStuck.n], cn = aCnt(nd.idx);
+    aNote(p, 'η: fracción de los puntos del nodo que va al hijo n_{−} (aquí, el del «sí») · las bajas mostradas usan el índice de Gini · log en base 2');
+    aTitle(p, 'Impureza: qué pregunta conviene hacer');
+    const pl = aMain(p); aLeg(p, 100, 752);
+    aTx(p, 'p_{l}(n): fracción de los puntos del nodo n que son de la clase l', RX, 226, ti, { size: 24, fill: COL.dim, font: UI });
+    aTx(p, 'en la raíz', 1560, 268, tf[0], { size: 22, fill: COL.dim, font: UI, anchor: 'end' });
+    [['1 − max_{l} p_{l}(n)', 'error de clasificación', 'mis'], ['−∑_{l} p_{l}(n) log_{2} p_{l}(n)', 'entropía', 'ent'], ['∑_{l} p_{l}(n) (1 − p_{l}(n))', 'índice de Gini', 'gini']].forEach(([f, nm, key], i) => {
+      const g = G(p, { o: 0 }), y = 316 + i * 56; show(g, tf[i], .4);
+      aTx(g, f, RX, y, null, { size: 28, weight: 600 }); aTx(g, nm, 1180, y, null, { size: 24, fill: COL.dim, font: UI });
+      aTx(g, aF2(aFn(key, aAllI)), 1560, y, null, { size: 28, weight: 600, anchor: 'end' });
+    });
+    const gg = G(p);
+    aRow(gg, [['F̃(n, q)   =   F(n)  −  [ η F(n_{−})  +  (1 − η) F(n_{+}) ]'], ['          la baja', COL.dim, UI, 24]], RX, 520, tgn, { size: 28, weight: 600 });
+    const nm = aTx(gg, '', RX, 590, tsw, { size: 26, weight: 600 }), ex = aTx(gg, '', RX + 150, 590, tsw, { size: 26, weight: 600 });
+    hide(gg, tst - .5, .4);
+    const ln = put(mk('path', { stroke: HUE.hyp, 'stroke-width': 5, fill: 'none' }, pl.lg), { o: 0 }); show(ln, tsw, .3);
+    const setQ = (q, win) => { ln.setAttribute('d', aCutD(pl, q)); nm._set(aCut(q) + ':'); ex._set(aGainS(aAllI, q)); [nm, ex].forEach(e => e.setAttribute('fill', win ? HUE.hyp : COL.chalk)); };
+    setQ(aRootQ[0], false);
+    prog(u => setQ(aRootQ[Math.min(aRootQ.length - 1, Math.floor(u * aRootQ.length))], false), tsw + .2, tbe - tsw - .8, lin);
+    aAt(() => setQ(aSteps[0].q, true), tbe);
+    hide(ln, tst - .5, .4);
+    // el nodo donde el error de clasificación no baja con ningún corte
+    const gs = G(pl.lg, { o: 0 }); show(gs, tst - .1);
+    aSteps.slice(0, aSteps.findIndex(s => s.n === aStuck.n)).forEach(s => mk('path', { d: aCutD(pl, s.q, aNd[s.n].box), stroke: HUE.hyp, 'stroke-width': 3, fill: 'none' }, gs));
+    mk('rect', { x: pl.X(nd.box.x0) + 4, y: pl.Y(nd.box.y1) + 4, width: (nd.box.x1 - nd.box.x0) * pl.sc - 8, height: (nd.box.y1 - nd.box.y0) * pl.sc - 8, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, gs);
+    const gc = put(mk('path', { d: aCutD(pl, aStuck.q, nd.box), stroke: HUE.hyp, 'stroke-width': 4, 'stroke-dasharray': '10 8', fill: 'none' }, pl.lg), { o: 0 }); show(gc, tst + 6.2);
+    aRow(p, [['nodo marcado, con puntos por clase:      ', COL.dim, UI, 24], [String(cn[0]), aHue(0)], ['  ·  ', COL.dim], [String(cn[1]), aHue(1)], ['  ·  ', COL.dim], [String(cn[2]), aHue(2)]], RX, 520, tst, { size: 28, weight: 600 });
+    aRow(p, [['su mejor baja:      ', COL.dim, UI, 24], ['error de clasificación  ', COL.chalk, UI, 24], [aF2(aStuck.mis), COL.bad], ['          Gini  ', COL.chalk, UI, 24], [aF2(aStuck.g), HUE.hyp]], RX, 590, [tst + 1.6, tst + 1.6, tst + 3.4, tst + 5.4, tst + 6.2], { size: 28, weight: 700 });
+    aTx(p, 'entropía y Gini, estrictamente cóncavas: las preferidas', RX, 690, tpf, { size: 26, weight: 600, fill: HUE.hyp, font: UI });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [100, 590, 1080];
+    T(p, 'Tres cortes para la raíz', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, `El árbol todavía es un solo nodo, con los ${aM} puntos.`, 100, 190, null, { size: 26, fill: COL.dim, font: UI });
+    S.q2 = aQ2.map((q, j) => {
+      const g = G(p), pl = aPl(g, BX[j], 606, 42, { t0: null });
+      mk('path', { d: aCutD(pl, q), stroke: HUE.hyp, 'stroke-width': 5, fill: 'none' }, pl.lg);
+      mk('circle', { cx: BX[j] + 22, cy: 240, r: 20, fill: COL.chalk }, g); T(g, String(j + 1), { x: BX[j] + 22, y: 249, size: 24, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, aCut(q), BX[j] + 210, 648, null, { size: 26, fill: HUE.hyp, weight: 600, anchor: 'middle' });
+      return g;
+    });
+    S.q2B = BX.map(x => [x - 14, 212, 448, 454]);
+  }, { ask: done => { const pure = aSplit(aAllI, aQ2[aQ2r]).find(s => aFn('gini', s) < 1e-9); quiz(BAND, [{
+    id: 'c-corte', prompt: ['¿Cuál de los tres cortes baja más la impureza del nodo?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'corte ' + (j + 1) })), aQ2r,
+      (pure ? `Deja de un lado ${pure.length} puntos de una sola clase` : 'Es el que deja las partes más puras') + `: la baja es ${aF2(aQ2g[aQ2r])}.`,
+      i => `Las dos partes siguen mezcladas: la baja es solo ${aF2(aQ2g[i])}.`),
+  }], done); } }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Multiclase:  una puntuación h(x, y) por clase; se predice la mayor.', 'w1'], ['Margen:  la clase correcta contra la mejor de las otras. La cota paga un factor k.', 'w2'],
+      ['SVM multiclase y AdaBoost.MH:  un solo problema, de tamaño m × k.', 'w3'], ['Árbol de decisión:  cortes voraces que bajan la impureza; después, la poda.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Con una función de puntuación, se predice la clase que recibe la mayor puntuación.'], ans: ['v'], why: 'Es la regla del argmax sobre las k puntuaciones del punto.' },
+      { parts: ['Un margen multiclase negativo indica un punto bien clasificado.'], ans: ['f'], why: 'Al revés: otra clase supera a la correcta, y la hipótesis se equivoca.' },
+      { parts: ['En la cota del teorema 9.2, el término de complejidad no depende del número de clases.'], ans: ['f'], why: 'Lleva el factor cuatro k sobre ro: crece con el número de clases.' },
+      { parts: ['AdaBoost.MH convierte m puntos con k clases en m por k ejemplos binarios.'], ans: ['v'], why: 'Cada punto se parte en k pares de punto y clase, con etiqueta +1 o −1.' },
+      { parts: ['Para elegir los cortes de un árbol, la medida preferida es el error de clasificación.'], ans: ['f'], why: 'Hay nodos donde ningún corte lo baja; se prefieren Gini y la entropía.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

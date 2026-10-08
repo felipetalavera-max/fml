@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>El principio de máxima entropía</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 25, title: 'El principio de máxima entropía', minutes: 7, language: 'es', next: '../ch26/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 24) ---------- */
+// Estimación de densidad: tiza = la muestra y la distribución empírica · ámbar = la distribución elegida p (y su parámetro w) ·
+// rosa (local) = la previa p₀ y la característica Φ · violeta = la restricción (λ, la franja) y la regularización.
+const HUE = { emp: COL.chalk, p: COL.task, pri: COL.rat, cx: COL.real, ok: COL.good, bad: COL.bad };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'p_{w}', 'e^{w}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξΦΨΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺≈∼∞⊤†∈∃→←↦′″⌊⌋½])/;                                   // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aSetA = (e, o) => { Object.entries(o).forEach(([k, v]) => e.setAttribute(k, typeof v === 'number' ? v.toFixed(1) : v)); return e; };
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+// --- Ejemplo ilustrativo: X = las seis caras de un dado cargado. aD es la distribución D, que el aprendiz no conoce.
+const aK = 6, aD = [.07, .10, .13, .17, .23, .30], aU = Array(aK).fill(1 / aK);
+const aPhi = j => j + 1;                                                                  // la única característica (N = 1): el valor de la cara de índice j
+const aDraw = (seed, n, d = aD) => { const r = aRng(seed); return Array.from({ length: n }, () => { let u = r(), j = 0; while (j < d.length - 1 && u >= d[j]) { u -= d[j]; j++; } return j; }); };
+const aSeed = 43, aMs = 60, aS = aDraw(aSeed, aMs);
+const aCnt = S0 => { const c = Array(aK).fill(0); S0.forEach(j => c[j]++); return c; };
+const aEmp = S0 => aCnt(S0).map(c => c / S0.length);                                      // la distribución empírica
+const aMean = p => aSum(p.map((v, j) => v * aPhi(j)));                                    // E_p[Φ]
+const aEnt = p => -aSum(p.map(v => v > 0 ? v * Math.log(v) : 0));                         // entropía H(p), con logaritmo natural
+const aKL = (p, q) => aSum(p.map((v, j) => v > 0 ? v * Math.log(v / q[j]) : 0));          // entropía relativa D(p ‖ q)
+const aLL = (S0, p) => aSum(S0.map(j => Math.log(p[j]))) / S0.length;                     // (1/m) Σ log p(x_i): el objetivo de (12.1), dividido por m
+const aCn = aCnt(aS), aDh = aEmp(aS), aMu = aMean(aDh), aMuD = aMean(aD);
+// --- Distribuciones de Gibbs (12.9) con previa p0 y característica Φ:  p_w[x] = p0[x] e^{w Φ(x)} / Z(w).
+const aZ = (w, p0 = aU) => aSum(p0.map((v, j) => v * Math.exp(w * aPhi(j))));
+const aGibbs = (w, p0 = aU) => { const z = aZ(w, p0); return p0.map((v, j) => v * Math.exp(w * aPhi(j)) / z); };
+// (12.10):  G(w) = (1/m) Σ log(p_w[x_i] / p0[x_i]) − λ‖w‖₁  =  w · E_D̂[Φ] − log Z(w) − λ|w|   (aquí N = 1).
+const aGw = (w, lam, S0 = aS, p0 = aU) => { const pw = aGibbs(w, p0); return aSum(S0.map(j => Math.log(pw[j] / p0[j]))) / S0.length - lam * Math.abs(w); };
+// El dual (12.12), inf_w λ‖w‖₁ − (1/m) Σ log p_w[x_i], por descenso de gradiente proximal: el gradiente de la parte suave es E_{p_w}[Φ] − E_D̂[Φ],
+// su constante de Lipschitz es a lo sumo (6 − 1)²/4 (una varianza), y la norma L1 entra por el umbral suave. Se itera hasta que w deja de cambiar.
+const aSoftT = (v, t) => v > t ? v - t : v < -t ? v + t : 0;
+const aDual = (lam, mu = aMu, p0 = aU) => { const eta = 4 / 25; let w = 0, it = 0; for (; it < 200000; it++) { const nw = aSoftT(w - eta * (aMean(aGibbs(w, p0)) - mu), eta * lam); if (Math.abs(nw - w) < 1e-15) { w = nw; break; } w = nw; } return { lam, w, it, p: aGibbs(w, p0) }; };
+const aLam = .25, aSol = aDual(aLam), aSol0 = aDual(0), aPs = aSol.p, aWs = aSol.w, aW0 = aSol0.w;
+const aGs = aGw(aWs, aLam), aPrim = aKL(aPs, aU), aMuS = aMean(aPs), aFeas = p => Math.abs(aMean(p) - aMu) <= aLam + 1e-9;
+// --- Otras muestras del mismo tamaño, para ver (12.5): sus promedios empíricos.
+const aOth = Array.from({ length: 8 }, (_, k) => aMean(aEmp(aDraw(aSeed + 101 + k, aMs))));
+// --- Tres distribuciones que cumplen la restricción con el mismo promedio que la solución: la de Maxent, una con dos picos (caras 3 y 5) y una en U.
+const aMixV = (A, B, q) => A.map((v, i) => v + (B[i] - v) * q);
+const aTwo = (() => { const p = Array(aK).fill(0); p[4] = (aMuS - 3) / 2; p[2] = 1 - p[4]; return p; })();
+const aPk = aMixV(aPs, aTwo, .6);
+const aUsh = (() => { const p = [0, .1, .1, .1, .1, 0]; p[5] = (aMuS - 1.4 - .6) / 5; p[0] = .6 - p[5]; return p; })();
+// --- Ejemplo 12.1 del libro (MAP): enfermedad rara y un análisis de laboratorio positivo.
+const aPd = .005, aPosD = .98, aNegN = .95, aMapD = aPosD * aPd, aMapN = (1 - aNegN) * (1 - aPd);
+// --- Moneda de (12.3): muestra ilustrativa de 20 tiradas con sesgo .7.
+const aCoinM = 20, aCoinH = (() => { const r = aRng(41); let n = 0; for (let i = 0; i < aCoinM; i++) if (r() < .7) n++; return n; })();
+// --- Comprobaciones. 1: tres candidatas; la de mayor verosimilitud es la más cercana a la empírica.
+const aQ1 = [['uni', aU], ['mix', aMixV(aDh, aU, .4)], ['rev', aDh.slice().reverse()]], aQ1r = 1;
+// 2: tres distribuciones que cumplen la restricción; Maxent elige la de mayor entropía.
+const aQ2 = [['ush', aUsh], ['pk', aPk], ['max', aPs]], aQ2r = 2;
+const aF2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2).replace('-', '−');
+const aF3 = v => (Math.abs(v) < .0005 ? 0 : v).toFixed(3).replace('-', '−');
+const aF1 = v => String(Math.round(v * 10) / 10).replace('-', '−');
+/* aMATH:end */
+
+let aClipN = 0;
+// Histograma sobre las seis caras, con base en yb y esquina izquierda en x0. Barra ancha de tiza = distribución empírica (capa hg.ge);
+// barra angosta ámbar = la distribución p (capa hg.gp); trazo rosa de rayas a la altura de la previa (capa hg.g0). Las tres capas empiezan ocultas.
+// hg.setE(d), hg.setP(d), hg.setP0(d) fijan las alturas · hg.cx(j): centro de la cara de índice j · phi: los rótulos de las caras van en rosa, como valores de Φ.
+const aHg = (p, x0, yb, { slot = 90, sc = 740, we = 60, wp = 30, t0 = .4, size = 24, phi = false, tag = true } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), cx = j => x0 + slot * (j + .5), hg = { g, cx, x0, yb, slot, sc, W: slot * aK };
+  if (t0 != null) show(g, t0);
+  mk('path', { d: `M${x0 - 8} ${yb}H${x0 + slot * aK + 8}`, stroke: COL.dim, 'stroke-width': 2 }, g);
+  hg.ge = G(g, { o: 0 }); hg.gp = G(g, { o: 0 }); hg.g0 = G(g, { o: 0 });
+  const be = aU.map((_, j) => mk('rect', { x: cx(j) - we / 2, width: we, fill: HUE.emp, 'fill-opacity': .2, stroke: HUE.emp, 'stroke-width': 2.5 }, hg.ge));
+  const bp = aU.map((_, j) => mk('rect', { x: cx(j) - wp / 2, width: wp, fill: HUE.p }, hg.gp));
+  const b0 = aU.map(() => mk('path', { stroke: HUE.pri, 'stroke-width': 4, 'stroke-dasharray': '9 6', fill: 'none' }, hg.g0));
+  const bar = bs => d => d.forEach((v, j) => aSetA(bs[j], { y: yb - v * sc, height: v * sc }));
+  hg.setE = bar(be); hg.setP = bar(bp);
+  hg.setP0 = d => d.forEach((v, j) => b0[j].setAttribute('d', `M${(cx(j) - slot / 2 + 3).toFixed(1)} ${(yb - v * sc).toFixed(1)}h${slot - 6}`));
+  aU.forEach((_, j) => aTx(g, String(aPhi(j)), cx(j), yb + size + 10, null, { size, fill: phi ? HUE.pri : COL.dim, anchor: 'middle', weight: phi ? 700 : 500 }));
+  if (tag) aTx(g, phi ? 'Φ(x)' : 'x', x0 - 18, yb + size + 10, null, { size, fill: phi ? HUE.pri : COL.dim, anchor: 'end', weight: phi ? 700 : 500 });
+  return hg;
+};
+// Balanza bajo un histograma: un riel con la escala de la característica. Franja violeta = promedios permitidos (capa bm.gb) · marca de tiza sobre el riel =
+// promedio empírico (capa bm.ge) · triángulo bajo el riel = apoyo, el promedio de la distribución dibujada (capa bm.gf; bm.tri para cambiarle el color) · bm.gt: libre.
+// bm.band(mu, lam), bm.emp(mu), bm.ful(mu) los colocan; bm.MX(v): abscisa del valor v.
+const aBeam = (p, hg, { dy = 62, k = 1, t0 = null } = {}) => {
+  const y = hg.yb + dy, MX = v => hg.cx(0) + (v - 1) * hg.slot, g = G(p, { o: t0 == null ? 1 : 0 }), bm = { g, MX, y };
+  if (t0 != null) show(g, t0);
+  mk('path', { d: `M${hg.x0} ${y}H${hg.x0 + hg.W}`, stroke: COL.dim, 'stroke-width': 4, 'stroke-linecap': 'round' }, g);
+  bm.gb = G(g, { o: 0 }); const band = mk('rect', { y: y - 9 * k, height: 18 * k, fill: HUE.cx, 'fill-opacity': .6, stroke: HUE.cx, 'stroke-width': 2 }, bm.gb);
+  bm.gt = G(g);
+  bm.ge = G(g, { o: 0 }); const ce = put(mk('path', { d: `M0 ${-11 * k}L${-10 * k} ${-27 * k}H${10 * k}Z`, fill: HUE.emp, stroke: COL.board, 'stroke-width': 2 }, bm.ge), { x: 0, y });
+  bm.gf = G(g, { o: 0 }); bm.tri = put(mk('path', { d: `M0 0L${17 * k} ${30 * k}H${-17 * k}Z`, fill: HUE.p, stroke: COL.board, 'stroke-width': 2 }, bm.gf), { x: 0, y: y + 6 * k });
+  bm.band = (mu, lam) => aSetA(band, { x: MX(mu - lam), width: 2 * lam * hg.slot });
+  bm.emp = mu => put(ce, { x: MX(mu) });
+  bm.ful = mu => put(bm.tri, { x: MX(mu) });
+  return bm;
+};
+// Dial lineal de un parámetro (lo … hi): riel, marcas, perilla ámbar y rótulo «nombre = valor». dial.set(v) lo mueve.
+const aDialW = (p, x, y, W, t0, lo, hi, ticks, name = 'w') => {
+  const g = G(p, { o: 0 }), DX = v => x + (v - lo) / (hi - lo) * W;
+  mk('path', { d: `M${x} ${y}H${x + W}`, stroke: COL.faint, 'stroke-width': 6, 'stroke-linecap': 'round', fill: 'none' }, g);
+  ticks.forEach(v => { mk('path', { d: `M${DX(v)} ${y - 10}v20`, stroke: COL.dim, 'stroke-width': 2 }, g); T(g, String(v).replace('-', '−'), { x: DX(v), y: y + 42, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  const kn = put(mk('circle', { r: 15, fill: HUE.p, stroke: COL.board, 'stroke-width': 2 }, g), { y }), lab = aTx(g, '', 0, y - 28, null, { size: 30, fill: HUE.p, weight: 700, anchor: 'middle' });
+  show(g, t0);
+  return { g, set: v => { put(kn, { x: DX(v) }); put(lab, { x: Math.max(x + 60, Math.min(x + W - 60, DX(v))) }); lab._set(`${name} = ${aF2(v)}`); } };
+};
+// Gráfica de funciones de w: marco con esquina superior izquierda en (x0, y0), ejes por el origen y curvas recortadas al marco. gp.fn(f, attrs) traza w ↦ f(w).
+const aGPl = (p, x0, y0, W, HH, w0, w1, v0, v1, t0, wt, vt) => {
+  const g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), WX = w => x0 + (w - w0) / (w1 - w0) * W, VY = v => y0 + HH - (v - v0) / (v1 - v0) * HH;
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: W, height: HH, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  mk('path', { d: `M${x0} ${VY(0).toFixed(1)}h${W}M${WX(0).toFixed(1)} ${y0}v${HH}`, stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, g);
+  wt.forEach(v => T(g, aF1(v), { x: WX(v), y: y0 + HH + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }));
+  vt.forEach(v => T(g, aF2(v), { x: x0 - 12, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }));
+  aTx(g, 'w', x0 + W + 14, VY(0) + 9, null, { size: 26, fill: COL.dim });
+  mk('rect', { x: x0, y: y0, width: W, height: HH }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  const fn = (f, attrs) => { let d = ''; for (let k = 0; k <= 240; k++) { const w = w0 + (w1 - w0) * k / 240; d += (k ? 'L' : 'M') + WX(w).toFixed(1) + ' ' + VY(f(w)).toFixed(1); } return put(mk('path', { d, fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round', ...attrs }, gl), { o: 0 }); };
+  return { g, gl, WX, VY, fn };
+};
+// Recuadro numerado de una comprobación (los tres mosaicos de pickEls).
+const aCard = (p, x, y, w, hh, n) => { const g = G(p, { x, y }); mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); mk('circle', { cx: w - 40, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(n), { x: w - 40, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' }); return g; };
+// Barra horizontal con su expresión arriba y su valor al final (ejemplo 12.1). Crece desde cero en t0.
+const aHBar = (p, x, y, wd, col, expr, val, t0) => {
+  const g = G(p, { o: 0 }), b = mk('rect', { x, y: y + 12, width: 0, height: 30, fill: col }, g), tv = aTx(g, val, x + 12, y + 36, null, { size: 26, fill: col, weight: 700 }); show(g, t0, .4);
+  aTx(g, expr, x, y, null, { size: 22, fill: COL.dim });
+  const ww = Math.max(4, wd); prog(q => { b.setAttribute('width', (ww * q).toFixed(1)); put(tv, { x: x + ww * q + 12 }); }, t0 + .1, 1.1);
+  return g;
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const HX = 150, YB = 610, RX = 800;
+const aQ1why = { uni: 'La uniforme ignora la muestra: su entropía relativa a la empírica es mayor.', rev: 'Ahí las barras van al revés que las de tiza: da poca probabilidad a la muestra.' };
+const aQ2why = { ush: 'Cumple la restricción, pero carga las caras 1 y 6: su entropía es menor.', pk: 'Cumple la restricción, pero tiene dos picos: su entropía es menor.' };
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 3 · Capítulo 25', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'El principio de máxima entropía', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Cómo elegir una distribución a partir de una muestra, suponiendo lo menos posible.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['dens', 'Estimación de densidad', (m) => {
+    const p = panel(0), ts = m('sample'), te = m('emp'), tf = m('fam'), tsm = m('small'), tr = m('rich');
+    aNote(p, 'datos ilustrativos · tiza: muestra y distribución empírica · ámbar: la p elegida · rosa: previa o característica · violeta: restricción o regularización');
+    aTitle(p, 'El problema: estimar una distribución a partir de una muestra');
+    const hg = aHg(p, HX, YB), gd = G(hg.g), gv = G(hg.g, { o: 0 }), seen = Array(aK).fill(0), RW = hg.sc / aMs * 2;
+    hg.setE(aDh); hg.setP(aU);
+    aS.forEach((j, i) => { const k = seen[j]++, y = YB - RW / 2 - Math.floor(k / 2) * RW, d = put(mk('circle', { r: 10.5, fill: HUE.emp }, gd), { x: hg.cx(j) + (k % 2 ? 13 : -13), y: y - 70, o: 0 }); tw(d, { y, o: 1 }, ts + 1.2 + i * .12, .4, out); });
+    aDh.forEach((v, j) => aTx(gv, aF2(v), hg.cx(j), YB - v * hg.sc - 14, null, { size: 22, anchor: 'middle' }));
+    show(hg.ge, te, .6); tw(gd, { o: .35 }, te + .4, .6); show(gv, te + .8); hide(gd, tf - .5, .4); hide(gv, tf - .5, .4);
+    const gq = G(p, { o: 0 }); aSq(gq, HX, 196, HUE.emp, 'distribución empírica'); show(gq, te, .5);
+    const gr = G(p, { o: 0 }); aSq(gr, HX + 290, 196, HUE.p, 'una candidata p'); show(gr, tf, .5);
+    show(hg.gp, tf, .5);
+    [[aU, aGibbs(.4), tf + .8], [aGibbs(.4), aGibbs(-.2), tsm + .2], [aGibbs(-.2), aMixV(aDh, aU, .5), tr + .2]].forEach(([A, B, t0]) => prog(q => hg.setP(aMixV(A, B, q)), t0, 1.6));
+    aRow(p, [['S  =  (x_{1}, …, x_{m})    i.i.d. ∼ D'], [`        m = ${aMs} tiradas;  D: desconocida`, COL.dim, UI, 22]], RX, 250, ts, { size: 28, weight: 600 });
+    aRow(p, [['D̂(x)  =  '], ['veces que salió x', COL.chalk, UI, 24], ['  /  m'], ['        distribución empírica', COL.dim, UI, 22]], RX, 330, te, { size: 28, weight: 600 });
+    aRow(p, [['elegir  ', COL.chalk, UI, 26], ['p ∈ P', HUE.p], ['  cercana a  ', COL.chalk, UI, 26], ['D'], ['        P: una familia de distribuciones', COL.dim, UI, 22]], RX, 430, tf, { size: 30, weight: 700 });
+    aRow(p, [['P chica:   ', COL.chalk, UI, 26], ['quizá ninguna p quede cerca de D', COL.dim, UI, 24]], RX, 540, tsm, { size: 26, weight: 700 });
+    aRow(p, [['P muy rica:   ', COL.chalk, UI, 26], ['una muestra modesta no alcanza para elegir', COL.dim, UI, 24]], RX, 600, tr, { size: 26, weight: 700 });
+  }],
+
+  ['ml', 'Máxima verosimilitud', (m) => {
+    const p = panel(0), tp = m('prod'), tk = m('kl'), tq = m('eq'), tmo = m('move'), ta = m('all'), tc = m('coin');
+    aNote(p, 'logaritmo natural · entropía relativa: se define en el apéndice E del libro · moneda: muestra ilustrativa');
+    aTitle(p, 'Máxima verosimilitud (ML): la mayor probabilidad para la muestra');
+    const hg = aHg(p, HX, YB); hg.setE(aDh); put(hg.ge, { o: 1 }); put(hg.gp, { o: 1 });
+    aSq(hg.g, HX, 196, HUE.emp, 'distribución empírica'); aSq(hg.g, HX + 310, 196, HUE.p, 'p');
+    const l1 = aTx(p, '', RX, 590, tmo, { size: 30, fill: HUE.p, weight: 700 }), l2 = aTx(p, '', RX + 330, 590, tmo, { size: 28, weight: 600 });
+    const upd = d => { hg.setP(d); l1._set(`D(D̂ ‖ p)  =  ${aF2(aKL(aDh, d))}`); l2._set(`(1/m) ∑_{i ≤ m} log p(x_{i})  =  ${aF2(aLL(aS, d))}`); };
+    upd(aU); prog(q => upd(aMixV(aU, aDh, q)), tmo + .3, 3.4);
+    aRow(p, [['p_{ML}', HUE.p], ['  =  argmax_{p ∈ P}  ∏_{i ≤ m} p(x_{i})  =  argmax_{p ∈ P}  ∑_{i ≤ m} log p(x_{i})'], ['    (12.1)', COL.dim, UI, 22]], RX, 250, tp, { size: 24, weight: 600 });
+    aRow(p, [['D(q ‖ p)  =  ∑_{x} q(x) log( q(x) / p(x) )'], ['        entropía relativa', COL.dim, UI, 22]], RX, 340, tk, { size: 28, weight: 600 });
+    aTx(p, 'nunca es negativa;  vale 0 solo si p = q', RX, 382, tk + 5.4, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['p_{ML}', HUE.p], ['  =  argmin_{p ∈ P}  D(D̂ ‖ p)'], ['        (12.2)', COL.dim, UI, 22]], RX, 480, tq, { size: 28, weight: 600 });
+    aRow(p, [['P = todas las distribuciones:    ', COL.chalk, UI, 24], ['p_{ML} = D̂', HUE.p]], RX, 680, ta, { size: 28, weight: 700 });
+    aRow(p, [[`moneda, ${aCoinH} caras en ${aCoinM} tiradas:    `, COL.chalk, UI, 24], [`p_{ML} = n_{h} / m = ${aF2(aCoinH / aCoinM)}`, HUE.p], ['      (12.3)', COL.dim, UI, 22]], RX, 760, tc, { size: 28, weight: 700 });
+  }],
+
+  ['map', 'Máximo a posteriori', (m) => {
+    const p = panel(0), tb = m('bayes'), tx = m('ex'), tl = m('lik'), tpr = m('prior'), tpo = m('post'), tu = m('unif'), BX = [340, 980], SC = 470, GX = 100, YR = [400, 500, 600];
+    aNote(p, 'ejemplo 12.1 del libro, con sus números · tiza: verosimilitud (viene de lo observado) · rosa: la previa · ámbar: lo que se compara para elegir');
+    aTitle(p, 'Máximo a posteriori (MAP): la verosimilitud, por una previa');
+    aRow(p, [['p_{MAP}', HUE.p], ['  =  argmax_{p ∈ P}  P[p | S]  =  argmax_{p ∈ P}  P[S | p] '], ['P[p]', HUE.pri], ['        (12.4)   regla de Bayes;  ', COL.dim, UI, 22], ['P[p]', HUE.pri, MATH, 22], [': la previa', COL.dim, UI, 22]], GX, 210, tb, { size: 28, weight: 600 });
+    aTx(p, 'Un análisis de laboratorio da positivo (pos).  Dos hipótesis:', GX, 290, tx, { size: 24, fill: COL.dim, font: UI });
+    aRow(p, [['d', COL.chalk, MATH, 32], [':  enfermedad', COL.chalk, UI, 26]], BX[0], 345, tx + 4.6, { size: 26, weight: 700 });
+    aRow(p, [['d̄', COL.chalk, MATH, 32], [':  sin enfermedad', COL.chalk, UI, 26]], BX[1], 345, tx + 6, { size: 26, weight: 700 });
+    [['verosimilitud', tl], ['previa', tpr], ['producto', tpo]].forEach(([str, t0], k) => text(p, str, GX, YR[k] + 36, t0, { size: 24, weight: 600 }));
+    text(p, '(barras × 10)', GX, YR[2] + 66, tpo, { size: 22, fill: COL.dim });
+    aHBar(p, BX[0], YR[0], aPosD * SC, HUE.emp, 'P[pos | d]', String(aPosD), tl + .3); aHBar(p, BX[1], YR[0], (1 - aNegN) * SC, HUE.emp, 'P[pos | d̄]', aF2(1 - aNegN), tl + 4.2);
+    aHBar(p, BX[0], YR[1], aPd * SC, HUE.pri, 'P[d]', String(aPd), tpr + 1.6); aHBar(p, BX[1], YR[1], (1 - aPd) * SC, HUE.pri, 'P[d̄]', String(1 - aPd), tpr + 3);
+    aHBar(p, BX[0], YR[2], aMapD * SC * 10, HUE.p, 'P[pos | d] P[d]', aMapD.toFixed(4), tpo + .2); aHBar(p, BX[1], YR[2], aMapN * SC * 10, HUE.p, 'P[pos | d̄] P[d̄]', aMapN.toFixed(5), tpo + .9);
+    aRow(p, [['ML elige  ', COL.chalk, UI, 24], ['d', COL.chalk, MATH, 30]], BX[0], 720, tl + 5.4, { size: 24, weight: 700 });
+    aRow(p, [['MAP elige  ', HUE.p, UI, 24], ['d̄', HUE.p, MATH, 30], [`:   ${aF2(aMapN / aMapD)} veces más probable`, HUE.p, UI, 24]], BX[1], 720, tpo + 2.2, { size: 24, weight: 700 });
+    aRow(p, [['previa uniforme:    ', COL.chalk, UI, 24], ['P[p]', HUE.pri], ['  constante   ⟹   '], ['p_{MAP} = p_{ML}', HUE.p]], GX, 800, tu, { size: 28, weight: 700 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], W = 420, HH = 390, Y0q = 252;
+    T(p, 'La distribución empírica y tres candidatas', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aSq(p, 100, 200, HUE.emp, 'distribución empírica de la muestra (la misma en los tres recuadros)'); aSq(p, 880, 200, HUE.p, 'una candidata p');
+    S.q1 = aQ1.map(([, d], j) => { const g = aCard(p, BX[j], Y0q, W, HH, j + 1), hg = aHg(g, 36, 330, { slot: 58, sc: 600, we: 42, wp: 20, t0: null, size: 22, tag: false }); hg.setE(aDh); hg.setP(d); put(hg.ge, { o: 1 }); put(hg.gp, { o: 1 }); return g; });
+    S.q1B = BX.map(bx => [bx, Y0q, W, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-ml', prompt: ['¿Cuál de las tres candidatas tiene mayor verosimilitud sobre la muestra?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'candidata ' + (j + 1) })), aQ1r,
+      'Es la más parecida a la empírica: la de menor entropía relativa, por (12.2).',
+      j => aQ1why[aQ1[j][0]]),
+  }], done) }],
+
+  ['feat', 'Características', (m) => {
+    const p = panel(0), tph = m('phi'), ta = m('avg'), trd = m('rad'), to = m('oth');
+    aNote(p, `datos ilustrativos · las otras ${aOth.length} muestras salen del mismo dado, con otras semillas · violeta: el término de complejidad (cap. 4)`);
+    aTitle(p, 'Estimación de densidad con características');
+    const hg = aHg(p, HX, YB, { phi: true }), bm = aBeam(p, hg, { t0: ta }); hg.setE(aDh); put(hg.ge, { o: 1 });
+    aSq(hg.g, HX, 196, HUE.emp, 'distribución empírica');
+    bm.tri.setAttribute('fill', HUE.emp); bm.ful(aMu); put(bm.gf, { o: 1 });
+    aOth.forEach((v, k) => { const e = put(mk('path', { d: `M${bm.MX(v).toFixed(1)} ${bm.y - 13}v26`, stroke: HUE.emp, 'stroke-width': 4, 'stroke-linecap': 'round' }, bm.gt), { o: 0 }); show(e, to + .4 + k * .35, .3); });
+    const gt = G(p, { o: 0 }); show(gt, to + 5);
+    mk('path', { d: `M${bm.MX(aMuD).toFixed(1)} ${bm.y + 44}v34`, stroke: COL.dim, 'stroke-width': 3, 'stroke-dasharray': '6 5' }, gt);
+    aTx(gt, `E_{x∼D}[Φ(x)] = ${aF2(aMuD)}:  el valor real`, bm.MX(aMuD), bm.y + 106, null, { size: 22, fill: COL.dim, anchor: 'middle' });
+    const g1 = G(p);
+    aRow(g1, [['Φ', HUE.pri], [' : X → ℝ^{N},    ‖Φ‖_{∞} ≤ r'], ['        características', COL.dim, UI, 22]], RX, 250, tph, { size: 28, weight: 600 });
+    aRow(g1, [['aquí, N = 1:    ', COL.chalk, UI, 24], ['Φ(x) = x', HUE.pri], [',  el valor de la cara', COL.chalk, UI, 24]], RX, 300, tph + 6.2, { size: 28, weight: 700 });
+    hide(g1, to - .4, .4);
+    aRow(p, [['E_{x∼D̂}[Φ(x)]  =  ' + aF2(aMu)], ['        promedio empírico: el punto de equilibrio', COL.dim, UI, 22]], RX, 390, ta, { size: 28, weight: 700 });
+    aRow(p, [['‖ E_{x∼D}[Φ(x)]  −  E_{x∼D̂}[Φ(x)] ‖_{∞}'], ['        (12.5)', COL.dim, UI, 22]], RX, 490, trd, { size: 28, weight: 600 });
+    aRow(p, [['        ≤   '], ['2ℜ_{m}(H)', HUE.cx], ['  +  r √( log(2/δ) / 2m )']], RX, 540, trd + .6, { size: 28, weight: 600 });
+    aTx(p, 'con probabilidad ≥ 1 − δ   ·   H: una familia que contiene a cada Φ_{j}', RX, 582, trd + 1.2, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [[`otras ${aOth.length} muestras, m = ${aMs}:    `, COL.chalk, UI, 24], [`promedios entre ${aF2(Math.min(...aOth))} y ${aF2(Math.max(...aOth))}`, COL.chalk, UI, 24]], RX, 250, to + .4, { size: 24, weight: 700 });
+    aTx(p, 'cada marca sobre el riel es el promedio de una de ellas', RX, 292, to + 1.2, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['princ', 'El principio de Maxent', (m) => {
+    const p = panel(0), tb = m('band'), tma = m('many'), tot = m('other'), tch = m('choose'), ten = m('ent'), twi = m('win'), tcv = m('cvx'), MXb = RX + 110, MW = 420, L6 = Math.log(aK);
+    aNote(p, `datos ilustrativos:  λ = ${aLam} · franja violeta: los promedios permitidos · marca de tiza: el promedio empírico · triángulo: el promedio de p`);
+    aTitle(p, 'El principio de Maxent: cumplir la restricción, y suponer lo mínimo');
+    const hg = aHg(p, HX, YB, { phi: true }), bm = aBeam(p, hg); hg.setE(aDh); hg.setP0(aU); put(hg.ge, { o: 1 });
+    aSq(hg.g, HX, 196, HUE.emp, 'empírica'); const gq = G(p, { o: 0 }); aSq(gq, HX + 190, 196, HUE.p, 'p'); show(gq, tma); const g0 = G(p, { o: 0 }); aSq(g0, HX + 280, 196, HUE.pri, 'previa p_{0}, uniforme', { line: true, dash: '9 6' }); show(g0, tch + 3.6);
+    bm.emp(aMu); put(bm.ge, { o: 1 }); bm.band(aMu, aLam); show(bm.gb, tb + 5.2); show(hg.gp, tma, .5); show(bm.gf, tma, .5); show(hg.g0, tch + 3.6);
+    const gm = G(p, { o: 0 }); show(gm, tma);
+    mk('rect', { x: MXb, y: 598, width: MW, height: 26, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, gm); const eb = mk('rect', { x: MXb, y: 598, width: 0, height: 26, fill: HUE.p }, gm);
+    mk('path', { d: `M${MXb + MW} 588v46`, stroke: HUE.pri, 'stroke-width': 4 }, gm);
+    aTx(gm, 'H(p)', RX, 620, null, { size: 28, fill: HUE.p, weight: 700 }); const ev = aTx(gm, '', MXb + MW + 16, 620, null, { size: 28, fill: HUE.p, weight: 700 });
+    aTx(gm, `log 6 ≈ ${aF2(L6)}:  la uniforme`, MXb + MW, 574, null, { size: 22, fill: HUE.pri, anchor: 'end' });
+    const lv = aTx(gm, '', RX, 676, null, { size: 26, weight: 600 });
+    const upd = d => { hg.setP(d); bm.ful(aMean(d)); eb.setAttribute('width', (aEnt(d) / L6 * MW).toFixed(1)); ev._set(aF2(aEnt(d))); lv._set(`E_{x∼p}[Φ(x)]  =  ${aF2(aMean(d))}          D(p ‖ p_{0})  =  ${aF2(aKL(d, aU))}`); };
+    upd(aDh);
+    [[aDh, aPk, tot + .1, 1.5], [aPk, aUsh, tch + .3, 1.6], [aUsh, aPs, twi + .3, 2.4]].forEach(([A, B, t0, du]) => prog(q => upd(aMixV(A, B, q)), t0, du));
+    aRow(p, [['min_{p ∈ Δ}   D(', COL.chalk], ['p', HUE.p], [' ‖ '], ['p_{0}', HUE.pri], [')'], ['        (12.7)   Δ: todas las distribuciones sobre X', COL.dim, UI, 22]], RX, 250, tch, { size: 28, weight: 600 });
+    aRow(p, [['sujeto a:   ', COL.dim, UI, 22], ['‖ E_{x∼p}[Φ(x)]  −  E_{x∼D̂}[Φ(x)] ‖_{∞}  ≤  λ', HUE.cx], ['      (12.6)', COL.dim, UI, 22]], RX, 310, [tch, tb, tb], { size: 28, weight: 600 });
+    aTx(p, `aquí:  λ = ${aLam}   ·   con λ = 0, Maxent sin regularizar: promedios iguales`, RX, 352, tb + 3, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['H(p)  =  − ∑_{x} p(x) log p(x)', HUE.p], ['        entropía:  cuán plana es p', COL.dim, UI, 22]], RX, 440, ten + 2.6, { size: 28, weight: 600 });
+    aRow(p, [['p_{0}', HUE.pri], [' uniforme:    D(p ‖ p_{0})  =  log |X| − H(p)']], RX, 496, ten, { size: 28, weight: 600 });
+    aRow(p, [['problema convexo:  la solución es única', COL.chalk, UI, 26]], RX, 760, tcv, { size: 26, weight: 700 });
+  }],
+
+  ['gibbs', 'Distribuciones de Gibbs', (m) => {
+    const p = panel(0), tfo = m('form'), tz = m('zero'), tn = m('neg'), tps = m('pos'), tfi = m('fit');
+    aNote(p, `datos ilustrativos:  λ = ${aLam},  p_{0} uniforme · el dial mueve w; todo lo demás se recalcula en la página`);
+    aTitle(p, 'La solución es una distribución de Gibbs');
+    const hg = aHg(p, HX, YB - 30, { phi: true }), bm = aBeam(p, hg), dial = aDialW(p, HX, 800, hg.W, .4, -.5, .5, [-.5, -.25, 0, .25, .5]);
+    hg.setP0(aU); [hg.gp, hg.g0, bm.ge, bm.gb, bm.gf].forEach(e => put(e, { o: 1 })); bm.emp(aMu); bm.band(aMu, aLam);
+    aSq(hg.g, HX, 196, HUE.p, 'p_{w}'); aSq(hg.g, HX + 120, 196, HUE.pri, 'previa p_{0}', { line: true, dash: '9 6' }); aSq(hg.g, HX + 320, 196, HUE.cx, 'promedios permitidos');
+    const l1 = aTx(p, '', RX, 520, .5, { size: 28, weight: 700 }), l2 = aTx(p, '', RX, 580, tps + 2.4, { size: 28, weight: 600 });
+    const setW = w => { const d = aGibbs(w); hg.setP(d); bm.ful(aMean(d)); dial.set(w); l1._set(`w = ${aF2(w)}:        E_{x∼p}[Φ(x)]  =  ${aF2(aMean(d))}`); l2._set(`cada cara multiplica a la anterior por   e^{w} = ${aF2(Math.exp(w))}`); };
+    setW(0);
+    [[0, -.4, tn + .2, 1.8], [-.4, .5, tps + .2, 2.4], [.5, aWs, tfi + .2, 2.6]].forEach(([u, v, t0, du]) => prog(q => setW(q >= 1 ? v : u + (v - u) * q), t0, du));
+    aRow(p, [['p_{w}[x]', HUE.p], ['  =  '], ['p_{0}[x]', HUE.pri], [' e^{w · Φ(x)}  /  Z(w)'], ['        (12.9)', COL.dim, UI, 22]], RX, 250, tfo, { size: 30, weight: 600 });
+    aRow(p, [['Z(w)  =  ∑_{x} '], ['p_{0}[x]', HUE.pri], [' e^{w · Φ(x)}'], ['        función de partición: normaliza', COL.dim, UI, 22]], RX, 320, tfo + 6.4, { size: 28, weight: 600 });
+    aRow(p, [['w = 0:    '], ['p_{w}', HUE.p], [' = '], ['p_{0}', HUE.pri]], RX, 420, tz, { size: 28, weight: 700 });
+    aRow(p, [[`w = ${aF2(aWs)}:    `, HUE.p], [`${aF2(aMuS)} = ${aF2(aMu)} − λ`, HUE.cx], ['      el borde de la franja', COL.dim, UI, 22]], RX, 680, tfi + 3, { size: 28, weight: 700 });
+    aRow(p, [['es la solución de Maxent, (12.7)', HUE.p, UI, 26]], RX, 730, tfi + 8.6, { size: 26, weight: 700 });
+  }],
+
+  ['dual', 'El problema dual', (m) => {
+    const p = panel(0), tg = m('g'), tt = m('thm'), tnu = m('num'), tml = m('ml'), tz = m('zero'), tfa = m('fam'), te = m('eps');
+    aNote(p, `datos ilustrativos:  λ = ${aLam} · el dual se resuelve en la página por descenso de gradiente proximal (${aSol.it} pasos) · sin la demostración`);
+    aTitle(p, 'El problema dual: máxima verosimilitud regularizada');
+    const gp = aGPl(p, HX, 250, 540, 400, -.15, .65, -.2, .14, .4, [0, .2, .4, .6], [-.2, -.1, 0, .1]), L0 = w => aGw(w, 0), Gl = w => aGw(w, aLam);
+    const c0 = gp.fn(L0, { stroke: HUE.emp, 'stroke-width': 3.5, 'stroke-dasharray': '10 8' }), cp = gp.fn(w => -aLam * Math.abs(w), { stroke: HUE.cx, 'stroke-width': 3.5 }), cg = gp.fn(Gl, { stroke: HUE.p, 'stroke-width': 6 });
+    show(c0, tg + 1.6); show(cp, tg + 7.4); show(cg, tg + 8.8);
+    const ga = G(p, { o: 0 }), gb = G(p, { o: 0 }), gc = G(p, { o: 0 }); show(ga, tg + 1.6); show(gb, tg + 7.4); show(gc, tg + 8.8);
+    aSq(ga, HX, 196, HUE.emp, 'con λ = 0', { line: true, dash: '10 8' }); aSq(gb, HX + 180, 196, HUE.cx, '−λ‖w‖_{1}', { line: true }); aSq(gc, HX + 350, 196, HUE.p, 'G(w)', { line: true });
+    const hl = put(mk('path', { d: `M${HX} ${gp.VY(aPrim).toFixed(1)}h540`, stroke: HUE.p, 'stroke-width': 2.5, 'stroke-dasharray': '4 7' }, gp.gl), { o: 0 }); show(hl, tnu, .5);
+    const da = put(mk('circle', { r: 12, fill: HUE.p, stroke: COL.board, 'stroke-width': 3 }, gp.g), { x: gp.WX(0), y: gp.VY(0), o: 0 }), dz = put(mk('circle', { r: 11, fill: HUE.emp, stroke: COL.board, 'stroke-width': 3 }, gp.g), { x: gp.WX(0), y: gp.VY(0), o: 0 });
+    show(da, tt, .3); prog(q => put(da, { x: gp.WX(aWs * q), y: gp.VY(Gl(aWs * q)) }), tt + .4, 2.6);
+    show(dz, tz, .3); prog(q => put(dz, { x: gp.WX(aW0 * q), y: gp.VY(L0(aW0 * q)) }), tz + .3, 2.2);
+    aRow(p, [['sup_{w} G(w)', HUE.p], [`  =  G(${aF2(aWs)})  =  ${aF3(aGs)}`, HUE.p]], HX, 734, tnu, { size: 26, weight: 700 });
+    aRow(p, [['min_{p} F(p)', HUE.p], [`  =  D(p* ‖ p_{0})  =  ${aF3(aPrim)}`, HUE.p]], HX, 778, tnu + 1, { size: 26, weight: 700 });
+    aRow(p, [[`λ = 0:    máxima verosimilitud pura,  w = ${aF2(aW0)}`, COL.chalk, UI, 24]], HX, 826, tz + .6, { size: 24, weight: 700 });
+    aRow(p, [['G(w)  =  (1/m) ∑_{i ≤ m} log( '], ['p_{w}[x_{i}]', HUE.p], [' / '], ['p_{0}[x_{i}]', HUE.pri], [' )'], ['  −  λ‖w‖_{1}', HUE.cx], ['      (12.10)', COL.dim, UI, 22]], RX, 250, [tg, tg, tg, tg, tg, tg + 7.4, tg], { size: 27, weight: 600 });
+    aRow(p, [['sup_{w} G(w)  =  min_{p} F(p)'], ['        teorema 12.2, de dualidad;  (12.11)', COL.dim, UI, 22]], RX, 340, tt, { size: 30, weight: 700 });
+    aTx(p, 'F(p):  el objetivo de (12.7);  vale +∞ si p no cumple la restricción   (12.8)', RX, 382, tt + 1.4, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['inf_{w}   '], ['λ‖w‖_{1}', HUE.cx], ['  −  (1/m) ∑_{i ≤ m} log '], ['p_{w}[x_{i}]', HUE.p], ['        (12.12)', COL.dim, UI, 22]], RX, 480, tml, { size: 28, weight: 600 });
+    aRow(p, [['máxima verosimilitud sobre las distribuciones de Gibbs,', COL.chalk, UI, 24]], RX, 524, tml + 3, { size: 24, weight: 600 });
+    aRow(p, [['con regularización L1 de peso λ', HUE.cx, UI, 24]], RX, 560, tml + 6, { size: 24, weight: 700 });
+    aRow(p, [['Maxent no fijó una familia:  la de Gibbs sale de la entropía relativa', COL.chalk, UI, 24]], RX, 640, tfa, { size: 24, weight: 600 });
+    aRow(p, [['| G(w) − sup G | < ε    ⟹    D(p* ‖ '], ['p_{w}', HUE.p], [') ≤ ε'], ['        teorema 12.2', COL.dim, UI, 22]], RX, 740, te + 2.6, { size: 28, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], W = 420, HH = 400, Y0q = 250;
+    T(p, 'Tres distribuciones que cumplen la restricción', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aSq(p, 100, 200, HUE.p, 'la distribución p, y su promedio (triángulo)'); aSq(p, 620, 200, HUE.cx, 'promedios permitidos'); aSq(p, 920, 200, HUE.pri, 'previa p_{0}, uniforme', { line: true, dash: '9 6' });
+    S.q2 = aQ2.map(([, d], j) => { const g = aCard(p, BX[j], Y0q, W, HH, j + 1), hg = aHg(g, 36, 296, { slot: 58, sc: 520, wp: 26, t0: null, size: 22, phi: true, tag: false }), bm = aBeam(g, hg, { dy: 54, k: .8 }); hg.setP(d); hg.setP0(aU); [hg.gp, hg.g0, bm.gb, bm.ge, bm.gf].forEach(e => put(e, { o: 1 })); bm.band(aMu, aLam); bm.emp(aMu); bm.ful(aMean(d)); return g; });
+    S.q2B = BX.map(bx => [bx, Y0q, W, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-maxent', prompt: ['¿Cuál de las tres elige el principio de Maxent?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'distribución ' + (j + 1) })), aQ2r,
+      'Es la más plana de las tres: la de mayor entropía entre las que cumplen.',
+      j => aQ2why[aQ2[j][0]]),
+  }], done) }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Máxima verosimilitud (ML):  la p más cercana a la empírica, en entropía relativa.', 'w1'], ['Máximo a posteriori (MAP):  pondera cada candidata con una previa.', 'w2'],
+      ['Maxent:  promedios de Φ a distancia ≤ λ de los empíricos;  la más cercana a p_{0}.', 'w3'], ['Dualidad:  la solución es de Gibbs;  el dual es ML con regularización L1 de peso λ.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 28, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Maximizar la verosimilitud equivale a minimizar la entropía relativa entre la empírica y p.'], ans: ['v'], why: 'Es (12.2): las dos difieren en la entropía de la empírica, que no depende de p.' },
+      { parts: ['Con una previa uniforme, la solución MAP puede ser distinta de la de máxima verosimilitud.'], ans: ['f'], why: 'Con previa uniforme, P[p] es constante en (12.4): las dos soluciones coinciden.' },
+      { parts: ['El principio de Maxent exige fijar de antemano una familia P de distribuciones.'], ans: ['f'], why: 'No fija ninguna: la familia de Gibbs sale de medir con la entropía relativa.' },
+      { parts: ['Con previa uniforme, minimizar la entropía relativa a la previa es maximizar la entropía.'], ans: ['v'], why: 'La entropía relativa a la uniforme es log |X| menos la entropía de p.' },
+      { parts: ['En el dual, el parámetro lambda de la restricción pasa a ser el peso de una regularización L1.'], ans: ['v'], why: 'Es (12.12): lambda por la norma uno de w, menos la verosimilitud media.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

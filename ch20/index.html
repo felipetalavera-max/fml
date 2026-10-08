@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multiclase agregado y predicción estructurada</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 20, title: 'Multiclase agregado y predicción estructurada', minutes: 6, language: 'es', next: '../ch21/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 19) ---------- */
+// salmón = clase 1, azul = clase 2, verde menta = clase 3 · ámbar = la hipótesis: fronteras, lo elegido, el mejor camino · gris = zona sin decisión
+// (ambigua o de empate) y puntos «del resto» · rosa = la pérdida L · rojo = error (✗, bit cambiado, etiqueta equivocada). El verde no marca aciertos.
+const HUE = { c: [COL.nat, COL.whole, COL.irr], hyp: COL.task, loss: COL.rat };
+const aHue = y => HUE.c[y];
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'r^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηφρσλμξΦΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺≈∼∞⊤∈→↦′⌊⌋])/;                                       // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aInt = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');                       // 10 000, con espacio fino
+const aSg = v => v > 0 ? '+' + v : v < 0 ? '−' + -v : '0';                          // un entero con su signo
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aArg = v => v.reduce((b, u, i) => u > v[b] ? i : b, 0);
+const aDp = (u, v) => u[0] * v[0] + u[1] * v[1];
+// --- La muestra del cap. 19: 18 puntos ilustrativos en un marco de 10 × 8. [x1, x2, clase], con las clases 0, 1, 2 (en pantalla: 1, 2, 3).
+const aW = 10, aH = 8, aKc = 3;
+const aP = [[1, 1.6, 0], [1.8, 3.4, 0], [2.6, .9, 0], [3.2, 2.4, 0], [4.2, 3.6, 0], [3.9, 1.3, 0], [7.6, 2.3, 0],
+  [6.2, 1, 1], [6.6, 3.3, 1], [8.6, 1.2, 1], [9, 3, 1], [8.3, 3.9, 1], [6.9, .8, 1],
+  [1.6, 6.6, 2], [3.4, 5.6, 2], [4.8, 7, 2], [6.2, 6, 2], [8.2, 6.8, 2]];
+const aM = aP.length, aAllI = aP.map((_, i) => i), aLs = [0, 1, 2];
+// SVM binaria de margen blando (cap. 10): el dual (5.33) por pares, hasta que ningún par viola las condiciones de optimalidad en más de 1e-11.
+// pts: [x1, x2, ±1]. Devuelve w, b, las holguras y los dos objetivos (primal y dual), que deben coincidir. f(x) = w · x + b.
+const aSoft = (pts, C) => {
+  const al = pts.map(() => 0), g = pts.map(() => 1), K = pts.map(p => pts.map(q => aDp(p, q)));
+  let up = 0, lo = 0;
+  for (let it = 0; it < 400000; it++) {
+    let i = -1, j = -1; up = -Infinity; lo = Infinity;
+    pts.forEach((p, k) => { const y = p[2], v = y * g[k]; if ((y > 0 ? al[k] < C - 1e-13 : al[k] > 1e-13) && v > up) { up = v; i = k; } if ((y > 0 ? al[k] > 1e-13 : al[k] < C - 1e-13) && v < lo) { lo = v; j = k; } });
+    if (up - lo < 1e-11) break;
+    const yi = pts[i][2], yj = pts[j][2], t = Math.min((up - lo) / (K[i][i] + K[j][j] - 2 * K[i][j]), yi > 0 ? C - al[i] : al[i], yj > 0 ? al[j] : C - al[j]);
+    al[i] += yi * t; al[j] -= yj * t;
+    pts.forEach((p, k) => { g[k] -= p[2] * t * (K[i][k] - K[j][k]); });
+  }
+  const w = [0, 1].map(r => aSum(pts.map((p, k) => al[k] * p[2] * p[r]))), n2 = aDp(w, w), free = pts.map((_, k) => k).filter(k => al[k] > 1e-9 && al[k] < C - 1e-9);
+  const b = free.length ? aSum(free.map(k => pts[k][2] * g[k])) / free.length : (up + lo) / 2, val = pts.map(p => p[2] * (aDp(w, p) + b)), xi = val.map(v => Math.max(0, 1 - v));
+  return { w, b, al, xi, n: pts.length, err: val.filter(v => v <= 0).length, primal: n2 / 2 + C * aSum(xi), dual: aSum(al) - n2 / 2 };
+};
+const aC = 1, aF = (s, q) => aDp(s.w, q) + s.b;                                         // puntuación de un clasificador binario en un punto
+// --- Uno contra todos (§9.4.1): k clasificadores, el l-ésimo entrenado con toda la muestra, la clase l como +1 y el resto como −1.
+const aOva = aLs.map(l => aSoft(aP.map(q => [q[0], q[1], q[2] === l ? 1 : -1]), aC));
+const aFs = (q, sc = [1, 1, 1]) => aOva.map((s, l) => sc[l] * aF(s, q));               // las k puntuaciones f_l(x); sc reescala cada una
+const aYes = q => aFs(q).map(v => v > 0);                                               // qué clasificadores dicen «sí»
+const aNyes = q => aYes(q).filter(Boolean).length;
+const aAmbI = aAllI.filter(i => aNyes(aP[i]) !== 1);                                    // puntos de la muestra en zona ambigua
+const aOvaPred = (q, sc) => aArg(aFs(q, sc));                                           // (9.16)
+const aOvaErrI = sc => aAllI.filter(i => aOvaPred(aP[i], sc) !== aP[i][2]);
+// Calibración: se multiplica f_1 por un factor positivo. h_1 = sgn(f_1) no cambia; el argmax sí.
+const aScl = [4, 1, 1], aMovedI = aAllI.filter(i => aOvaPred(aP[i]) !== aOvaPred(aP[i], aScl));
+// --- Uno contra uno (§9.4.2): un clasificador por par (l, l′), entrenado con los puntos de esas dos clases; +1 = l′, −1 = l.
+const aPairs = [[0, 1], [0, 2], [1, 2]];
+const aSubI = pr => aAllI.filter(i => pr.includes(aP[i][2]));
+const aOvo = aPairs.map(pr => aSoft(aSubI(pr).map(i => [aP[i][0], aP[i][1], aP[i][2] === pr[1] ? 1 : -1]), aC));
+const aWin = (j, q) => aPairs[j][aF(aOvo[j], q) > 0 ? 1 : 0];                           // quién gana el duelo j en el punto q
+const aVotes = q => { const v = Array(aKc).fill(0); aPairs.forEach((_, j) => v[aWin(j, q)]++); return v; };
+const aOvoPred = q => { const v = aVotes(q), mx = Math.max(...v); return v.filter(u => u === mx).length > 1 ? -1 : v.indexOf(mx); };   // (9.17); −1 = empate
+const aOvoErrI = aAllI.filter(i => aOvoPred(aP[i]) !== aP[i][2]);
+// Polígonos: el marco recortado por semiplanos a·x1 + b·x2 + c ≥ 0. aInner: los lados que no están sobre el marco.
+const aFrame = [[0, 0], [aW, 0], [aW, aH], [0, aH]];
+const aClip = (poly, a, b, c) => { const out = [], v = q => a * q[0] + b * q[1] + c; poly.forEach((p, i) => { const q = poly[(i + 1) % poly.length], vp = v(p), vq = v(q); if (vp >= 0) out.push(p); if ((vp >= 0) !== (vq >= 0)) { const t = vp / (vp - vq); out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]); } }); return out; };
+const aSide = (poly, s, sg) => aClip(poly, sg * s.w[0], sg * s.w[1], sg * s.b);        // el lado sg (+1: «sí») del clasificador s
+const aOnEdge = (p, q) => (Math.abs(p[0] - q[0]) < 1e-9 && (Math.abs(p[0]) < 1e-9 || Math.abs(p[0] - aW) < 1e-9)) || (Math.abs(p[1] - q[1]) < 1e-9 && (Math.abs(p[1]) < 1e-9 || Math.abs(p[1] - aH) < 1e-9));
+const aInner = poly => poly.map((p, i) => [p, poly[(i + 1) % poly.length]]).filter(([p, q]) => !aOnEdge(p, q));
+const aArea = poly => Math.abs(aSum(poly.map((p, i) => { const q = poly[(i + 1) % poly.length]; return p[0] * q[1] - q[0] * p[1]; }))) / 2;
+const aCen = poly => { let a = 0, x = 0, y = 0; poly.forEach((p, i) => { const q = poly[(i + 1) % poly.length], c = p[0] * q[1] - q[0] * p[1]; a += c; x += (p[0] + q[0]) * c; y += (p[1] + q[1]) * c; }); return [x / (3 * a), y / (3 * a)]; };
+// Zonas de OVA por patrón de respuestas: sg[l] = +1 si h_l dice «sí». Ocho patrones; los de un solo «sí» no son ambiguos.
+const aPats = [0, 1, 2, 3, 4, 5, 6, 7].map(n => aLs.map(l => (n >> l) & 1 ? 1 : -1));
+const aZone = sg => aOva.reduce((poly, s, l) => poly.length < 3 ? [] : aSide(poly, s, sg[l]), aFrame);
+const aZones = aPats.map(sg => ({ sg, yes: sg.filter(v => v > 0).length, poly: aZone(sg) })).filter(z => z.poly.length >= 3 && aArea(z.poly) > 1e-9);
+const aAmbArea = aSum(aZones.filter(z => z.yes !== 1).map(z => aArea(z.poly))) / (aW * aH);   // fracción del marco que es ambigua
+// Región del argmax de la clase y con las puntuaciones reescaladas por sc.
+const aOvaReg = (y, sc = [1, 1, 1]) => aOva.reduce((poly, s, l) => l === y || poly.length < 3 ? poly : aClip(poly, sc[y] * aOva[y].w[0] - sc[l] * s.w[0], sc[y] * aOva[y].w[1] - sc[l] * s.w[1], sc[y] * aOva[y].b - sc[l] * s.b), aFrame);
+// Región donde la clase y gana sus dos duelos; el resto del marco (si queda algo) es la zona de empate.
+const aOvoReg = y => aPairs.reduce((poly, pr, j) => !pr.includes(y) || poly.length < 3 ? poly : aSide(poly, aOvo[j], pr[1] === y ? 1 : -1), aFrame);
+const aTieArea = aW * aH - aSum(aLs.map(y => aArea(aOvoReg(y))));
+// Zona de empate: cada clase gana un duelo. Hay dos ciclos posibles; se queda el que tiene área.
+const aTiePoly = [[1, -1, 1], [-1, 1, -1]].map(sg => aOvo.reduce((poly, s, j) => poly.length < 3 ? [] : aSide(poly, s, sg[j]), aFrame)).find(p => p.length >= 3 && aArea(p) > 1e-9) || [];
+// Comprobación 1: tres puntos nuevos; se pregunta en cuál gana la votación la clase 3.
+const aQ1 = [[7.4, 3.2], [3, 6], [6.1, 4.6]], aQ1v = aQ1.map(aVotes), aQ1w = aQ1.map(aOvoPred), aQ1r = aQ1w.indexOf(2);
+// --- Costos (tabla 9.1). Tamaño de la muestra de cada clasificador en el ejemplo, y un caso con clases equilibradas.
+const aNova = aOva.map(s => s.n), aNovo = aOvo.map(s => s.n);
+const aNc = k => k * (k - 1) / 2;                                                       // clasificadores de OVO
+const aCk = 10, aCm = 1000, aCa = 2;                                                    // k, m y α del caso ilustrativo
+const aCost = { ovaTr: aCk * aCm ** aCa, ovoTr: aNc(aCk) * (2 * aCm / aCk) ** aCa, ovaTe: aCk, ovoTe: aNc(aCk) };
+// --- Códigos correctores de errores (§9.4.3). Matriz y palabra recibida de la figura 9.5.
+const aM95 = [[-1, -1, -1, 1, -1, -1], [1, -1, -1, -1, -1, -1], [-1, 1, 1, -1, 1, -1], [1, 1, -1, -1, -1, -1], [1, 1, -1, -1, 1, -1], [-1, -1, 1, 1, -1, 1], [-1, -1, 1, -1, -1, -1], [-1, 1, -1, 1, -1, -1]];
+const aHx = [-1, 1, 1, -1, 1, 1];
+const aHam = (u, v) => u.filter((a, j) => a !== v[j]).length;                           // distancia de Hamming
+const aDists = (Mx, h) => Mx.map(r => aHam(r, h));
+const aDec = (Mx, h) => { const d = aDists(Mx, h), mn = Math.min(...d); return { d, mn, l: d.indexOf(mn), uniq: d.filter(v => v === mn).length === 1 }; };   // (9.18)
+const aDmin = Mx => Math.min(...Mx.flatMap((r, i) => Mx.slice(i + 1).map(q => aHam(r, q))));   // distancia mínima entre dos palabras
+const aCorr = d => Math.floor((d - 1) / 2);                                             // errores binarios que se corrigen
+const aD95 = aDec(aM95, aHx);
+// Código ilustrativo de 4 clases y 7 columnas: cuatro palabras de un código símplex; dos cualesquiera difieren en 4 posiciones.
+const aCode = [[1, -1, 1, -1, 1, -1, 1], [-1, 1, 1, -1, -1, 1, 1], [1, 1, -1, -1, 1, 1, -1], [-1, -1, -1, 1, 1, 1, 1]];
+const aFlip = (v, js) => v.map((a, j) => js.includes(j) ? -a : a);
+const aRx1 = aFlip(aCode[0], [3]), aD1 = aDec(aCode, aRx1);                             // un error sobre la palabra de la clase 1
+const aRxQ = aFlip(aCode[2], [5]), aDQ = aDec(aCode, aRxQ);                             // comprobación 2: un error sobre la de la clase 3
+// OVA y OVO como matrices de códigos (p. 232): OVA, +1 en la diagonal y −1 fuera; OVO, una columna por par (l, l′) con −1 en l, +1 en l′ y 0 en el resto.
+const aMova = k => Array.from({ length: k }, (_, i) => Array.from({ length: k }, (_, j) => i === j ? 1 : -1));
+const aKpairs = k => Array.from({ length: k }, (_, a) => a).flatMap(a => Array.from({ length: k - a - 1 }, (_, d) => [a, a + d + 1]));
+const aMovo = k => Array.from({ length: k }, (_, i) => aKpairs(k).map(([a, b]) => i === a ? -1 : i === b ? 1 : 0));
+// --- Predicción estructurada (§9.5). Oración y tablas ilustrativas: aEm[i][t] = puntuación de la etiqueta t para la palabra i;
+// aTr[s][t] = puntuación de que a la etiqueta s le siga la t. w · Φ(x, y) = suma de esos factores locales a lo largo de la secuencia y.
+const aWords = ['amigos', 'viejos', 'traen', 'vino', 'tinto'], aTags = ['N', 'V', 'A'], aN = aWords.length, aNt = aTags.length, aAllN = aWords.map((_, i) => i);
+const aEm = [[3, 0, 1], [1, 0, 2], [0, 3, 0], [2, 3, 0], [1, 0, 2]];
+const aTr = [[0, 2, 2], [2, -2, 0], [1, 1, 0]];
+const aScore = y => aSum(y.map((t, i) => aEm[i][t] + (i ? aTr[y[i - 1]][t] : 0)));
+// Viterbi: V[i][t] = mejor puntuación de un camino que termina en la etiqueta t de la palabra i; B[i][t] = de qué etiqueta viene.
+const aVit = (() => {
+  const V = [aEm[0].slice()], B = [aTags.map(() => -1)]; let ops = 0;
+  for (let i = 1; i < aN; i++) { V.push([]); B.push([]); aTags.forEach((_, t) => { const c = aTags.map((_, s) => { ops++; return V[i - 1][s] + aTr[s][t]; }), s = aArg(c); V[i][t] = c[s] + aEm[i][t]; B[i][t] = s; }); }
+  const y = [aArg(V[aN - 1])]; for (let i = aN - 1; i > 0; i--) y.unshift(B[i][y[0]]);
+  return { V, B, y, best: Math.max(...V[aN - 1]), ops };
+})();
+const aSeqs = n => n ? aSeqs(n - 1).flatMap(y => aTags.map((_, t) => [...y, t])) : [[]];   // todas las secuencias (solo para contar y comprobar)
+const aNseq = n => aNt ** n;
+const aGreedy = aEm.map(aArg);                                                          // etiqueta de mayor puntuación propia, palabra por palabra
+const aGold = aVit.y, aLossG = aHam(aGreedy, aGold);                                    // pérdida de Hamming de esa secuencia frente a la del mejor camino
+// Tres secuencias equivocadas, para la pérdida en los algoritmos: con 1, 3 y 5 etiquetas distintas de la correcta.
+const aWrong = [aGreedy, [0, 0, 1, 1, 0], [1, 1, 0, 2, 0]], aWrongL = aWrong.map(y => aHam(y, aGold));
+/* aMATH:end */
+
+// Plano de tres clases, en un marco de aW × aH. pl.bg = regiones teñidas, pl.lg = rectas, pl.dg = puntos, pl.tg = marcas sobre los puntos.
+const aPl = (p, ox, oy, sc, { t0 = .4, ax = false, r = sc > 50 ? 11 : 8 } = {}) => {
+  const X = x => ox + x * sc, Y = y => oy - y * sc, g = G(p, { o: t0 == null ? 1 : 0 }), pl = { X, Y, sc, g };
+  pl.bg = G(g);
+  mk('rect', { x: ox, y: oy - aH * sc, width: aW * sc, height: aH * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  if (ax) { aTx(g, 'x_{1}', X(aW), Y(0) + 28, null, { size: 22, fill: COL.dim, anchor: 'end' }); aTx(g, 'x_{2}', X(0) - 12, Y(aH) + 20, null, { size: 22, fill: COL.dim, anchor: 'end' }); }
+  pl.lg = G(g); pl.dg = G(g); pl.tg = G(g);
+  pl.dots = aP.map(q => put(mk('circle', { r, fill: aHue(q[2]), stroke: COL.board, 'stroke-width': 2 }, pl.dg), { x: X(q[0]), y: Y(q[1]) }));
+  if (t0 != null) show(g, t0);
+  return pl;
+};
+const aMain = (p, o = {}) => aPl(p, 100, 686, 62, { ax: true, ...o });
+const aLeg = (p, x, y, t0 = .5) => { const g = G(p, { o: 0 }); aLs.forEach(l => aSq(g, x + l * 150, y, aHue(l), `clase ${l + 1}`, { dot: true })); show(g, t0); return g; };   // leyenda de las tres clases
+const aPd = (pl, poly) => poly.length < 3 ? '' : 'M' + poly.map(q => pl.X(q[0]).toFixed(1) + ' ' + pl.Y(q[1]).toFixed(1)).join('L') + 'Z';   // un polígono del plano, como trazo
+// Marca de error (✗ roja) junto a un punto.
+const aMark = (g, x, y, t0) => { const e = put(mk('path', { d: 'M-9 -9L9 9M9 -9L-9 9', fill: 'none', stroke: COL.bad, 'stroke-width': 5, 'stroke-linecap': 'round' }, g), { x, y, o: 0 }); show(e, t0, .25); return e; };
+// La recta de un clasificador binario s (f = 0), recortada al marco, con un rótulo sobre ella en la abscisa lx (o en la ordenada ly). Nace oculta.
+const aLine = (pl, s, lab, { col = COL.chalk, lx = null, ly = null } = {}) => {
+  const [a, b] = aInner(aSide(aFrame, s, 1))[0], g = G(pl.lg, { o: 0 }), x1 = pl.X(a[0]), y1 = pl.Y(a[1]), x2 = pl.X(b[0]), y2 = pl.Y(b[1]);
+  mk('path', { d: `M${x1.toFixed(1)} ${y1.toFixed(1)}L${x2.toFixed(1)} ${y2.toFixed(1)}`, stroke: HUE.hyp, 'stroke-width': 4, 'stroke-linecap': 'round', fill: 'none' }, g);
+  const q = lx != null ? [lx, -(s.w[0] * lx + s.b) / s.w[1]] : [-(s.w[1] * ly + s.b) / s.w[0], ly];
+  if (lab) aHalo(aTx(g, lab, pl.X(q[0]), pl.Y(q[1]) + 8, null, { size: 24, fill: col, weight: 700, anchor: 'middle' }));
+  return g;
+};
+// Tres regiones (una por clase) que se pueden redibujar: polyOf(y, arg) da el polígono de la clase y. Teñidas con el color de la clase;
+// sus lados interiores, en ámbar grueso (la frontera de la hipótesis multiclase). rg.set(arg) las recalcula.
+const aRegs = (pl, polyOf, { tint = .2 } = {}) => {
+  const g = G(pl.bg, { o: 0 }), lg = G(pl.lg, { o: 0 }), fs = aLs.map(y => mk('path', { fill: aHue(y), 'fill-opacity': tint }, g)), bd = mk('path', { stroke: HUE.hyp, 'stroke-width': 5, 'stroke-linecap': 'round', fill: 'none' }, lg);
+  const P = q => pl.X(q[0]).toFixed(1) + ' ' + pl.Y(q[1]).toFixed(1);
+  const set = arg => { let d = ''; aLs.forEach(y => { const poly = polyOf(y, arg); fs[y].setAttribute('d', aPd(pl, poly)); if (poly.length >= 3) aInner(poly).forEach(([a, b]) => { d += `M${P(a)}L${P(b)}`; }); }); bd.setAttribute('d', d); };
+  return { g, lg, set, show: (t, dur = .6) => { show(g, t, dur); show(lg, t, dur); } };
+};
+// Matriz de códigos como cuadrícula de bits: +1 = casilla llena, −1 = casilla vacía, 0 = casilla de trazos. Una fila por grupo (bt.rows[i]).
+// bt.set(i, j, v, t) cambia un bit en el instante t; bt.box(i, j, ni, nj, col, ta, tb) enmarca un bloque de casillas entre ta y tb.
+const aBits = (p, Mx, x, y, cw, { t0 = null, step = 0, size = Math.max(22, cw * .42) } = {}) => {
+  const g = G(p), bt = { g, x, y, cw };
+  const paint = (c, v) => { c.r.setAttribute('fill', v > 0 ? COL.chalk : 'none'); c.r.setAttribute('stroke', v > 0 ? COL.chalk : COL.faint); c.r.setAttribute('stroke-dasharray', v ? 'none' : '5 5'); c.t.textContent = aSg(v); c.t.setAttribute('fill', v > 0 ? COL.board : v < 0 ? COL.dim : HUE.hyp); };
+  bt.rows = Mx.map((_, i) => { const rg = G(g, { o: t0 == null ? 1 : 0 }); if (t0 != null) show(rg, t0 + i * step, .3); return rg; });
+  bt.c = Mx.map((row, i) => row.map((v, j) => { const c = { r: mk('rect', { x: x + j * cw + 3, y: y + i * cw + 3, width: cw - 6, height: cw - 6, 'stroke-width': 2 }, bt.rows[i]), t: T(bt.rows[i], '', { x: x + j * cw + cw / 2, y: y + i * cw + cw / 2 + size * .35, size, anchor: 'middle', font: MATH, weight: 700 }) }; paint(c, v); return c; }));
+  bt.set = (i, j, v, t) => aAt(() => paint(bt.c[i][j], v), t);
+  bt.box = (i, j, ni, nj, col, ta, tb) => { const e = put(mk('rect', { x: x + j * cw - 1, y: y + i * cw - 1, width: nj * cw + 2, height: ni * cw + 2, fill: 'none', stroke: col, 'stroke-width': 4 }, g), { o: 0 }); show(e, ta, .2); if (tb != null) hide(e, tb, .25); return e; };
+  return bt;
+};
+// Columna de distancias junto a una matriz de bits: por fila, una barra de largo d y su número. Cada entrada: g (nace oculto), set(d), hot(color, t).
+const aDcol = (p, x, y, cw, d, { u = 24 } = {}) => d.map((v, i) => {
+  const g = G(p, { o: 0 }), cy = y + i * cw + cw / 2, r = mk('rect', { x, y: cy - 10, width: Math.max(3, v * u), height: 20, fill: COL.dim }, g), t = aTx(g, String(v), x + v * u + 12, cy + 9, null, { size: 24, weight: 700 });
+  return { g, set: v2 => { r.setAttribute('width', Math.max(3, v2 * u)); t._set(String(v2)); put(t, { x: x + v2 * u + 12 }); }, hot: (col, tt) => { tw(r, { c_fill: col }, tt, .3); tw(t, { c_fill: col }, tt, .3); } };
+});
+// Enrejado (trellis): una columna por palabra, una fila por etiqueta. Capas: tr.eg (arcos), tr.pg (caminos), tr.ng (nodos), tr.vg (valores).
+// tr.node[i][t] = { g, c (círculo), tx (texto interior) }; tr.seg(i, s, t, attrs) traza el arco de (i − 1, s) a (i, t); tr.path(y, attrs), un camino entero.
+const aTrel = (p, { x0 = 160, dx = 150, y0 = 370, dy = 110, r = 30, wy = 262, t0 = .4, hid = false } = {}) => {
+  const g = G(p, { o: 0 }), X = i => x0 + i * dx, Y = t => y0 + t * dy, tr = { g, X, Y, r };
+  tr.eg = G(g); tr.pg = G(g); tr.ng = G(g); tr.vg = G(g);
+  tr.words = aWords.map((wd, i) => { const wg = G(g), bx = mk('rect', { x: X(i) - 66, y: wy - 35, width: 132, height: 50, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, wg); T(wg, wd, { x: X(i), y: wy - 1, size: 26, anchor: 'middle', weight: 600 }); return { g: wg, bx }; });
+  tr.node = aWords.map((_, i) => aTags.map((_, t) => { const ng = G(tr.ng, { x: X(i), y: Y(t), o: hid ? 0 : 1 }), c = mk('circle', { r, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, ng), tx = T(ng, '', { x: 0, y: 9, size: 26, anchor: 'middle', font: MATH, weight: 600 }); return { g: ng, c, tx }; }));
+  tr.seg = (i, s, t, attrs, par = tr.eg) => mk('path', { d: `M${X(i - 1)} ${Y(s)}L${X(i)} ${Y(t)}`, fill: 'none', 'stroke-linecap': 'round', ...attrs }, par);
+  tr.path = (y, attrs, par = tr.pg) => y.slice(1).map((t, k) => tr.seg(k + 1, y[k], t, attrs, par));
+  show(g, t0);
+  return tr;
+};
+const aSeqS = y => y.map(t => aTags[t]).join(' ');                                    // una secuencia de etiquetas, escrita
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 20', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Multiclase agregado y predicción estructurada', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Varias clases con clasificadores binarios, y salidas con estructura.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['ova', 'Uno contra todos', (m) => {
+    const p = panel(0), tc = [m('c1'), m('c2'), m('c3')], tam = m('amb'), tar = m('arg'), tcl = m('cal'), tsm = m('same'), tco = m('cost'), RX = 800, e0 = aOvaErrI(), e1 = aOvaErrI(aScl);
+    aNote(p, `muestra ilustrativa del cap. 19 · cada clasificador: SVM de margen blando (cap. 10) con C = ${aC}, entrenada en la página`);
+    aTitle(p, 'Uno contra todos (OVA): un clasificador binario por clase');
+    const pl = aMain(p); aLeg(p, 100, 752);
+    // en el paso l, los puntos de las otras clases pasan a gris: son «el resto»
+    aP.forEach((q, i) => { let gr = false; [...tc, tam - .4].forEach((t, s) => { const want = s < 3 && q[2] !== s; if (want !== gr) { tw(pl.dots[i], { c_fill: want ? COL.faint : aHue(q[2]) }, t, .3); gr = want; } }); });
+    const ln = aOva.map((s, l) => aLine(pl, s, `h_{${l + 1}}`, { col: aHue(l), lx: [7.55, 8.4, 5.3][l] }));
+    const tn = aOva.map((s, l) => put(mk('path', { d: aPd(pl, aSide(aFrame, s, 1)), fill: aHue(l), 'fill-opacity': .22 }, pl.bg), { o: 0 }));
+    aLs.forEach(l => { const te = l < 2 ? tc[l + 1] - .15 : tam - .4; show(ln[l], tc[l], .3); show(tn[l], tc[l], .3); hide(tn[l], te, .3); if (l < 2) { hide(ln[l], te, .3); show(ln[l], tam - .2, .4); } });
+    // las zonas según cuántos dicen «sí»: una sola respuesta afirmativa (color de la clase), ninguna o dos (gris)
+    const gx = G(pl.bg, { o: 0 }), g0 = G(pl.bg, { o: 0 }), g2 = G(pl.bg, { o: 0 }), gl0 = G(pl.tg, { o: 0 }), gl2 = G(pl.tg, { o: 0 }), gr = G(pl.tg, { o: 0 }), gk = G(p, { o: 0 });
+    aZones.forEach(z => {
+      if (z.yes === 1) { mk('path', { d: aPd(pl, z.poly), fill: aHue(z.sg.indexOf(1)), 'fill-opacity': .2 }, gx); return; }
+      mk('path', { d: aPd(pl, z.poly), fill: COL.dim, 'fill-opacity': .36 }, z.yes ? g2 : g0);
+      if (aArea(z.poly) > 1.5) { const c = z.sg.join('') === '11-1' ? [5.2, .42] : aCen(z.poly);   // la zona de abajo lleva el rótulo a un costado: en su centro hay dos puntos
+        aHalo(aTx(z.yes ? gl2 : gl0, z.yes ? 'dos' : 'ninguno', pl.X(c[0]), pl.Y(c[1]) + 8, null, { size: 22, font: UI, weight: 700, anchor: 'middle' })); }
+    });
+    aAmbI.forEach(i => mk('circle', { cx: pl.X(aP[i][0]), cy: pl.Y(aP[i][1]), r: 18, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, gr));
+    aSq(gk, 570, 752, COL.dim, 'zona ambigua');
+    show(gx, tam); show(gk, tam); show(g0, tam + 2.3); show(gl0, tam + 2.3); show(g2, tam + 4.6); show(gl2, tam + 4.6); show(gr, tam + 7.4, .3);
+    [gx, g0, g2, gl0, gl2, gr, gk].forEach(e => hide(e, tar - .3, .4));
+    // el argmax de las puntuaciones reparte todo el plano; al reescalar f_1, las rectas no se mueven y las regiones sí
+    const rg = aRegs(pl, (y, sc) => aOvaReg(y, sc)); rg.set([1, 1, 1]); rg.show(tar + .2);
+    ln.forEach(e => tw(e, { o: .4 }, tar, .4));
+    tw(ln[0], { o: 1 }, tsm, .3);
+    prog(u => rg.set([1 + (aScl[0] - 1) * u, 1, 1]), tsm + 3.2, 2.2);
+    e0.forEach(i => aMark(pl.tg, pl.X(aP[i][0]) + 20, pl.Y(aP[i][1]) - 20, tar + 2.6));
+    e1.filter(i => !e0.includes(i)).forEach(i => aMark(pl.tg, pl.X(aP[i][0]) + 20, pl.Y(aP[i][1]) - 20, tsm + 5.2));
+    aRow(p, [['h_{l}  =  sgn( f_{l} )'], ['        uno por clase: l contra el resto', COL.dim, UI, 24]], RX, 262, tc[0], { size: 30, weight: 600 });
+    aRow(p, [['zona ambigua:  ningún «sí», o más de uno', COL.chalk, UI, 26], [`      aquí, ${aAmbI.length} de ${aM} puntos`, COL.dim, UI, 24]], RX, 346, [tam, tam + 7.4], { size: 26, weight: 600 });
+    aRow(p, [['h(x)  =  argmax_{l∈Y}  f_{l}(x)'], ['          (9.16)', COL.dim, UI, 22]], RX, 430, tar, { size: 30, weight: 600 });
+    aRow(p, [['cada f_{l} se aprende por separado:  ', COL.chalk, UI, 26], ['no son comparables', HUE.hyp, UI, 26]], RX, 514, [tcl, tcl + 2.6], { size: 26, weight: 600 });
+    aTx(p, 'problema de calibración', RX, 554, tcl + 5.2, { size: 24, fill: COL.dim, font: UI });
+    aRow(p, [[`${aScl[0]} · f_{1}`, aHue(0)], [':   el mismo h_{1},  otra predicción en ', COL.chalk, UI, 26], [`${aMovedI.length} puntos`, COL.bad, UI, 26]], RX, 638, [tsm, tsm + 2.4, tsm + 4.4], { size: 28, weight: 600 });
+    aTx(p, `errores en la muestra:  ${e0.length}  →  ${e1.length}`, RX, 678, tsm + 5.4, { size: 24, fill: COL.dim, font: UI });
+    aRow(p, [['costo:      ', COL.dim, UI, 24], ['k clasificadores binarios', COL.chalk, UI, 26]], RX, 762, tco, { size: 26, weight: 600 });
+  }],
+
+  ['ovo', 'Uno contra uno', (m) => {
+    const p = panel(0), td = [m('d1'), m('d2'), m('d3')], tn = m('n'), tv = m('vote'), tti = m('tie'), tcal = m('cal'), tda = m('data'), ttr = m('tr'), tte = m('te'), RX = 800;
+    aNote(p, `cada duelo: SVM de margen blando (C = ${aC}) solo con los puntos de sus dos clases · costos: supuestos de la tabla 9.1`);
+    aTitle(p, 'Uno contra uno (OVO): un clasificador por par de clases');
+    const pl = aMain(p); aLeg(p, 100, 752);
+    // en el duelo j, los puntos de la tercera clase se apagan: no entran en el entrenamiento
+    aP.forEach((q, i) => { let f = false; [...td, tn - .3].forEach((t, s) => { const want = s < 3 && !aPairs[s].includes(q[2]); if (want !== f) { tw(pl.dots[i], { o: want ? .12 : 1 }, t, .3); f = want; } }); });
+    const ln = aOvo.map((s, j) => aLine(pl, s, `${aPairs[j][0] + 1}–${aPairs[j][1] + 1}`, [{ ly: 7.3 }, { lx: 1 }, { lx: 9.3 }][j]));
+    const tnt = aOvo.map((s, j) => { const g = G(pl.bg, { o: 0 }); [-1, 1].forEach((sg, k) => mk('path', { d: aPd(pl, aSide(aFrame, s, sg)), fill: aHue(aPairs[j][k]), 'fill-opacity': .2 }, g)); return g; });
+    aOvo.forEach((_, j) => { const te = j < 2 ? td[j + 1] - .15 : tn - .3; show(ln[j], td[j], .3); show(tnt[j], td[j], .3); hide(tnt[j], te, .3); if (j < 2) { hide(ln[j], te, .3); show(ln[j], tn - .1, .4); } });
+    // la votación: cada clase se queda con la región donde gana sus dos duelos; en el triángulo, cada una gana uno
+    const rg = aRegs(pl, y => aOvoReg(y)); rg.set(); rg.show(tv + .6);
+    ln.forEach(e => tw(e, { o: .45 }, tv + .6, .4));
+    const tie = put(mk('path', { d: aPd(pl, aTiePoly), fill: COL.dim, 'fill-opacity': .5 }, pl.bg), { o: 0 }); show(tie, tv + .6);
+    const tc = aCen(aTiePoly), gt = G(pl.tg, { o: 0 }); show(gt, tti, .3);
+    mk('path', { d: aPd(pl, aTiePoly), fill: 'none', stroke: COL.chalk, 'stroke-width': 3, 'stroke-linejoin': 'round' }, gt);
+    aHalo(aTx(gt, 'empate', pl.X(tc[0]) + 78, pl.Y(tc[1]) - 30, null, { size: 22, font: UI, weight: 700 }));
+    const g1 = G(p), g2 = G(p);
+    aTx(g1, 'un clasificador por par (l, l′), con los puntos de ese par', RX, 262, .6, { size: 26, font: UI, weight: 600 });
+    aRow(g1, [['k(k − 1)/2'], [`      aquí, ${aNc(aKc)}`, COL.dim, UI, 24], [`          con k = 10:  ${aNc(10)}`, COL.chalk, UI, 26]], RX, 346, [tn, tn + 2.6, tn + 3.4], { size: 30, weight: 600 });
+    aRow(g1, [['h(x)  =  argmax_{l′∈Y} |{ l :  h_{ll′}(x) = 1 }|'], ['        (9.17)', COL.dim, UI, 22]], RX, 430, tv, { size: 30, weight: 600 });
+    aTx(g1, 'voto por mayoría: la clase que gana más duelos', RX, 472, tv + 1.6, { size: 24, fill: COL.dim, font: UI });
+    aRow(g1, [['empate:  un voto por clase', COL.chalk, UI, 26], ['      solo en el triángulo gris', COL.dim, UI, 24]], RX, 556, tti, { size: 26, weight: 600 });
+    aTx(g1, 'sin puntuaciones que comparar: sin problema de calibración', RX, 640, tcal, { size: 26, font: UI, weight: 600 });
+    hide(g1, tda - .5, .4);
+    // costos: los puntos que ve cada clasificador (uno por punto, con su color) y la tabla 9.1
+    aTx(g2, 'puntos de entrenamiento de cada clasificador', RX, 250, tda, { size: 22, fill: COL.dim, font: UI });
+    [['OVA', aLs.map(() => aAllI), tda], ['OVO', aPairs.map(aSubI), tda + 1]].forEach(([nm, sets, t0], r) => {
+      const g = G(g2, { o: 0 }), y = 304 + r * 52; show(g, t0);
+      aTx(g, nm, RX, y, null, { size: 26, font: UI, weight: 700 });
+      sets.forEach((idx, j) => { const x = RX + 96 + j * 222; idx.forEach((i, n) => mk('circle', { cx: x + n * 9 + 5, cy: y - 9, r: 4, fill: aHue(aP[i][2]) }, g)); aTx(g, String(idx.length), x + idx.length * 9 + 10, y, null, { size: 24, weight: 700 }); });
+    });
+    const gT = G(g2, { o: 0 }), C1 = RX + 110, C2 = RX + 500, RY = r => 500 + r * 104; show(gT, tda + 2.2);
+    aTx(gT, 'entrenamiento', C1, 436, null, { size: 22, fill: COL.dim, font: UI }); aTx(gT, 'prueba', C2, 436, null, { size: 22, fill: COL.dim, font: UI }); aTx(gT, 'tabla 9.1', 1570, 436, null, { size: 22, fill: COL.dim, font: UI, anchor: 'end' });
+    mk('path', { d: `M${RX} 452H1570`, stroke: COL.faint, 'stroke-width': 2 }, gT);
+    [['OVA', 'O( k m^{α} )', 'O( k c_{t} )'], ['OVO', 'O( k^{2−α} m^{α} )', 'O( k^{2} c_{t} )']].forEach(([nm, a, b], r) => { aTx(gT, nm, RX, RY(r), null, { size: 26, font: UI, weight: 700 }); aTx(gT, a, C1, RY(r), null, { size: 28, weight: 600 }); aTx(gT, b, C2, RY(r), null, { size: 28, weight: 600 }); });
+    aTx(gT, 'entrenar con n puntos cuesta O(n^{α}) · c_{t}: costo de evaluar un clasificador', RX, 790, null, { size: 22, fill: COL.dim, font: UI });
+    aTx(g2, `caso ilustrativo, con clases equilibradas:  α = ${aCa},  k = ${aCk},  m = ${aInt(aCm)}`, RX, 706, ttr + 2.4, { size: 22, fill: COL.dim, font: UI });
+    aTx(g2, `cada duelo de OVO se entrena con 2m/k = ${aInt(2 * aCm / aCk)} puntos`, RX, 738, ttr + 5.4, { size: 22, fill: COL.dim, font: UI });
+    aTx(g2, `${aCk} × ${aInt(aCm)}^{2}  =  ${aInt(aCost.ovaTr)}`, C1, RY(0) + 40, ttr + 3, { size: 24, weight: 600 });
+    aTx(g2, `${aNc(aCk)} × ${aInt(2 * aCm / aCk)}^{2}  =  ${aInt(aCost.ovoTr)}`, C1, RY(1) + 40, ttr + 5.4, { size: 24, weight: 600, fill: HUE.hyp });
+    aTx(g2, `${aCost.ovaTe} evaluaciones`, C2, RY(0) + 40, tte + 1.2, { size: 24, weight: 600, fill: HUE.hyp, font: UI });
+    aTx(g2, `${aCost.ovoTe} evaluaciones`, C2, RY(1) + 40, tte + 1.8, { size: 24, weight: 600, font: UI });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [100, 580, 1060], W = 440;
+    T(p, 'Tres puntos nuevos, tres duelos cada uno', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Cada tarjeta muestra quién gana cada duelo de uno contra uno en ese punto.', 100, 194, null, { size: 26, fill: COL.dim, font: UI });
+    S.q1 = aQ1.map((q, j) => {
+      const g = G(p, { x: BX[j], y: 230 });
+      mk('rect', { x: 0, y: 0, width: W, height: 430, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+      mk('circle', { cx: 44, cy: 44, r: 22, fill: COL.chalk }, g); T(g, String(j + 1), { x: 44, y: 53, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+      aPairs.forEach(([a, b], n) => {
+        const y = 134 + n * 104, w = aWin(n, q);
+        aRow(g, [[`clase ${a + 1}`, aHue(a), UI], ['   contra   ', COL.dim, UI, 22], [`clase ${b + 1}`, aHue(b), UI]], 40, y, null, { size: 26, weight: 600 });
+        mk('circle', { cx: 78, cy: y + 34, r: 11, fill: aHue(w) }, g);
+        aTx(g, `gana la clase ${w + 1}`, 102, y + 43, null, { size: 26, font: UI, weight: 700 });
+      });
+      return g;
+    });
+    S.q1B = BX.map(x => [x, 230, W, 430]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-voto', prompt: ['¿En cuál de los tres puntos gana la votación la clase 3?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'punto ' + (j + 1) })), aQ1r,
+      `Ahí la clase 3 gana sus dos duelos: ${aQ1v[aQ1r][2]} votos de ${aPairs.length}.`,
+      i => aQ1w[i] < 0 ? 'Ahí cada clase gana un duelo: hay empate, a un voto por clase.' : `Ahí la clase ${aQ1w[i] + 1} gana dos duelos, y se lleva la votación.`),
+  }], done) }],
+
+  ['ecoc', 'Códigos correctores de errores', (m) => {
+    const p = panel(0), tm = m('mat'), twd = m('word'), tcl = m('col'), tx = m('x'), tcm = m('cmp'), tmn = m('min'), RX = 860, X0 = 250, Y0 = 250, CW = 52, k = aM95.length, c = aM95[0].length, RY = 716, DX = X0 + c * CW + 26;
+    const col1 = aM95.map((r, i) => r[0] > 0 ? i : -1).filter(i => i >= 0), list = v => v.length > 1 ? v.slice(0, -1).join(', ') + ' y ' + v[v.length - 1] : String(v[0]);
+    aNote(p, 'matriz y punto nuevo: los de la figura 9.5 del libro · las distancias se calculan en la página');
+    aTitle(p, 'Códigos correctores de errores (ECOC): una palabra por clase');
+    const bt = aBits(p, aM95, X0, Y0, CW, { t0: .4, step: .07 }), hd = G(p, { o: 0 }); show(hd, tm);
+    aTx(hd, 'clase', X0 - 18, Y0 - 14, null, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+    const rl = aM95.map((_, i) => aTx(hd, String(i + 1), X0 - 18, Y0 + i * CW + CW / 2 + 9, null, { size: 24, fill: COL.dim, anchor: 'end', weight: 700 }));
+    aM95[0].forEach((_, j) => aTx(hd, `h_{${j + 1}}`, X0 + j * CW + CW / 2, Y0 - 14, null, { size: 22, fill: COL.dim, anchor: 'middle' }));
+    bt.box(0, 0, 1, c, COL.chalk, twd, tcl - .3);
+    bt.box(0, 0, k, 1, HUE.hyp, tcl + .4, tx - .4);
+    col1.forEach(i => { tw(rl[i], { c_fill: HUE.hyp }, tcl + 2.6, .3); tw(rl[i], { c_fill: COL.dim }, tx - .4, .3); });
+    // la palabra del punto nuevo, y su distancia de Hamming a cada fila
+    const rx = aBits(p, [aHx], X0, RY, CW, { t0: tx + .4 }), dc = aDcol(p, DX, Y0, CW, aD95.d);
+    aTx(p, 'h(x)', X0 - 18, RY + CW / 2 + 9, tx + .4, { size: 24, anchor: 'end', weight: 600 });
+    aTx(p, 'respuestas de los 6 clasificadores para el punto nuevo x', DX, RY + CW / 2 + 8, tx + .4, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'd_{H}', DX, Y0 - 14, tcm + .3, { size: 22, fill: COL.dim });
+    aM95.forEach((row, i) => {
+      const t = tcm + .5 + i * .62, keep = i === aD95.l;
+      row.forEach((v, j) => { if (v !== aHx[j]) { bt.box(i, j, 1, 1, COL.bad, t, keep ? null : t + .6); if (keep) rx.box(0, j, 1, 1, COL.bad, t, null); } });
+      show(dc[i].g, t + .2, .3);
+    });
+    bt.box(aD95.l, 0, 1, c, HUE.hyp, tmn + .3, null); dc[aD95.l].hot(HUE.hyp, tmn + .3); tw(rl[aD95.l], { c_fill: HUE.hyp }, tmn + .3, .3);
+    aRow(p, [['M ∈ {−1, +1}^{k×c}'], [`        k = ${k} clases,  c = ${c} clasificadores`, COL.dim, UI, 24]], RX, 262, tm, { size: 30, weight: 600 });
+    aTx(p, 'fila l:  la palabra de código M_{l} de la clase l', RX, 340, twd, { size: 26, font: UI, weight: 600 });
+    aTx(p, 'columna j:  h_{j} separa las clases con +1 del resto', RX, 418, tcl, { size: 26, font: UI, weight: 600 });
+    aTx(p, `en h_{1}:  las clases ${list(col1.map(i => i + 1))} contra las demás`, RX, 458, tcl + 2.6, { size: 24, fill: COL.dim, font: UI });
+    aTx(p, 'h(x)  =  ( h_{1}(x), …, h_{c}(x) )', RX, 540, tx, { size: 30, weight: 600 });
+    aRow(p, [['x   ↦   argmin_{l∈Y}  d_{H}( M_{l} , h(x) )'], ['          (9.18)', COL.dim, UI, 22]], RX, 620, tcm, { size: 30, weight: 600 });
+    aTx(p, `aquí:  clase ${aD95.l + 1},  a distancia ${aD95.mn}`, RX, 700, tmn + .6, { size: 28, fill: HUE.hyp, font: UI, weight: 600 });
+  }],
+
+  ['ecoc2', 'Cuántos errores se corrigen', (m) => {
+    const p = panel(0), tcd = m('code'), tfl = m('flip'), tnr = m('near'), ttw = m('two'), tov = m('ova'), too = m('ovo'), RX = 860, X0 = 180, Y0 = 250, CW = 58, k = aCode.length, c = aCode[0].length, RY = 560, DX = X0 + c * CW + 26;
+    const fj = aRx1.findIndex((v, j) => v !== aCode[0][j]), dm = aDmin(aCode), tF = tfl + 3.2, mo = aMova(aKc), dmo = aDmin(mo);
+    aNote(p, 'código ilustrativo: cuatro palabras de un código símplex de longitud 7 · matrices de OVA y OVO, para k = 3');
+    aTitle(p, 'La distancia mínima entre palabras decide cuántos errores se corrigen');
+    const bt = aBits(p, aCode, X0, Y0, CW, { t0: .4, step: .1 });
+    aCode.forEach((_, i) => aTx(p, `clase ${i + 1}`, X0 - 16, Y0 + i * CW + CW / 2 + 8, .5, { size: 22, fill: COL.dim, anchor: 'end', font: UI }));
+    // los seis pares de filas, de a uno: se marcan las posiciones en que difieren
+    const prs = aKpairs(k), ps = ([a, b]) => `filas ${a + 1} y ${b + 1}:  difieren en ${aHam(aCode[a], aCode[b])} posiciones`, pt = aTx(p, ps(prs[0]), X0, Y0 + k * CW + 40, tcd + 1, { size: 24, font: UI, fill: COL.dim });
+    prs.forEach(([a, b], n) => { const t = tcd + 1.2 + n * .95; [a, b].forEach(i => bt.box(i, 0, 1, c, COL.chalk, t, t + .85)); aCode[a].forEach((v, j) => { if (v !== aCode[b][j]) [a, b].forEach(i => bt.box(i, j, 1, 1, COL.bad, t + .15, t + .85)); }); aAt(() => pt._set(ps([a, b])), t); });
+    hide(pt, tfl - .5, .3);
+    // la palabra de la clase 1 llega con un bit cambiado
+    const rx = aBits(p, [aCode[0]], X0, RY, CW, { t0: tfl - .1 }), dc = aDcol(p, DX, Y0, CW, aDists(aCode, aCode[0]), { u: 22 });
+    aTx(p, 'recibida', X0 - 16, RY + CW / 2 + 8, tfl - .1, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+    const cap = aTx(p, 'la palabra de la clase 1, sin errores', X0, RY + CW + 38, tfl - .1, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'd_{H}', DX, Y0 - 14, tfl + .9, { size: 22, fill: COL.dim });
+    dc.forEach((o, i) => show(o.g, tfl + .9 + .1 * i, .3));
+    rx.set(0, fj, aRx1[fj], tF); rx.box(0, fj, 1, 1, COL.bad, tF, null); bt.box(0, fj, 1, 1, COL.bad, tF + .3, null);
+    aAt(() => { cap._set(`un clasificador (h_{${fj + 1}}) se equivocó: un bit cambiado`); dc.forEach((o, i) => o.set(aD1.d[i])); }, tF + .3);
+    bt.box(aD1.l, 0, 1, c, HUE.hyp, tnr + .4, null); dc[aD1.l].hot(HUE.hyp, tnr + .4);
+    aRow(p, [['d', HUE.hyp], [':  distancia mínima entre dos filas', COL.chalk, UI, 26], [`        aquí, d = ${dm}`, COL.dim, UI, 24]], RX, 262, [tcd + 1, tcd + 1, tcd + 6.8], { size: 30, weight: 700 });
+    aRow(p, [['se corrigen hasta  ', COL.chalk, UI, 26], ['⌊(d − 1)/2⌋'], ['  errores', COL.chalk, UI, 26], [`        aquí, ${aCorr(dm)}`, COL.dim, UI, 24]], RX, 340, [ttw, ttw, ttw, ttw + 4.6], { size: 30, weight: 600 });
+    // OVA y OVO como matrices de códigos
+    const MY = 478, MC = 46, AX = 900, OX = 1300, ga = G(p, { o: 0 }), go = G(p, { o: 0 }); show(ga, tov); show(go, too);
+    aRow(ga, [['OVA', HUE.hyp, UI, 26], ['        c = k']], AX - 40, MY - 50, null, { size: 26, weight: 700 });
+    aBits(ga, mo, AX, MY, MC); mo.forEach((_, i) => aTx(ga, String(i + 1), AX - 14, MY + i * MC + MC / 2 + 8, null, { size: 22, fill: COL.dim, anchor: 'end', weight: 700 }));
+    aTx(p, aCorr(dmo) ? `d = ${dmo}:  corrige ${aCorr(dmo)}` : `d = ${dmo}:  no corrige ninguno`, AX - 40, MY + 3 * MC + 40, tov + 3.6, { size: 24, font: UI, weight: 600 });
+    aRow(go, [['OVO', HUE.hyp, UI, 26], ['        c = k(k − 1)/2']], OX - 40, MY - 50, null, { size: 26, weight: 700 });
+    aBits(go, aMovo(aKc), OX, MY, MC); mo.forEach((_, i) => aTx(go, String(i + 1), OX - 14, MY + i * MC + MC / 2 + 8, null, { size: 22, fill: COL.dim, anchor: 'end', weight: 700 }));
+    aPairs.forEach(([a, b], j) => aTx(go, `${a + 1}–${b + 1}`, OX + j * MC + MC / 2, MY - 10, null, { size: 22, fill: COL.dim, anchor: 'middle' }));
+    aTx(p, '0:  clase fuera del duelo', OX - 40, MY + 3 * MC + 40, too + 3, { size: 24, font: UI, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), X0 = 560, Y0 = 250, CW = 56, c = aCode[0].length, RY = 560;
+    T(p, 'El mismo código, otra palabra', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'Abajo, las respuestas de los siete clasificadores binarios para un punto nuevo.', 100, 194, null, { size: 26, fill: COL.dim, font: UI });
+    const bt = aBits(p, aCode, X0, Y0, CW);
+    aCode.forEach((_, i) => aTx(bt.rows[i], `clase ${i + 1}`, X0 - 18, Y0 + i * CW + CW / 2 + 8, null, { size: 24, fill: COL.dim, anchor: 'end', font: UI, weight: 600 }));
+    aBits(p, [aRxQ], X0, RY, CW);
+    aTx(p, 'palabra recibida', X0 - 18, RY + CW / 2 + 8, null, { size: 24, fill: HUE.hyp, anchor: 'end', font: UI, weight: 600 });
+    mk('rect', { x: X0 - 1, y: RY - 1, width: c * CW + 2, height: CW + 2, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, p);
+    S.q2 = bt.rows; S.q2B = aCode.map((_, i) => [X0 - 120, Y0 + i * CW, c * CW + 132, CW]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-codigo', prompt: ['¿Qué clase predice el código para la palabra recibida?'],
+    build: pickEls(S.q2.map((el, i) => ({ el, box: S.q2B[i], label: 'clase ' + (i + 1) })), aDQ.l,
+      `Difiere de esa fila en ${aDQ.mn} sola posición; de las demás, en ${Math.min(...aDQ.d.filter((_, i) => i !== aDQ.l))} o más.`,
+      i => `De esa fila difiere en ${aDQ.d[i]} posiciones: hay otra fila más cercana.`),
+  }], done) }],
+
+  ['estr', 'Salidas con estructura', (m) => {
+    const p = panel(0), ttg = m('tags'), tlb = m('lab'), tct = m('count'), tbg = m('big'), tdp = m('dep'), tls = m('loss'), thm = m('ham'), RX = 880, SY = [684, 734], diff = aAllN.filter(i => aGreedy[i] !== aGold[i]);
+    aNote(p, 'oración y etiquetado ilustrativos · N, V, A: las etiquetas del ejemplo del libro (§9.5)');
+    aTitle(p, 'Predicción estructurada: la salida es una secuencia');
+    const tr = aTrel(p, { hid: true });
+    tr.node.forEach((col, i) => col.forEach((nd, t) => { nd.tx.textContent = aTags[t]; nd.tx.setAttribute('fill', COL.dim); show(nd.g, ttg + 1.6 + .12 * i + .25 * t, .3); }));
+    aTx(p, 'N: sustantivo  ·  V: verbo  ·  A: adjetivo', tr.X(0) - 66, 800, ttg + 1.6, { size: 22, fill: COL.dim, font: UI });
+    // la secuencia correcta: un nodo por palabra, y el camino que los une
+    aGold.forEach((t, i) => { const nd = tr.node[i][t], tt = tlb - 1.6 + .25 * i; tw(nd.c, { c_stroke: HUE.hyp }, tt, .3); tw(nd.tx, { c_fill: HUE.hyp }, tt, .3); });
+    tr.path(aGold, { stroke: HUE.hyp, 'stroke-width': 6 }).forEach((e, n) => show(put(e, { o: 0 }), tlb + .2 * n, .3));
+    aTx(p, 'y', tr.X(0) - 80, SY[0], tlb, { size: 28, fill: HUE.hyp, weight: 700, anchor: 'middle' });
+    aGold.forEach((t, i) => aTx(p, aTags[t], tr.X(i), SY[0], tlb + .2 * i, { size: 28, fill: HUE.hyp, weight: 700, anchor: 'middle' }));
+    // dependencia: un arco poco probable; después, otra secuencia y su pérdida de Hamming
+    const bad = put(tr.seg(3, 1, 1, { stroke: COL.bad, 'stroke-width': 5, 'stroke-dasharray': '4 9' }, tr.pg), { o: 0 }); show(bad, tdp + 2, .3); hide(bad, tls - .3, .3);
+    tr.path(aGreedy, { stroke: HUE.loss, 'stroke-width': 4, 'stroke-dasharray': '10 8' }).forEach((e, n) => show(put(e, { o: 0 }), tls + .15 * n, .3));
+    aTx(p, 'y′', tr.X(0) - 80, SY[1], tls, { size: 28, fill: HUE.loss, weight: 700, anchor: 'middle' });
+    aGreedy.forEach((t, i) => { const e = aTx(p, aTags[t], tr.X(i), SY[1], tls + .15 * i, { size: 28, fill: HUE.loss, weight: 700, anchor: 'middle' }); if (diff.includes(i)) { tw(e, { c_fill: COL.bad }, thm + 2.4, .3); const nd = tr.node[i][t]; tw(nd.c, { c_stroke: COL.bad }, thm + 2.4, .3); const fr = G(p, { o: 0 }); show(fr, thm + 2.4, .3); mk('rect', { x: tr.X(i) - 24, y: SY[1] - 32, width: 48, height: 44, fill: 'none', stroke: COL.bad, 'stroke-width': 3 }, fr); } });
+    aTx(p, 'x: la oración          y: una etiqueta por palabra', RX, 262, ttg, { size: 26, font: UI, weight: 600 });
+    aTx(p, 'la etiqueta de x es la secuencia completa  t_{1} … t_{n}', RX, 340, tlb, { size: 26, font: UI, weight: 600 });
+    aRow(p, [['|Σ|^{n}  =  '], [`${aNt}^{${aN}}  =  `], [`${aNseq(aN)}`], ['  secuencias posibles', COL.chalk, UI, 26]], RX, 424, [tct, tct, tct + 1.4, tct + 1.4], { size: 30, weight: 600 });
+    aRow(p, [['con n = 20:      ', COL.dim, UI, 24], [aInt(aNseq(20))]], RX, 480, tbg, { size: 30, weight: 600 });
+    aRow(p, [['dependencias:  ', COL.chalk, UI, 26], ['V', COL.bad], [' seguido de ', COL.chalk, UI, 26], ['V', COL.bad], [', poco probable', COL.chalk, UI, 26]], RX, 564, [tdp, tdp + 2, tdp + 2, tdp + 2, tdp + 2], { size: 28, weight: 700 });
+    aRow(p, [['L(y′, y)', HUE.loss], ['  =  distancia de Hamming', COL.chalk, UI, 26], [`  =  ${aLossG}`, COL.bad], [`        (de ${aN} etiquetas)`, COL.dim, UI, 24]], RX, 648, [tls, thm, thm + 2.4, thm + 2.4], { size: 30, weight: 600 });
+  }],
+
+  ['viterbi', 'Factores locales y Viterbi', (m) => {
+    const p = panel(0), tph = m('phi'), tfa = m('fac'), te = m('e'), tt = m('t'), tdp = m('dp'), tcl = m('col'), tbk = m('back'), tbs = m('best'), tpo = m('ops'), RX = 880, V = aVit.V, B = aVit.B, y = aVit.y, TX = 1000, TY = 440, TC = 60;
+    aNote(p, 'puntuaciones ilustrativas, inventadas para el ejemplo · el enrejado, el mejor camino y su suma se calculan en la página');
+    aTitle(p, 'Factores locales: el mejor camino sale por programación dinámica');
+    const tr = aTrel(p);
+    aTags.forEach((tg, t) => T(tr.g, tg, { x: tr.X(0) - 80, y: tr.Y(t) + 10, size: 28, fill: COL.dim, font: MATH, weight: 700, anchor: 'middle' }));
+    for (let i = 1; i < aN; i++) aTags.forEach((_, s) => aTags.forEach((_, t) => tr.seg(i, s, t, { stroke: COL.faint, 'stroke-width': 1.5 })));
+    // dentro de cada nodo: la puntuación palabra–etiqueta. A la derecha: la tabla etiqueta–etiqueta.
+    tr.node.forEach((col, i) => col.forEach((nd, t) => { nd.tx.textContent = aSg(aEm[i][t]).replace('+', ''); put(nd.tx, { o: 0 }); show(nd.tx, te + .1 * i, .3); }));
+    const gt = G(p, { o: 0 }); show(gt, tt);
+    aTx(gt, 'etiqueta–etiqueta:  fila = la anterior,  columna = la siguiente', RX, 400, null, { size: 22, fill: COL.dim, font: UI });
+    aTags.forEach((tg, s) => {
+      T(gt, tg, { x: TX - 22, y: TY + s * TC + TC / 2 + 9, size: 26, fill: COL.dim, font: MATH, weight: 700, anchor: 'middle' }); T(gt, tg, { x: TX + s * TC + TC / 2, y: TY + 3 * TC + 30, size: 26, fill: COL.dim, font: MATH, weight: 700, anchor: 'middle' });
+      aTags.forEach((_, t) => { mk('rect', { x: TX + t * TC + 2, y: TY + s * TC + 2, width: TC - 4, height: TC - 4, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, gt); T(gt, aSg(aTr[s][t]).replace('+', ''), { x: TX + t * TC + TC / 2, y: TY + s * TC + TC / 2 + 9, size: 26, font: MATH, weight: 600, anchor: 'middle' }); });
+    });
+    // un arco y su casilla: V seguido de V
+    const ex = G(p, { o: 0 }); show(ex, tt + 1.4, .3); hide(ex, tdp - .2, .3);
+    mk('rect', { x: TX + TC - 1, y: TY + TC - 1, width: TC + 2, height: TC + 2, fill: 'none', stroke: COL.bad, 'stroke-width': 4 }, ex);
+    tr.seg(3, 1, 1, { stroke: COL.bad, 'stroke-width': 5 }, ex);
+    aTx(p, 'en cada nodo:', TX + 3 * TC + 40, TY + 30, te, { size: 22, fill: COL.dim, font: UI }); aTx(p, 'palabra–etiqueta', TX + 3 * TC + 40, TY + 60, te, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'en ámbar, junto al nodo:', TX + 3 * TC + 40, TY + 116, tcl, { size: 22, fill: HUE.hyp, font: UI }); aTx(p, 'la mejor suma de un', TX + 3 * TC + 40, TY + 146, tcl, { size: 22, fill: HUE.hyp, font: UI }); aTx(p, 'camino hasta él', TX + 3 * TC + 40, TY + 176, tcl, { size: 22, fill: HUE.hyp, font: UI });
+    // Viterbi, columna por columna: el valor de cada nodo y el arco por el que llega su mejor camino
+    V.forEach((col, i) => col.forEach((v, t) => {
+      const t0 = tcl + .4 + i * 1.1 + .12 * t;
+      if (i) show(put(tr.seg(i, B[i][t], t, { stroke: HUE.hyp, 'stroke-width': 3, 'stroke-opacity': .75 }, tr.pg), { o: 0 }), t0, .3);
+      aHalo(aTx(tr.vg, String(v), tr.X(i) + 24, tr.Y(t) - 30, t0, { size: 24, fill: HUE.hyp, weight: 700 }));
+    }));
+    // vuelta atrás desde el mejor nodo de la última columna
+    const bp = G(tr.pg);
+    y.forEach((t, i) => { const t0 = tbk + .3 + (aN - 1 - i) * .45; tw(tr.node[i][t].c, { c_stroke: HUE.hyp, 'a_stroke-width': 6 }, t0, .3); if (i) show(put(tr.seg(i, y[i - 1], t, { stroke: HUE.hyp, 'stroke-width': 8 }, bp), { o: 0 }), t0 + .15, .3); });
+    tw(tr.words[3].bx, { c_stroke: HUE.hyp, 'a_stroke-width': 4 }, tbs + 2.2, .3);
+    aRow(p, [['h(x)  =  argmax_{y∈Y}  w · Φ(x, y)'], ['          (9.20)', COL.dim, UI, 22]], RX, 262, tph, { size: 30, weight: 600 });
+    aRow(p, [['w · Φ(x, y)  =  '], ['∑ palabra–etiqueta', COL.chalk, UI, 24], ['  +  '], ['∑ etiqueta–etiqueta', COL.chalk, UI, 24]], RX, 340, [tfa, te, tt, tt], { size: 28, weight: 600 });
+    aRow(p, [['mejor camino:    ', COL.dim, UI, 24], [aSeqS(y), HUE.hyp], [`        suma ${aVit.best}`, COL.chalk, UI, 26]], RX, 716, tbs, { size: 30, weight: 700 });
+    aRow(p, [[`(n − 1) · |Σ|^{2}  =  ${aVit.ops}`], ['  sumas', COL.chalk, UI, 26], ['        contra  ', COL.dim, UI, 24], [String(aNseq(aN))], ['  secuencias', COL.chalk, UI, 26]], RX, 790, tpo, { size: 30, weight: 600 });
+  }],
+
+  ['alg', 'Algoritmos', (m) => {
+    const p = panel(0), tsv = m('svm'), tm3 = m('m3n'), tbr = m('bar'), tpl = m('poly'), tst = m('st'), tcr = m('crf'), RX = 800, LX = 100, CX = k => 176 + k * 42, BX = 510, U = 34, RY = r => 372 + r * 74;
+    aNote(p, 'Δ_{i}(y): abreviatura de este capítulo · en (9.21)–(9.23), el máximo recorre las salidas y ≠ y_{i}; en (9.24), la suma las recorre todas');
+    aTitle(p, 'Aprender w: la pérdida entra en el margen');
+    // izquierda: la secuencia correcta y tres equivocadas, con su pérdida de Hamming y el margen que se les exige
+    aTx(p, 'y_{i}', LX, 268, .5, { size: 28, weight: 700, fill: HUE.hyp }); aGold.forEach((t, k) => aTx(p, aTags[t], CX(k), 268, .5, { size: 28, fill: HUE.hyp, anchor: 'middle', weight: 700 }));
+    aTx(p, 'la salida correcta', CX(aN) + 14, 268, .5, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'margen exigido', BX, 322, tsv, { size: 22, fill: COL.dim, font: UI });
+    aWrong.forEach((yv, r) => {
+      const g = G(p, { o: 0 }), L = aWrongL[r]; show(g, .7 + .2 * r);
+      aTx(g, 'y', LX, RY(r), null, { size: 28, weight: 700 });
+      yv.forEach((t, k) => aTx(g, aTags[t], CX(k), RY(r), null, { size: 28, anchor: 'middle', weight: 700, fill: t === aGold[k] ? COL.chalk : COL.bad }));
+      aTx(p, `L = ${L}`, CX(aN) + 14, RY(r), tm3 + .3 * r, { size: 26, fill: HUE.loss, weight: 700 });
+      const br = put(mk('rect', { x: BX, y: RY(r) - 24, width: U, height: 26, fill: COL.dim }, p), { o: 0 }), n1 = aTx(p, '1', BX + U + 12, RY(r), tsv + .2 * r, { size: 26, weight: 700 });
+      show(br, tsv + .2 * r); tw(br, { a_width: L * U, c_fill: HUE.loss }, tbr + .2 * r, .8); hide(n1, tbr + .2 * r, .2);
+      aTx(p, String(L), BX + L * U + 12, RY(r), tbr + .7 + .2 * r, { size: 26, weight: 700, fill: HUE.loss });
+    });
+    aTx(p, 'L(y_{i}, y):  etiquetas en que y difiere de la correcta', LX, RY(3) + 6, tm3, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'salidas en cadena o en árbol, y pérdida que se', LX, 690, tpl, { size: 24, font: UI, weight: 600 }); aTx(p, 'descompone igual:  M^{3}N, en tiempo polinomial', LX, 726, tpl, { size: 24, font: UI, weight: 600 });
+    // derecha: el mismo problema, con cuatro términos distintos
+    aTx(p, 'min_{w}    ½ ‖w‖^{2}   +   C ∑_{i} ( término del ejemplo i )', RX, 268, .5, { size: 28, weight: 600 });
+    aTx(p, 'Δ_{i}(y)   =   w · [ Φ(x_{i}, y_{i})  −  Φ(x_{i}, y) ]', RX, 322, tsv - 1.6, { size: 24, fill: COL.dim });
+    [['SVM multiclase', '(9.21)', [['max_{y}  max( 0,   '], ['1', COL.chalk], ['  −  Δ_{i}(y) )']], tsv, 'el punto de partida (cap. 19)'],
+      ['M^{3}N', '(9.22)', [['max_{y}  max( 0,   '], ['L(y_{i}, y)', HUE.loss], ['  −  Δ_{i}(y) )']], tm3, 'redes de Markov de margen máximo'],
+      ['SVMStruct', '(9.23)', [['max_{y}  '], ['L(y_{i}, y)', HUE.loss], ['  max( 0,   1  −  Δ_{i}(y) )']], tst, 'SVM estructural'],
+      ['CRF', '(9.24)', [['log ∑_{y}  exp( '], ['L(y_{i}, y)', HUE.loss], ['  −  Δ_{i}(y) )']], tcr, 'campos aleatorios condicionales']].forEach(([nm, eq, parts, t0, full], r) => {
+      const y = 410 + r * 98, g = G(p, { o: 0 }); show(g, t0);
+      aTx(g, nm, RX, y, null, { size: 26, font: UI, weight: 700, fill: r ? HUE.hyp : COL.chalk });
+      aTx(g, full, RX, y + 32, null, { size: 22, fill: COL.dim, font: UI });
+      aRow(g, parts, RX + 230, y, null, { size: 28, weight: 600 }); aTx(g, eq, 1570, y, null, { size: 22, fill: COL.dim, font: UI, anchor: 'end' });
+    });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['OVA:  k clasificadores; gana la mayor puntuación, sin garantía de calibración.', 'w1'], ['OVO:  k(k − 1)/2 clasificadores, uno por par de clases; se decide por votos.', 'w2'],
+      ['ECOC:  una palabra de código por clase; gana la más cercana en Hamming.', 'w3'], ['Predicción estructurada:  factores locales y programación dinámica.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Con k clases, OVA entrena k clasificadores binarios; OVO, k(k\u00a0−\u00a01)/2.'], ans: ['v'], why: 'Uno por clase, frente a uno por cada par de clases.' },
+      { parts: ['Las puntuaciones de los clasificadores de OVA son siempre comparables entre sí.'], ans: ['f'], why: 'Se aprenden por separado: es el problema de calibración.' },
+      { parts: ['Con ECOC se predice la clase cuya palabra queda a menor distancia de Hamming.'], ans: ['v'], why: 'Es la regla (9.18): la fila más cercana a la palabra recibida.' },
+      { parts: ['Un código con distancia mínima 4 entre sus palabras corrige hasta 2 errores binarios.'], ans: ['f'], why: `La parte entera de (4 − 1)/2 es ${aCorr(4)}: corrige un solo error.` },
+      { parts: [`Con ${aNt} etiquetas y ${aN} palabras, Viterbi puntúa las ${aNseq(aN)} secuencias una por una.`], ans: ['f'], why: `Avanza columna por columna: le bastan ${aVit.ops} sumas.` },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

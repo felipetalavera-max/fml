@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planificación: iterar valores y políticas</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 34, title: 'Planificación: iterar valores y políticas', minutes: 6, language: 'es', next: '../ch35/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 33) ---------- */
+// Sin clases en este capítulo. Ámbar = el agente, la acción elegida y la política · verde = recompensa (rojo si es negativa) ·
+// violeta = el valor (V y Q) · rosa = probabilidades de transición y descuento · tiza = estados y lo demás.
+const HUE = { act: COL.task, rew: COL.good, neg: COL.bad, val: COL.real, pr: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'x_{j}', 'a^{*}'. Con t0 = null queda visible desde el inicio. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξχΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯≠π⊆])/;                        // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aHideAll = (els, t) => els.forEach(e => hide(e, t, .3));
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+// Sistema lineal A·z = c por eliminación de Gauss con pivoteo parcial (el del cap. 24).
+const aSolve = (A, c) => {
+  const n = c.length, a = A.map((r, i) => [...r, c[i]]);
+  for (let k = 0; k < n; k++) {
+    let pv = k; for (let i = k + 1; i < n; i++) if (Math.abs(a[i][k]) > Math.abs(a[pv][k])) pv = i;
+    [a[k], a[pv]] = [a[pv], a[k]];
+    for (let i = k + 1; i < n; i++) { const f = a[i][k] / a[k][k]; for (let j = k; j <= n; j++) a[i][j] -= f * a[k][j]; }
+  }
+  const z = Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) z[i] = (a[i][n] - a[i].slice(i + 1, n).reduce((s, v, j) => s + v * z[i + 1 + j], 0)) / a[i][i];
+  return z;
+};
+// --- El MDP de la figura 17.3 del libro (start, other · search, carry, pickup). El libro deja R1, R2 y R3 sin valor: aquí 0, 1 y 3 (ilustrativos), y γ = 0.8.
+const aST = ['inicio', 'otro'], aAC = ['buscar', 'llevar', 'recoger'], aGAM = .8, aR1 = 0, aR2 = 1, aR3 = 3;
+// Una transición por flecha de la figura: desde s, con la acción a, se llega a «to» con probabilidad p y recompensa r. loop / bend: solo para dibujarla.
+const aED = [{ s: 0, a: 0, to: 0, p: .1, r: aR1, loop: -90 }, { s: 0, a: 0, to: 1, p: .9, r: aR1, bend: -.2 }, { s: 1, a: 1, to: 0, p: .5, r: aR3, bend: -.2 },
+  { s: 1, a: 1, to: 1, p: .5, r: -1, loop: -90 }, { s: 1, a: 2, to: 1, p: 1, r: aR2, loop: 90 }];
+const aMDP = { ini: 0, lab: aST, act: aAC, ed: aED };
+const aOut = (s, a) => aED.map((e, k) => ({ ...e, k })).filter(e => e.s === s && e.a === a);
+const aEr = (s, a) => aOut(s, a).reduce((v, e) => v + e.p * e.r, 0);                                   // E[r(s, a)]
+const aPm = pi => aST.map((_, s) => aST.map((_, t) => aOut(s, pi[s]).filter(e => e.to === t).reduce((v, e) => v + e.p, 0)));   // P de (17.6)
+const aRv = pi => aST.map((_, s) => aEr(s, pi[s]));                                                    // R de (17.6)
+const aV = (pi, gam = aGAM) => aSolve(aPm(pi).map((r, i) => r.map((v, j) => (i === j ? 1 : 0) - gam * v)), aRv(pi));   // (17.7): (I − γP) V = R
+const aQ = (V, s, a, gam = aGAM) => aOut(s, a).reduce((v, e) => v + e.p * (e.r + gam * V[e.to]), 0);       // (17.1), segunda forma
+// --- Planificación (§17.4): los tres algoritmos, sobre el mismo MDP.
+const aAS = s => [...new Set(aED.filter(e => e.s === s).map(e => e.a))];                               // acciones disponibles en s
+const aPhi = (V, gam = aGAM) => aST.map((_, s) => Math.max(...aAS(s).map(a => aQ(V, s, a, gam))));       // (17.8): [Φ(V)](s)
+// Política voraz respecto de V (la que alcanza el máximo de (17.9)); en un empate conserva la acción de pi.
+const aGreedy = (V, pi) => aST.map((_, s) => aAS(s).reduce((b, a) => aQ(V, s, a) > aQ(V, s, b) + 1e-12 ? a : b, pi ? pi[s] : aAS(s)[0]));
+const aDist = (U, V) => Math.max(...U.map((u, i) => Math.abs(u - V[i])));                              // ‖U − V‖∞
+const aVI = (V0, n) => { const o = [V0]; for (let k = 0; k < n; k++) o.push(aPhi(o[k])); return o; };  // V0, Φ(V0), …
+// Figura 17.4: devuelve el número de vueltas del ciclo (línea 3) y el valor devuelto, Φ(V).
+const aStop = (V0, eps, gam = aGAM) => { let V = V0, n = 0; while (aDist(V, aPhi(V)) >= (1 - gam) * eps / gam) { V = aPhi(V); n++; } return { n, V: aPhi(V) }; };
+// Figura 17.6: lista de { pi, V } con cada política evaluada, hasta que la mejora voraz no la cambia.
+const aPIter = pi0 => { const o = []; let pi = pi0, prev = null; while (!prev || pi.some((a, s) => a !== prev[s])) { const V = aV(pi); o.push({ pi, V }); prev = pi; pi = aGreedy(V, pi); } return o; };
+// Programa lineal (17.12): una restricción c · V ≥ b por cada par (s, a). Con dos variables se resuelve enumerando vértices.
+const aCON = aST.flatMap((_, s) => aAS(s).map(a => ({ s, a, c: aST.map((_, t) => (s === t ? 1 : 0) - aGAM * aOut(s, a).filter(e => e.to === t).reduce((v, e) => v + e.p, 0)), b: aEr(s, a) })));
+const aFeas = z => aCON.every(q => q.c[0] * z[0] + q.c[1] * z[1] >= q.b - 1e-9);
+const aLP = al => {
+  let best = null;
+  for (let i = 0; i < aCON.length; i++) for (let j = i + 1; j < aCON.length; j++) {
+    const A = aCON[i], B = aCON[j]; if (Math.abs(A.c[0] * B.c[1] - A.c[1] * B.c[0]) < 1e-12) continue;
+    const z = aSolve([A.c, B.c], [A.b, B.b]); if (!aFeas(z)) continue;
+    const obj = al[0] * z[0] + al[1] * z[1]; if (!best || obj < best.obj) best = { z, obj, i, j };
+  }
+  return best;
+};
+// --- Datos: π₀ lleva en «otro» (la del cap. 33); la óptima recoge en «otro».
+const aPI = [0, 1], aPI2 = [0, 2], aV1 = aV(aPI), aV2 = aV(aPI2);                                      // V_π y V* del cap. 33
+const aNV = 40, aIT = aVI([0, 0], aNV), aERR = aIT.map(V => aDist(aV2, V));                              // iteración de valores desde cero
+const aS2 = [-10, -10], aERR2 = aVI(aS2, aNV).map(V => aDist(aV2, V));                                  // y desde otro inicio
+const aNT = 8, aTWO = [aVI([0, 0], aNT), aVI([1, 7.5], aNT)], aGAP = aTWO[0].map((V, n) => aDist(V, aTWO[1][n]));        // dos sucesiones y su distancia, ronda a ronda
+const aRATE = Math.max(...aERR.slice(1).map((e, n) => e / aERR[n]));                                    // mayor cociente entre rondas: ≤ γ
+const aEPS = [.1, .01, .001], aSTP = aEPS.map(e => aStop([0, 0], e));
+const aPIT = aPIter(aPI);                                                                              // iteración de políticas desde π₀
+const aNC = 12, aUN = aVI(aV1, aNC), aVN = aUN.map((_, n) => aPIT[Math.min(n, aPIT.length - 1)].V);       // teorema 17.13: U_n y V_n con U_0 = V_0
+const aMONO = aUN.every((U, n) => U.every((u, s) => u <= aVN[n][s] + 1e-12 && aVN[n][s] <= aV2[s] + 1e-12));
+const aAL = [.5, .5], aLP1 = aLP(aAL), aLPx = [aLP([.15, .85]), aLP([.85, .15])];                          // pesos α del programa lineal
+const aSAME = [aVI([0, 0], 400)[400], aPIT[aPIT.length - 1].V, aLP1.z, ...aLPx.map(v => v.z)].every(V => aDist(V, aV2) < 1e-9);   // los tres algoritmos dan el V* del cap. 33
+// Ejemplo del libro (figura 17.5), solo para la práctica: una ronda de la iteración de valores con γ = 1/2.
+const aBK = (V, g = .5) => [Math.max(2 + g * (.75 * V[0] + .25 * V[1]), 2 + g * V[1]), Math.max(3 + g * V[0], 2 + g * V[1])];
+const aBK0 = [-1, 1], aBK1 = aBK(aBK0);
+const aF = (v, n = 2) => (Math.abs(v) < 5e-7 ? 0 : v).toFixed(n).replace('-', '−'), aN = v => String(v).replace('-', '−');
+/* aMATH:end */
+
+// MDP como grafo (generaliza el aGraph de los caps. 13, 31 y 32): estados en cualquier lugar; una flecha por transición, rotulada «acción / [probabilidad, recompensa]»
+// como en la figura 17.3. M = { ini, lab, act, ed: [{ s, a, to, p, r, loop: ángulo en grados | bend }] }. Estado inicial = círculo grueso.
+// tl = [instante de las flechas y la acción, de la probabilidad, de la recompensa] (null: todo visible). vals: deja lugar para un número dentro del estado.
+// gr.pol(pi, t) tiñe de ámbar las flechas de la política y apaga las otras · gr.hot engrosa una flecha un momento · gr.setV escribe el valor de un estado ·
+// gr.tok / gr.go: ficha del agente que recorre una flecha · gr.ed[k].box = caja del rótulo.
+const aGraph = (p, M, pos, { t0 = .4, tS = null, tl = null, rad = 62, size = 24, vals = false } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g), gs = G(g, { o: tS == null ? 1 : 0 }), gr = { g, pos, M, rad, ed: [], ring: [], val: [], sg: [] };
+  const f = Q => Q.map(v => v.toFixed(1)).join(' '), ext = rad * 1.8, ap = ((2 * rad + 13) * Math.cos(.42) + 6 * (rad + ext) * Math.cos(.6)) / 8;
+  const off = (U, V, r) => { const l = Math.hypot(V[0] - U[0], V[1] - U[1]); return [U[0] + (V[0] - U[0]) * r / l, U[1] + (V[1] - U[1]) * r / l]; };
+  const head = (Q, C) => { const ha = Math.atan2(Q[1] - C[1], Q[0] - C[0]), u = [Math.cos(ha), Math.sin(ha)]; return `M${f([Q[0] + 12 * u[0], Q[1] + 12 * u[1]])}L${f([Q[0] - 4 * u[0] - 8 * u[1], Q[1] - 4 * u[1] + 8 * u[0]])}L${f([Q[0] - 4 * u[0] + 8 * u[1], Q[1] - 4 * u[1] - 8 * u[0]])}Z`; };
+  M.ed.forEach((e, k) => {
+    const [x1, y1] = pos[e.s], [x2, y2] = pos[e.to], eg = G(ge), ea = G(eg, { o: tl ? 0 : 1 });
+    let d, Q2, C, lx, ly;
+    if (e.s === e.to) {
+      const th = (e.loop ?? -90) * Math.PI / 180, pt = (ang, r) => [x1 + r * Math.cos(ang), y1 + r * Math.sin(ang)];
+      C = pt(th + .6, rad + ext); Q2 = pt(th + .42, rad + 13); d = `M${f(pt(th - .42, rad))}C${f(pt(th - .6, rad + ext))} ${f(C)} ${f(Q2)}`;
+      [lx, ly] = pt(th, ap + 18); if (Math.sin(th) > 0) ly += size * .75;
+    } else {
+      const len = Math.hypot(x2 - x1, y2 - y1), nx = -(y2 - y1) / len, ny = (x2 - x1) / len, bd = (e.bend ?? 0) * len, sd = bd < 0 ? -1 : 1;
+      C = [(x1 + x2) / 2 + nx * bd, (y1 + y2) / 2 + ny * bd]; Q2 = off([x2, y2], C, rad + 13); const Q0 = off([x1, y1], C, rad);
+      const mid = [(Q0[0] + 2 * C[0] + Q2[0]) / 4, (Q0[1] + 2 * C[1] + Q2[1]) / 4];
+      d = `M${f(Q0)}Q${f(C)} ${f(Q2)}`; lx = mid[0] + nx * sd * 22; ly = mid[1] + ny * sd * 22 + (ny * sd > 0 ? size * .75 : 0);
+    }
+    const pe = mk('path', { d, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round' }, ea), hd = mk('path', { d: head(Q2, C), fill: COL.dim }, ea);
+    const lg = G(eg), ls = aRow(lg, [[M.act[e.a], COL.chalk, UI], [' / [', COL.dim], [aN(e.p), HUE.pr], [', ', COL.dim], [aN(e.r), e.r < 0 ? HUE.neg : HUE.rew], [']', COL.dim]], 0, 0, null, { size, weight: 600 });
+    put(lg, { x: lx - ls.end / 2, y: ly });
+    if (tl) { ls.forEach((el, i) => { put(el, { o: 0 }); show(el, tl[[0, 1, 1, 2, 2, 1][i]] + k * .15, .4); }); show(ea, tl[0] + k * .15, .4); }
+    gr.ed.push({ g: eg, pe, hd, act: ls[0], ls, box: [lx - ls.end / 2 - 10, ly - size - 6, ls.end + 20, size + 18] });
+  });
+  M.lab.forEach((lab, id) => {
+    const [x, y] = pos[id], sg = G(gs);
+    gr.ring[id] = mk('circle', { cx: x, cy: y, r: rad, fill: COL.board, stroke: COL.chalk, 'stroke-width': id === M.ini ? 7 : 3 }, sg);
+    T(sg, lab, { x, y: y + (vals ? -8 : 9), size: 26, anchor: 'middle', weight: 600 });
+    gr.val[id] = aTx(sg, '', x, y + 30, null, { size: 28, fill: HUE.val, anchor: 'middle', weight: 700 });
+    gr.sg[id] = sg;
+  });
+  if (t0 != null) show(g, t0);
+  if (tS != null) show(gs, tS);
+  gr.pol = (pi, t) => M.ed.forEach((e, k) => {
+    const on = pi[e.s] === e.a, E = gr.ed[k], c = on ? HUE.act : COL.dim;
+    if (t == null) { E.pe.setAttribute('stroke', c); E.hd.setAttribute('fill', c); E.act.setAttribute('fill', on ? HUE.act : COL.chalk); put(E.g, { o: on ? 1 : .3 }); return; }
+    tw(E.pe, { c_stroke: c }, t, .35); tw(E.hd, { c_fill: c }, t, .35); tw(E.act, { c_fill: on ? HUE.act : COL.chalk }, t, .35); tw(E.g, { o: on ? 1 : .3 }, t, .35);
+  });
+  gr.hot = (k, ta, tb) => { const e = gr.ed[k].pe; tw(e, { 'a_stroke-width': 8 }, ta, .15); tw(e, { 'a_stroke-width': 3 }, tb, .3); };
+  gr.setV = (id, str, t, c = HUE.val) => { const e = gr.val[id]; if (t == null) { e._set(str); e.setAttribute('fill', c); return; } aAt(() => e._set(str), t); tw(e, { c_fill: COL.chalk }, t, .1); tw(e, { c_fill: c }, t + .5, .5); };
+  const rest = s => [pos[s][0], pos[s][1] + rad * .55];
+  gr.tok = s => put(mk('circle', { r: 13, fill: HUE.act, stroke: COL.board, 'stroke-width': 3 }, g), { x: rest(s)[0], y: rest(s)[1], o: 0 });
+  gr.go = (tok, k, t, dt) => {
+    const e = gr.ed[k].pe, to = M.ed[k].to, L = e.getTotalLength(), P0 = e.getPointAtLength(0);
+    gr.hot(k, t, t + dt * .85); tw(tok, { x: P0.x, y: P0.y }, t, dt * .15);
+    prog(v => { const Q = e.getPointAtLength(v * L); put(tok, { x: Q.x, y: Q.y }); }, t + dt * .15, dt * .55);
+    tw(tok, { x: rest(to)[0], y: rest(to)[1] }, t + dt * .7, dt * .15);
+  };
+  return gr;
+};
+const aPOS = [[240, 430], [700, 430]];
+let aClipN = 0;
+// Gráfica con ejes transformados (la del cap. 28): marco con esquina superior izquierda en (x0, y0); a0..a1 y b0..b1 son los extremos ya transformados por fx y fy.
+// gp.gl: capa recortada al marco · xt, yt: marcas [valor, rótulo].
+const aGPl = (p, x0, y0, W, HH, a0, a1, b0, b1, t0, { fx = v => v, fy = v => v, xt = [], yt = [], xl = '', yl = '' } = {}) => {
+  const g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), WX = v => x0 + (fx(v) - a0) / (a1 - a0) * W, VY = v => y0 + HH - (fy(v) - b0) / (b1 - b0) * HH;
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: W, height: HH, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  xt.forEach(([v, s]) => { mk('path', { d: `M${WX(v).toFixed(1)} ${y0 + HH}v8`, stroke: COL.dim, 'stroke-width': 2 }, g); aTx(g, s, WX(v), y0 + HH + 36, null, { size: 22, fill: COL.dim, anchor: 'middle' }); });
+  yt.forEach(([v, s]) => { mk('path', { d: `M${x0} ${VY(v).toFixed(1)}h-8`, stroke: COL.dim, 'stroke-width': 2 }, g); aTx(g, s, x0 - 14, VY(v) + 8, null, { size: 22, fill: COL.dim, anchor: 'end' }); });
+  if (xl) aTx(g, xl, x0 + W, y0 + HH + 70, null, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+  if (yl) aTx(g, yl, x0, y0 - 16, null, { size: 22, fill: COL.dim, font: UI });
+  mk('rect', { x: x0, y: y0, width: W, height: HH }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  return { g, gl, WX, VY, x0, y0, W, HH };
+};
+// Poligonal con un punto por valor sobre una gráfica aGPl; pts = [[n, v], …]. Devuelve k => la deja trazada hasta el índice k (−1: nada).
+const aLine = (gp, pts, col, { w = 4, r = 5 } = {}) => {
+  const e = mk('path', { d: '', fill: 'none', stroke: col, 'stroke-width': w, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, gp.gl), gd = G(gp.gl);
+  const ds = pts.map(([n, v]) => { const c = mk('circle', { cx: gp.WX(n), cy: gp.VY(v), r, fill: col }, gd); c.style.display = 'none'; return c; });
+  return k => { e.setAttribute('d', pts.slice(0, k + 1).map(([n, v], j) => `${j ? 'L' : 'M'}${gp.WX(n).toFixed(1)} ${gp.VY(v).toFixed(1)}`).join('')); ds.forEach((c, j) => { c.style.display = j <= k ? '' : 'none'; }); };
+};
+// Línea horizontal de trazos a la altura v de una gráfica aGPl.
+const aHLine = (gp, v, col, t0) => { const e = put(mk('path', { d: `M${gp.x0} ${gp.VY(v).toFixed(1)}h${gp.W}`, stroke: col, 'stroke-width': 2, 'stroke-dasharray': '5 9' }, gp.gl), { o: 0 }); show(e, t0); return e; };
+// Plano (V(inicio), V(otro)) de 0 a hi: cuadrado de lado sz con esquina superior izquierda en (x0, y0). vp.gl queda recortada al marco.
+// vp.half(c, b, t): tiñe el semiplano descartado por la restricción c · V ≥ b y traza su recta · vp.lineD(c, b): la recta c · V = b · vp.poly(pts): polígono.
+const aVPl = (p, x0, y0, sz, hi, t0) => {
+  const k = sz / hi, WX = v => x0 + v * k, WY = v => y0 + sz - v * k, g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), f = Q => WX(Q[0]).toFixed(1) + ' ' + WY(Q[1]).toFixed(1);
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: sz, height: sz, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  for (let v = 0; v <= hi; v += 2) {
+    mk('path', { d: `M${WX(v)} ${y0 + sz}v8M${x0} ${WY(v)}h-8`, stroke: COL.dim, 'stroke-width': 2 }, g);
+    T(g, String(v), { x: WX(v), y: y0 + sz + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); if (v) T(g, String(v), { x: x0 - 16, y: WY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH });
+  }
+  aTx(g, `V(${aST[0]})`, x0 + sz, y0 + sz + 70, null, { size: 24, fill: HUE.val, anchor: 'end', weight: 600 });
+  aTx(g, `V(${aST[1]})`, x0, y0 - 16, null, { size: 24, fill: HUE.val, weight: 600 });
+  mk('rect', { x: x0, y: y0, width: sz, height: sz }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  const ends = (c, b) => { const far = 4 * hi, l = Math.hypot(c[0], c[1]), u = [c[0] / l, c[1] / l], P = [u[0] * b / l, u[1] * b / l], d = [-u[1], u[0]]; return { A: [P[0] - far * d[0], P[1] - far * d[1]], B: [P[0] + far * d[0], P[1] + far * d[1]], u, far }; };
+  const lineD = (c, b) => { const { A, B } = ends(c, b); return `M${f(A)}L${f(B)}`; };
+  const half = (c, b, t) => {
+    const { A, B, u, far } = ends(c, b), sh = Q => [Q[0] - far * u[0], Q[1] - far * u[1]], hg = G(gl, { o: 0 });
+    mk('path', { d: 'M' + [A, B, sh(B), sh(A)].map(f).join('L') + 'Z', fill: COL.dim, 'fill-opacity': .3 }, hg);
+    mk('path', { d: lineD(c, b), stroke: COL.chalk, 'stroke-width': 3, fill: 'none' }, hg);
+    show(hg, t, .6); return hg;
+  };
+  const poly = (pts, attrs) => mk('path', { d: 'M' + pts.map(f).join('L') + 'Z', ...attrs }, gl);
+  return { g, gl, WX, WY, half, lineD, poly, hi };
+};
+// Recorta un polígono convexo con el semiplano c · V ≥ b (para dibujar la región factible dentro del marco).
+const aClipP = (pts, c, b) => { const o = [], v = Q => c[0] * Q[0] + c[1] * Q[1] - b; pts.forEach((P, i) => { const Q = pts[(i + 1) % pts.length], a = v(P), d = v(Q); if (a >= 0) o.push(P); if ((a >= 0) !== (d >= 0)) { const t = a / (a - d); o.push([P[0] + t * (Q[0] - P[0]), P[1] + t * (Q[1] - P[1])]); } }); return o; };
+// Recuadro numerado de una comprobación (mosaicos de pickEls), con líneas de texto centradas.
+const aCard = (p, x, y, w, hh, num, lines) => {
+  const g = G(p, { x, y }); mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g);
+  mk('circle', { cx: w - 40, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(num), { x: w - 40, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' });
+  lines.forEach((s, i) => T(g, s, { x: w / 2, y: hh / 2 + 20 + (i - (lines.length - 1) / 2) * 44, size: 28, anchor: 'middle', weight: 600 }));
+  return g;
+};
+// Restricción del programa lineal para el par (s, a), con los números del ejemplo: piezas de aRow.
+const aCrow = q => { const es = aOut(q.s, q.a); return [[`${aAC[q.a]}:   `, HUE.act, UI], [`V(${aST[q.s]})`, HUE.val], ['  ≥  ', COL.chalk], [aN(q.b), HUE.rew], ['  +  ', COL.chalk], [aN(aGAM), HUE.pr], [es.length > 1 ? ' · ( ' : ' · ', COL.chalk],
+  ...es.flatMap((e, i) => [...(i ? [['  +  ', COL.chalk]] : []), ...(e.p === 1 ? [] : [[aN(e.p) + ' ', HUE.pr]]), [`V(${aST[e.to]})`, HUE.val]]), ...(es.length > 1 ? [[' )', COL.chalk]] : [])]; };
+const aVec = V => `( ${V.map(v => aF(v)).join(',  ')} )`;
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 880;
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 34', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Planificación: iterar valores y políticas', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Con el modelo del entorno conocido, tres formas de calcular la política óptima.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['plan', 'Planificación', (m) => {
+    const p = panel(0), tk = m('know'), tp = m('plan');
+    aNote(p, 'MDP de la figura 17.3 del libro · recompensas (0, 1, 3) y γ = 0.8 ilustrativos, como en el capítulo 33 · violeta: valor · rosa: probabilidad y descuento');
+    aTitle(p, 'Planificación: el modelo del entorno es conocido');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true });
+    aST.forEach((_, s) => gr.setV(s, '?', null));
+    aED.forEach((_, k) => gr.hot(k, tk + 3 + k * .3, tk + 4.2 + k * .3));
+    text(p, 'se conocen, para todo s, s′ y a:', RX, 214, tk, { size: 24, fill: COL.dim });
+    aRow(p, [['P[s′ | s, a]', HUE.pr, MATH, 30], ['     probabilidades de transición', COL.chalk, UI]], RX, 268, tk + 3, { size: 26, weight: 600 });
+    aRow(p, [['E[r(s, a)]', HUE.rew, MATH, 30], ['     recompensas esperadas', COL.chalk, UI]], RX, 322, tk + 5, { size: 26, weight: 600 });
+    aRow(p, [['hallar ', COL.chalk, UI], ['V^{*}', HUE.val, MATH, 30], [' y la política óptima:   ', COL.chalk, UI], ['planificación', HUE.act, UI]], RX, 410, tp, { size: 26, weight: 600 });
+    ['iteración de valores', 'iteración de políticas', 'programación lineal'].forEach((s, i) => {
+      const g = G(p, { o: 0 }); mk('circle', { cx: RX + 20, cy: 490 + i * 58, r: 20, fill: COL.task }, g); T(g, String(i + 1), { x: RX + 20, y: 499 + i * 58, size: 24, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, s, { x: RX + 60, y: 499 + i * 58, size: 26, weight: 600 }); show(g, m('a' + (i + 1)));
+    });
+    aRow(p, [['V^{*}(s)', HUE.val], ['  =  max_{a} { ', COL.chalk], ['E[r(s, a)]', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' ∑_{s′} ', COL.chalk], ['P[s′ | s, a]', HUE.pr], [' V^{*}(s′)', HUE.val], [' }', COL.chalk], ['      (17.4)', COL.dim, UI, 22]], 100, 790, .5, { size: 30, weight: 600 });
+    aRow(p, [['no lineal', COL.bad, UI], [':  por el máximo', COL.chalk, UI]], 1180, 790, 2.5, { size: 24, weight: 600 });
+  }],
+
+  ['vi', 'Iteración de valores', (m) => {
+    const p = panel(0), tph = m('phi'), ts = m('start'), t1 = m('r1'), t2 = m('r2'), tm = m('more'), tl = m('lim'), tpo = m('pol'), NS = 30;
+    aNote(p, 'iterados calculados en la página con (17.8), desde V_{0} = (0, 0) · recompensas y γ ilustrativos · ecuaciones (17.8) y (17.9) del libro');
+    aTitle(p, 'Iteración de valores: aplicar Φ una y otra vez');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true });
+    aRow(p, [['(17.8)', COL.dim, UI, 22], ['    [Φ(V)](s)', HUE.val], ['  =  max_{a} { ', COL.chalk], ['E[r(s, a)]', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' ∑_{s′} ', COL.chalk], ['P[s′ | s, a]', HUE.pr], [' V(s′)', HUE.val], [' }', COL.chalk]], 100, 750, tph, { size: 30, weight: 600 });
+    aRow(p, [['(17.9)', COL.dim, UI, 22], ['    Φ(V)', HUE.val], ['  =  max_{π} { ', COL.chalk], ['R_{π}', HUE.rew], ['  +  ', COL.chalk], ['γ P_{π}', HUE.pr], [' V', HUE.val], [' }', COL.chalk], ['        en forma matricial', COL.dim, UI, 22]], 100, 810, tph + 13, { size: 30, weight: 600 });
+    const cnt = aTx(p, '', RX, 214, ts, { size: 30, fill: HUE.val, weight: 700 }), mx = aTx(p, '', RX, 258, t1 + .8, { size: 24, fill: COL.dim, font: UI });
+    aTx(p, 'V_{n+1} = Φ(V_{n})', 1500, 214, t1, { size: 28, fill: HUE.val, anchor: 'end', weight: 600 });
+    const gp = aGPl(p, 960, 290, 540, 300, -1, NS + 1, -.3, 5.7, ts - .3, { xt: [0, 10, 20, 30].map(v => [v, String(v)]), yt: [0, 1, 2, 3, 4, 5].map(v => [v, String(v)]), xl: 'ronda n' });
+    const lv = aST.map((_, s) => aLine(gp, aIT.slice(0, NS + 1).map((V, n) => [n, V[s]]), HUE.val, { r: 4 }));
+    const setN = n => {
+      lv.forEach(fn => fn(n)); cnt._set(`V_{${n}}  =  ${aVec(aIT[n])}`); aST.forEach((_, s) => gr.val[s]._set(aF(aIT[n][s])));
+      if (n) mx._set(`en «otro»:   max { llevar ${aF(aQ(aIT[n - 1], 1, 1))},  recoger ${aF(aQ(aIT[n - 1], 1, 2))} }`);
+    };
+    aST.forEach((_, s) => { tw(gr.ring[s], { c_stroke: HUE.val }, tph + 3.4, .2); tw(gr.ring[s], { c_stroke: COL.chalk }, tph + 4.6, .5); });
+    [2, 3].forEach(k => gr.hot(k, tph + 5.2, tph + 6.6)); gr.hot(4, tph + 6.8, tph + 8.2);
+    const ring = t => aST.forEach((_, s) => { tw(gr.ring[s], { c_stroke: HUE.val }, t, .2); tw(gr.ring[s], { c_stroke: COL.chalk }, t + .9, .5); });
+    aAt(() => setN(0), ts); ring(ts);
+    aAt(() => setN(1), t1 + .8); ring(t1 + .8); aAt(() => setN(2), t2 + .8); ring(t2 + .8);
+    prog(v => setN(2 + Math.round(v * (NS - 2))), tm + .6, tl + 2.4 - tm, lin);
+    aST.forEach((st, s) => { aHLine(gp, aV2[s], HUE.val, tl); aTx(p, `V^{*}(${st}) = ${aF(aV2[s])}`, 1490, gp.VY(aV2[s]) - 10, tl + s * 1.6, { size: 22, fill: HUE.val, anchor: 'end', weight: 600 }); });
+    const g2 = aGreedy(aIT[NS]);
+    hide(mx, tpo - .2, .3); gr.pol(g2, tpo + .4);
+    aRow(p, [['máximo en:   ', COL.dim, UI], ['π', HUE.act, MATH, 28], [`(${aST[0]}) = ${aAC[g2[0]]},   `, HUE.act, UI], ['π', HUE.act, MATH, 28], [`(${aST[1]}) = ${aAC[g2[1]]}`, HUE.act, UI]], RX, 258, tpo + .4, { size: 24, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), gr = aGraph(p, aMDP, aPOS, { t0: null, vals: true });
+    T(p, 'Una ronda más de la iteración de valores', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aST.forEach((_, s) => gr.setV(s, aF(aIT[2][s]), null));
+    T(p, 'valores actuales, dentro de cada estado:', { x: RX, y: 300, size: 24, fill: COL.dim });
+    aTx(p, `V_{2}  =  ${aVec(aIT[2])}`, RX, 352, null, { size: 30, fill: HUE.val, weight: 700 });
+    aTx(p, `γ = ${aN(aGAM)}`, RX, 410, null, { size: 30, fill: HUE.pr, weight: 600 });
+    T(p, 'en «otro» hay dos acciones: llevar y recoger', { x: RX, y: 480, size: 24, fill: COL.dim });
+    S.q1 = aED.map((e, k) => ({ el: gr.ed[k].g, box: gr.ed[k].box, label: `${aAC[e.a]}, de ${aST[e.s]} a ${aST[e.to]}` }));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-ronda', prompt: [`Descuento ${aN(aGAM)}. ¿Qué flecha da el máximo en «otro» con estos valores?`],
+    build: pickEls(S.q1, 4,
+      `Recoger da 1 + 0.8 · ${aF(aIT[2][1])} = ${aF(aQ(aIT[2], 1, 2))}. Llevar da 1 + 0.8 · ${aF((aIT[2][0] + aIT[2][1]) / 2)} = ${aF(aQ(aIT[2], 1, 1))}.`,
+      k => aED[k].s === 0 ? 'Esa flecha sale de «inicio»: no entra en la cuenta del estado «otro».' : `Llevar da 1 + 0.8 · (0.5 · ${aF(aIT[2][0])} + 0.5 · ${aF(aIT[2][1])}) = ${aF(aQ(aIT[2], 1, 1))}. La otra acción da más.`),
+  }], done) }],
+
+  ['conv', 'Convergencia', (m) => {
+    const p = panel(0), tli = m('lip'), tfx = m('fix'), tth = m('thm'), tpl = m('plot'), tra = m('rate'), tot = m('other'), tsp = m('stop'), tit = [m('it'), m('it2')], tlg = m('log');
+    aNote(p, `distancias calculadas en la página · desde V_{0} = (0, 0), mayor cociente entre rondas: ${aF(aRATE)} · seudocódigo de la figura 17.4 del libro`);
+    aTitle(p, '¿Por qué converge?   Φ es una contracción');
+    const A = [
+      ...aRow(p, [['‖Φ(V) − Φ(U)‖_{∞}', HUE.val], ['  ≤  ', COL.chalk], ['γ', HUE.pr], [' ‖V − U‖_{∞}', HUE.val]], 100, 224, tli, { size: 32, weight: 600 }),
+      aTx(p, '‖ · ‖_{∞}:   la mayor diferencia entre coordenadas', 100, 270, tli + 5, { size: 22, fill: COL.dim, font: UI }),
+      ...aRow(p, [['V^{*} = Φ(V^{*})', HUE.val], ['        punto fijo', COL.chalk, UI, 24]], 100, 360, tfx, { size: 32, weight: 600 }),
+      ...aRow(p, [['Teorema 17.11', HUE.act, UI, 24], [':   para todo ', COL.chalk, UI, 24], ['V_{0}', HUE.val], [',  la sucesión', COL.chalk, UI, 24]], 100, 460, tth, { size: 30, weight: 600 }),
+      ...aRow(p, [['V_{n+1} = Φ(V_{n})', HUE.val], ['   converge a   ', COL.chalk, UI, 24], ['V^{*}', HUE.val]], 100, 508, tth + 3.5, { size: 30, weight: 600 }),
+    ];
+    aHideAll(A, tsp - .5);
+    // Dos vectores cualesquiera, V y U, en el plano de los valores: se aplica Φ a los dos y su distancia se encoge.
+    const cg = G(p, { o: 1 }), vq = aVPl(cg, 940, 224, 380, 8, .4), cols = [HUE.val, COL.chalk];
+    const tr = cols.map(c => mk('path', { d: '', stroke: c, 'stroke-width': 2, fill: 'none', 'stroke-opacity': .6 }, vq.gl)), dt = cols.map(c => mk('circle', { r: 10, fill: c, stroke: COL.board, 'stroke-width': 3 }, vq.gl));
+    const at = (j, x) => { const k = Math.min(aNT - 1, Math.floor(x)), u = x - k, a = aTWO[j][k], b = aTWO[j][k + 1]; return [a[0] + u * (b[0] - a[0]), a[1] + u * (b[1] - a[1])]; };
+    const setK = x => cols.forEach((_, j) => { const Q = at(j, x), pts = [...aTWO[j].slice(0, Math.min(aNT - 1, Math.floor(x)) + 1), Q]; tr[j].setAttribute('d', pts.map((q, i) => `${i ? 'L' : 'M'}${vq.WX(q[0]).toFixed(1)} ${vq.WY(q[1]).toFixed(1)}`).join('')); dt[j].setAttribute('cx', vq.WX(Q[0])); dt[j].setAttribute('cy', vq.WY(Q[1])); });
+    setK(0);
+    aTx(cg, 'V', vq.WX(aTWO[0][0][0]) + 18, vq.WY(aTWO[0][0][1]) - 16, .4, { size: 26, fill: HUE.val, weight: 700 }); aTx(cg, 'U', vq.WX(aTWO[1][0][0]) - 16, vq.WY(aTWO[1][0][1]) + 9, .4, { size: 26, weight: 700, anchor: 'end' });
+    aTx(cg, '‖V − U‖_{∞}', 1352, 250, tli + 1, { size: 26, fill: HUE.val, weight: 600 });
+    aGAP.forEach((gv, k) => {
+      const tk = tli + 3 + (k - 1) * 1.05;
+      if (k) prog(v => setK(k - 1 + v), tk, .7, io);
+      aTx(cg, aF(gv), 1420, 294 + k * 36, k ? tk + .5 : tli + 1, { size: 26, anchor: 'end', weight: 600 });
+      if (k) aTx(cg, `× ${aF(gv / aGAP[k - 1])}`, 1446, 294 + k * 36, tk + .5, { size: 22, fill: HUE.pr, weight: 600 });
+    });
+    const fp = G(cg, { o: 0 }); mk('circle', { cx: vq.WX(aV2[0]), cy: vq.WY(aV2[1]), r: 15, fill: 'none', stroke: HUE.val, 'stroke-width': 4 }, fp); aTx(fp, 'V^{*}', vq.WX(aV2[0]) + 24, vq.WY(aV2[1]) + 30, null, { size: 26, fill: HUE.val, weight: 700 }); show(fp, tfx);
+    hide(cg, tpl - .9, .4);
+    const L = (parts, i, dt = 0) => aRow(p, [[i ? i + '      ' : '', COL.dim, UI, 22], ...parts], 100, 224 + i * 50, tsp + dt, { size: 28, weight: 600 });
+    L([['IteraciónDeValores(', COL.chalk, UI, 24], ['V_{0}', HUE.val], [')', COL.chalk, UI, 24], ['          figura 17.4', COL.dim, UI, 22]], 0);
+    L([['V ← V_{0}', HUE.val], ['          V_{0}: un valor cualquiera', COL.dim, UI, 22]], 1, .3);
+    L([['mientras   ', COL.chalk, UI, 24], ['‖V − Φ(V)‖', HUE.val], ['  ≥  ', COL.chalk], ['(1 − γ) ε / γ', HUE.pr]], 2, .6);
+    L([['          V ← Φ(V)', HUE.val]], 3, .9);
+    L([['devolver   ', COL.chalk, UI, 24], ['Φ(V)', HUE.val]], 4, 1.2);
+    aRow(p, [['al detenerse:    ', COL.dim, UI, 24], ['‖V^{*} − V_{n+1}‖_{∞}', HUE.val], ['  ≤  ', COL.chalk], ['γ / (1 − γ)', HUE.pr], [' · ‖V_{n+1} − V_{n}‖_{∞}', HUE.val], ['  ≤  ε', COL.chalk]], 100, 750, tsp + 5, { size: 28, weight: 600 });
+    aRow(p, [['número de iteraciones:    ', COL.chalk, UI, 24], ['O(log 1/ε)', HUE.act], ['          la O oculta la dependencia de γ', COL.dim, UI, 22]], 100, 808, tlg, { size: 30, weight: 600 });
+    const gp = aGPl(p, 960, 224, 540, 376, -1, aNV + 1, -3.25, 1.35, tpl - .5, { fy: Math.log10, xt: [0, 10, 20, 30, 40].map(v => [v, String(v)]), yt: [[10, '10'], [1, '1'], [.1, '0.1'], [.01, '0.01'], [.001, '0.001']], xl: 'ronda n', yl: 'distancia al óptimo  ‖V^{*} − V_{n}‖_{∞},  escala logarítmica' });
+    const lb = aLine(gp, aERR2.map((e, n) => [n, e]), COL.dim, { w: 3, r: 3 }), la = aLine(gp, aERR.map((e, n) => [n, e]), HUE.val);
+    prog(v => la(Math.round(v * aNV)), tpl + .3, 3, lin);
+    aTx(p, `× ${aN(aGAM)} por ronda`, gp.WX(9), gp.VY(aERR[9]) - 64, tra, { size: 24, fill: HUE.pr, weight: 600 });
+    prog(v => lb(Math.round(v * aNV)), tot + .2, 2, lin);
+    aTx(p, `desde V_{0} = ${aVec(aS2).replace(/\.00/g, '')}`, gp.WX(17), gp.VY(aERR2[17]) - 44, tot + 1, { size: 22, fill: COL.dim, font: UI });
+    [0, 1].forEach(i => {
+      const st = aSTP[i], t = tit[i];
+      aHLine(gp, aEPS[i], COL.chalk, t);
+      const c = put(mk('circle', { cx: gp.WX(st.n + 1), cy: gp.VY(aDist(st.V, aV2)), r: 9, fill: COL.board, stroke: HUE.act, 'stroke-width': 4 }, gp.gl), { o: 0 }); show(c, t + .8);
+      aRow(p, [[`ε = ${aN(aEPS[i])}`, COL.chalk], [`:   ${st.n} vueltas`, HUE.act, UI]], 976, gp.VY(aEPS[i]) + 32, t + .8, { size: 24, weight: 600 });
+    });
+  }],
+
+  ['pi', 'Iteración de políticas', (m) => {
+    const p = panel(0), ts = m('start'), te = m('ev'), tv1 = m('v1'), ti = m('im'), tsw = m('sw'), te2 = m('ev2'), tv2 = m('v2'), ti2 = m('im2'), tth = m('thm'), tfn = m('fin'), BW = 620, Y1 = 196, Y2 = 316;
+    aNote(p, `algoritmo de la figura 17.6 del libro · sistemas lineales resueltos en la página · políticas evaluadas: ${aPIT.length} · recompensas y γ ilustrativos`);
+    aTitle(p, 'Iteración de políticas: evaluar y mejorar');
+    const gr = aGraph(p, aMDP, aPOS, { t0: .3, vals: true });
+    aST.forEach((_, s) => gr.setV(s, '?', null));
+    gr.pol(aPIT[0].pi, ts + .4);
+    const bx = (y, head, parts) => {
+      const g = G(p, { o: 0 }), r = mk('rect', { x: RX, y, width: BW, height: 96, fill: 'none', stroke: COL.faint, 'stroke-width': 3 }, g);
+      T(g, head, { x: RX + 22, y: y + 36, size: 24, weight: 600 }); aRow(g, parts, RX + 22, y + 78, null, { size: 26, weight: 600 }); show(g, .5);
+      return (ta, tb) => { tw(r, { c_stroke: HUE.act, 'a_stroke-width': 6 }, ta, .25); tw(r, { c_stroke: COL.faint, 'a_stroke-width': 3 }, tb, .4); };
+    };
+    const on1 = bx(Y1, 'evaluar la política', [['resolver   ', COL.dim, UI, 24], ['(I − ', COL.chalk], ['γP_{π}', HUE.pr], [') ', COL.chalk], ['V', HUE.val], [' = ', COL.chalk], ['R_{π}', HUE.rew]]);
+    const on2 = bx(Y2, 'mejora voraz', [['π', HUE.act], [' ← argmax_{π} { ', COL.chalk], ['R_{π}', HUE.rew], [' + ', COL.chalk], ['γP_{π}', HUE.pr], [' V', HUE.val], [' }', COL.chalk]]);
+    const ar = G(p, { o: 0 }); show(ar, .7);
+    mk('path', { d: `M${RX + BW / 2} ${Y1 + 96}V${Y2 - 14}M${RX + BW} ${Y2 + 48}h44V${Y1 + 48}h-30`, stroke: COL.dim, 'stroke-width': 3, fill: 'none' }, ar);
+    mk('path', { d: `M${RX + BW / 2 - 8} ${Y2 - 16}h16l-8 14ZM${RX + BW + 16} ${Y1 + 40}v16l-14 -8Z`, fill: COL.dim }, ar);
+    text(p, 'hasta que la mejora no cambie la política', RX, 456, .9, { size: 24, fill: COL.dim });
+    const row = (k, y, tn, tv) => {
+      aRow(p, [[`π_{${k}}`, HUE.act, MATH, 28], [` = (${aPIT[k].pi.map(a => aAC[a]).join(', ')})`, HUE.act, UI]], RX, y, tn, { size: 24, weight: 600 });
+      aRow(p, [[`V_{${k}}`, HUE.val], [`  =  ${aVec(aPIT[k].V)}`, HUE.val]], RX + 340, y, tv, { size: 28, weight: 700 });
+      aST.forEach((_, s) => gr.setV(s, aF(aPIT[k].V[s]), tv + s * 1.5));
+    };
+    on1(te, ti - .3); row(0, 520, ts + .4, tv1);
+    on2(ti, te2 - .3); gr.hot(4, tsw, tsw + 2); tw(gr.ed[4].g, { o: 1 }, tsw, .2); gr.pol(aPIT[1].pi, tsw + 1.2);
+    on1(te2, ti2 - .3); row(1, 570, tsw + 1.2, tv2);
+    on2(ti2, ti2 + 4.5);
+    aRow(p, [['mejora de ', COL.chalk, UI], ['π_{1}', HUE.act, MATH, 28], [':   la misma política', COL.chalk, UI], ['     →     fin', COL.good, UI]], RX, 624, ti2 + 2, { size: 24, weight: 600 });
+    aST.forEach((_, s) => { tw(gr.ring[s], { c_stroke: COL.good }, ti2 + 2.2, .3); tw(gr.ring[s], { c_stroke: COL.chalk }, ti2 + 4.2, .6); });
+    aRow(p, [['Teorema 17.12', HUE.act, UI, 24], [':     ', COL.chalk, UI, 24], ['V_{n}  ≤  V_{n+1}  ≤  V^{*}', HUE.val], ['      (17.10)', COL.dim, UI, 22], ['        valores de las políticas sucesivas', COL.dim, UI, 22]], 100, 750, tth, { size: 30, weight: 600 });
+    aRow(p, [['a lo sumo ', COL.chalk, UI, 24], ['|A|^{|S|}', COL.chalk], [' políticas distintas:   una cota del número de iteraciones', COL.chalk, UI, 24]], 100, 808, tfn, { size: 30, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [100, 580, 1060], WW = 440, HH = 300, Y0q = 250;
+    T(p, 'La iteración de políticas: ¿cuándo se detiene?', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'elegir uno de los tres criterios', { x: 100, y: 200, size: 24, fill: COL.dim });
+    S.q2 = [['cuando una ronda cambia', 'los valores en menos', 'de un umbral'], ['cuando la mejora voraz', 'devuelve la misma política'], ['cuando ya evaluó', 'todas las políticas', 'posibles']]
+      .map((ls, j) => ({ el: aCard(p, BX[j], Y0q, WW, HH, j + 1, ls), box: [BX[j], Y0q, WW, HH], label: 'criterio ' + (j + 1) }));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-parada', prompt: ['¿Con qué criterio termina la iteración de políticas?'],
+    build: pickEls(S.q2, 1,
+      'El ciclo sigue mientras la política nueva y la anterior sean distintas.',
+      k => k === 0 ? 'Ese es el criterio de la iteración de valores, con el umbral que depende de épsilon.' : 'Esa cantidad solo acota el número de iteraciones. El ciclo compara dos políticas seguidas.'),
+  }], done) }],
+
+  ['cmp', 'Comparación', (m) => {
+    const p = panel(0), tsa = m('same'), tvi = m('vi'), tpi = m('pi'), tth = m('thm'), tfw = m('few'), tco = m('cost');
+    aNote(p, `U_{0} = V_{0} = ${aVec(aV1)}, los valores de π_{0} · desigualdades (17.11) comprobadas en la página para n ≤ ${aNC}: ${aMONO ? 'se cumplen' : 'no se cumplen'} · recompensas y γ ilustrativos`);
+    aTitle(p, 'Las dos iteraciones, desde el mismo inicio');
+    const leg = (x, col, parts, t) => { const g = G(p, { o: 0 }); mk('rect', { x, y: 168, width: 22, height: 22, fill: col }, g); aRow(g, parts, x + 36, 188, null, { size: 24, weight: 600 }); show(g, t); };
+    leg(170, HUE.val, [['iteración de valores:  ', COL.chalk, UI], ['U_{n}', HUE.val, MATH, 28]], tvi);
+    leg(910, HUE.act, [['iteración de políticas:  ', COL.chalk, UI], ['V_{n}', HUE.act, MATH, 28]], tpi);
+    const rg = [[2.55, 4.2, [3, 3.5, 4]], [3.3, 5.35, [3.5, 4, 4.5, 5]]];
+    aST.forEach((st, s) => {
+      const gp = aGPl(p, 170 + s * 740, 262, 540, 290, -.6, aNC + .6, rg[s][0], rg[s][1], .4, { xt: [0, 3, 6, 9, 12].map(v => [v, String(v)]), yt: rg[s][2].map(v => [v, String(v)]), xl: 'iteración n', yl: `valor del estado «${st}»` });
+      aHLine(gp, aV2[s], COL.chalk, .6); aTx(p, `V^{*}(${st}) = ${aF(aV2[s])}`, gp.x0 + gp.W - 12, gp.VY(aV2[s]) - 10, .6, { size: 22, fill: COL.chalk, anchor: 'end', weight: 600 });
+      const lu = aLine(gp, aUN.map((U, n) => [n, U[s]]), HUE.val), lw = aLine(gp, aVN.map((V, n) => [n, V[s]]), HUE.act);
+      aAt(() => lu(0), tsa + 1); prog(v => lu(Math.round(v * aNC)), tvi, 2.6, lin);
+      prog(v => lw(Math.round(v * aNC)), tpi, 1.6, lin);
+    });
+    aRow(p, [['Teorema 17.13', HUE.act, UI, 24], [':   si ', COL.chalk, UI, 24], ['U_{0} = V_{0}', COL.chalk], [',  para todo n:     ', COL.chalk, UI, 24], ['U_{n}', HUE.val], ['  ≤  ', COL.chalk], ['V_{n}', HUE.act], ['  ≤  ', COL.chalk], ['V^{*}', COL.chalk], ['      (17.11)', COL.dim, UI, 22]], 100, 706, tth, { size: 30, weight: 600 });
+    aRow(p, [['iteración de políticas', HUE.act, UI], [':   converge en menos iteraciones', COL.chalk, UI]], 100, 762, tfw, { size: 24, weight: 600 });
+    aRow(p, [['pero', COL.chalk, UI], [' cada iteración resuelve un sistema lineal:  cuesta más que una ronda de la iteración de valores', COL.chalk, UI]], 100, 812, tco, { size: 24, weight: 600 });
+  }],
+
+  ['lp', 'Programación lineal', (m) => {
+    const p = panel(0), te = m('eq'), t1 = m('c1'), th = [m('b1'), m('c2', .2), m('c3', .5)], trg = m('reg'), tob = m('obj'), tvx = m('vx'), tal = m('al'), tso = m('sol'), LX = 740, HI = 8;
+    aNote(p, `vértice hallado en la página enumerando vértices · coincide con el V* de las dos iteraciones: ${aSAME ? 'sí' : 'no'} · programa (17.12) del libro · recompensas y γ ilustrativos`);
+    aTitle(p, 'Programación lineal: el valor óptimo en un vértice');
+    const vp = aVPl(p, 150, 204, 456, HI, .4);
+    aRow(p, [['(17.12)', COL.dim, UI, 22], ['     min_{V}   ∑_{s} α(s) ', COL.chalk], ['V(s)', HUE.val]], LX, 214, te, { size: 30, weight: 600 });
+    aRow(p, [['sujeto a    ', COL.chalk, UI, 24], ['V(s)', HUE.val], ['  ≥  ', COL.chalk], ['E[r(s, a)]', HUE.rew], ['  +  ', COL.chalk], ['γ', HUE.pr], [' ∑_{s′} ', COL.chalk], ['P[s′ | s, a]', HUE.pr], [' V(s′)', HUE.val], ['      ∀s, ∀a', COL.chalk]], LX, 266, te + 4, { size: 26, weight: 600 });
+    const lab = [[2.7, 4.2, 'end'], [6.5, 5.3, 'start'], [5.9, 4.2, 'start']], rows = [];
+    aCON.forEach((q, i) => {
+      rows.push(...aRow(p, aCrow(q), LX, 360 + i * 50, t1 + .3 + i * .5, { size: 24, weight: 600 }));
+      vp.half(q.c, q.b, th[i]);
+      aTx(p, aAC[q.a], vp.WX(lab[i][0]), vp.WY(lab[i][1]), th[i] + .3, { size: 22, fill: HUE.act, font: UI, weight: 600, anchor: lab[i][2] });
+    });
+    const reg = aCON.reduce((pts, q) => aClipP(pts, q.c, q.b), [[0, 0], [HI, 0], [HI, HI], [0, HI]]);
+    const rp = put(vp.poly(reg, { fill: HUE.val, 'fill-opacity': .35, stroke: HUE.val, 'stroke-width': 3 }), { o: 0 }); show(rp, trg);
+    const ob = put(mk('path', { d: '', stroke: COL.chalk, 'stroke-width': 4, 'stroke-dasharray': '12 9', fill: 'none' }, vp.gl), { o: 0 }); show(ob, tob, .3); aHideAll(rows, tob - .4);
+    const at = aTx(p, '', LX, 372, tob, { size: 26, weight: 600 }), dot = (al, z) => al[0] * z[0] + al[1] * z[1];
+    const setO = (al, c) => { ob.setAttribute('d', vp.lineD(al, c)); at._set(`pesos   α = ( ${aF(al[0])},  ${aF(al[1])} )        ∑_{s} α(s) V(s) = ${aF(c)}`); };
+    const c0 = dot(aAL, [7, 7.6]);
+    prog(v => setO(aAL, c0 + (aLP1.obj - c0) * v), tob + .2, tvx - tob - .5, io);
+    const vx = G(p, { o: 0 }); mk('circle', { cx: vp.WX(aLP1.z[0]), cy: vp.WY(aLP1.z[1]), r: 11, fill: HUE.val, stroke: COL.chalk, 'stroke-width': 3 }, vx); show(vx, tvx, .3);
+    aRow(p, [['vértice:    ', COL.chalk, UI, 24], [`V^{*}  =  ${aVec(aLP1.z)}`, HUE.val]], LX, 460, tvx, { size: 30, weight: 700 });
+    if (aSAME) text(p, 'el mismo de las dos iteraciones', LX, 508, tvx + 3, { size: 24, fill: COL.good, weight: 600 });
+    prog(v => { const a = .5 - .35 * Math.sin(2 * Math.PI * v), al = [a, 1 - a]; setO(al, dot(al, aLP1.z)); }, tal + .3, Math.max(3, tso - tal + 1.5), lin);
+    aRow(p, [['un programa lineal', HUE.act, UI], [':   se resuelve con métodos generales  (símplex, punto interior)', COL.chalk, UI]], 100, 790, tso, { size: 26, weight: 600 });
+    text(p, 'el libro da también el programa dual equivalente, (17.13)', 100, 836, tso + 4, { size: 22, fill: COL.dim });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Planificación:  con el modelo conocido, hallar V^{*} y la política óptima.', 'w1'], ['Iteración de valores:  V_{n+1} = Φ(V_{n});  Φ es una contracción de factor γ.', 'w2'],
+      ['Iteración de políticas:  evaluar y mejorar;  menos iteraciones, más costosas.', 'w3'], ['Programación lineal:  V^{*} minimiza ∑ α(s) V(s) con una restricción por estado y acción.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 26, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['La iteración de valores solo converge si parte de valores cercanos a los óptimos.'], ans: ['f'], why: 'El teorema 17.11 vale para cualquier valor inicial.' },
+      { parts: ['Al aplicar el operador de la iteración de valores a dos vectores, su distancia se multiplica, a lo sumo, por el descuento.'], ans: ['v'], why: 'Es una contracción para la norma infinito: la mayor diferencia entre coordenadas.' },
+      { parts: ['En la iteración de políticas, el valor de un estado puede bajar al pasar de una política a la siguiente.'], ans: ['f'], why: 'Teorema 17.12: los valores no bajan y nunca superan el óptimo.' },
+      { parts: ['Cada iteración de la iteración de políticas resuelve un sistema de ecuaciones lineales.'], ans: ['v'], why: 'Es la evaluación de la política; por eso cada iteración cuesta más.' },
+      { parts: ['El programa lineal tiene una restricción por cada par de estado y acción.'], ans: ['v'], why: 'El valor de cada estado debe ser al menos lo que promete cada una de sus acciones.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-ronda', prompt: [`Ejemplo del libro (figura 17.5), con descuento 0.5. En el estado 2, una acción da 3 más el descuento por V(1); la otra, 2 más el descuento por V(2). Con V(1) = ${aN(aBK0[0])} y V(2) = ${aN(aBK0[1])}, ¿qué valor recibe el estado 2 tras una ronda?`],
+    build: choice([['2'], [aN(aBK1[1])], ['3'], ['3.5']], 1,
+      'Las dos acciones dan lo mismo: 3 + 0.5 · (−1) = 2.5 y 2 + 0.5 · 1 = 2.5. El máximo es 2.5.',
+      ['Falta el término con descuento de la segunda acción: 2 + 0.5 · 1.', null, 'Falta el término con descuento de la primera acción: 3 + 0.5 · (−1).', 'En la primera acción va V(1) = −1, no V(2): da 3 + 0.5 · (−1).']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

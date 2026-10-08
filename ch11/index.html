@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kernels definidos positivos</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 11, title: 'Kernels definidos positivos', minutes: 7, language: 'es', next: '../ch12/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 10) ---------- */
+// salmón = +1 · azul = −1 · gris = sin etiqueta · ámbar = frontera, punto x y lo elegido · rosa (local) = punto x′ y valores negativos
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, alt: COL.rat, un: COL.dim };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'K(x_{i}, x_{j})^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe.
+const aSYM = /([αρξΦΛδσℍ⟨⟩⊤‖√∑])/;                                               // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea, cada una con su color; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNum = v => (v < 0 ? '−' : '') + Math.abs(v);
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aCell = v => Math.abs(v - Math.round(v)) < 1e-9 ? aNum(Math.round(v)) : aF2(v);  // entero si lo es; si no, dos decimales
+const aInt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+$)/g, ' ');           // entero con separador de miles
+const aR2 = v => { const k = v / Math.SQRT2; return Math.abs(Math.abs(k) - 1) < 1e-9 ? (k < 0 ? '−' : '') + '√2' : aF2(v); };   // ±√2 escrito como tal
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aHue = v => v > 0 ? HUE.pos : v < 0 ? HUE.neg : HUE.un;                      // etiqueta +1 = salmón, −1 = azul, sin etiqueta = gris
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aArrow = (p, x1, y1, x2, y2, col = COL.dim, w = 4) => {
+  const a = Math.atan2(y2 - y1, x2 - x1), hd = d => `M${x2} ${y2}L${x2 - 16 * Math.cos(a + d)} ${y2 - 16 * Math.sin(a + d)}`;
+  return path(p, `M${x1} ${y1}L${x2} ${y2}${hd(.45)}${hd(-.45)}`, { stroke: col, 'stroke-width': w }, { d: 0 });
+};
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aDp = (a, b) => a[0] * b[0] + a[1] * b[1];
+const aDeg = d => d * Math.PI / 180, aN2 = th => [Math.cos(th), Math.sin(th)];
+const aErrs = (pts, th, c) => { const n = aN2(th); return pts.filter(p => p[2] * (aDp(n, p) - c) <= 0).length; };   // errores de la recta n · x = c
+// La mejor recta de dirección θ: [corrimiento, errores]. Se prueban los puntos medios entre proyecciones vecinas y los dos extremos.
+const aBestC = (pts, th) => { const n = aN2(th), pr = pts.map(p => aDp(n, p)).sort((a, b) => a - b); let best = null; [pr[0] - 1, ...pr.slice(1).map((v, k) => (v + pr[k]) / 2), pr[pr.length - 1] + 1].forEach(c => { const e = aErrs(pts, th, c); if (!best || e < best[1]) best = [c, e]; }); return best; };
+const aMinErr = pts => { let mn = Infinity; for (let d = 0; d < 360; d += .25) mn = Math.min(mn, aBestC(pts, aDeg(d))[1]); return mn; };   // barrido de 1 440 direcciones
+// Muestra «círculo»: 6 puntos de clase −1 cerca del centro y 10 de clase +1 alrededor. Ilustrativa (la idea de las figuras 6.1 y 6.2).
+const aC = [[.3, .2, -1], [-.6, .5, -1], [.7, -.6, -1], [-.4, -.8, -1], [.9, .5, -1], [-1, -.1, -1],
+  [2.2, .4, 1], [1.6, 1.8, 1], [.3, 2.5, 1], [-1.2, 2.1, 1], [-2.3, .9, 1], [-2.4, -.7, 1], [-1.5, -1.9, 1], [.2, -2.4, 1], [1.5, -1.7, 1], [2.5, -1, 1]];
+const aLift = x => [x[0], x[1], aDp(x, x)];                                        // Φ(x) = (x1, x2, x1² + x2²)
+const aKLift = (x, y) => aDp(x, y) + aDp(x, x) * aDp(y, y);                        // su kernel: ⟨Φ(x), Φ(x′)⟩ sin construir Φ
+const aZin = Math.max(...aC.filter(p => p[2] < 0).map(p => aDp(p, p))), aZout = Math.min(...aC.filter(p => p[2] > 0).map(p => aDp(p, p))), aZ0 = (aZin + aZout) / 2;   // altura del plano que separa
+const aZerr = aC.filter(p => p[2] * (aDp(p, p) - aZ0) <= 0).length;               // errores de ese plano
+const aCTour = [[aDeg(0), 0], [aDeg(60), 1.3], [aDeg(130), -1.2], [aDeg(200), .4]];   // rectas del beat «mapa»
+const aPa = 6, aPb = 9;                                                            // el par x, x′ del beat «kernel»
+const aFa = aLift(aC[aPa]), aFb = aLift(aC[aPb]), aProd = aFa.map((v, k) => v * aFb[k]), aLong = aProd.reduce((s, v) => s + v, 0), aShort = aKLift(aC[aPa], aC[aPb]);
+// Kernel polinomial (6.3) y su mapa de grado 2 (6.4).
+const aPoly = (x, y, c = 1, d = 2) => Math.pow(aDp(x, y) + c, d);
+const aPhi2 = (x, c = 1) => [x[0] * x[0], x[1] * x[1], Math.SQRT2 * x[0] * x[1], Math.sqrt(2 * c) * x[0], Math.sqrt(2 * c) * x[1], c];
+// XOR (figura 6.3): azul (−1) si exactamente una coordenada es 1.
+const aX = [[1, 1, 1], [-1, -1, 1], [1, -1, -1], [-1, 1, -1]];
+const aXF = aX.map(x => aPhi2(x)), aXI = aXF.map(f => [f[2], f[3]]);               // imágenes en dimensión 6 · sus coordenadas 3 y 4
+const aXTour = [0, 45, 100, 225].map(d => [aDeg(d), d ? aBestC(aX, aDeg(d))[0] : 0]);
+const aQ1x = 2, aQ1 = [3, 0, 2, 1], aQ1r = aQ1.indexOf(aQ1x);                      // comprobación 1: el punto (1, −1); P, Q, R, S son las imágenes de aX[aQ1[k]]
+// Kernel gaussiano (6.5).
+const aGauss = (x, y, s = 1) => Math.exp(-(Math.pow(x[0] - y[0], 2) + Math.pow(x[1] - y[1], 2)) / (2 * s * s));
+const aGc = 7, aGt = 8;                                                            // beat «ejemplos»: el punto x y el punto x′ que se sigue
+const aDist = aC.map(p => Math.hypot(p[0] - aC[aGc][0], p[1] - aC[aGc][1]));
+// Matrices de Gram, valores propios (Jacobi), forma cuadrática c⊤Kc y normalización (6.11).
+const aGramOf = (pts, K) => pts.map(p => pts.map(q => K(p, q)));
+const aEig = A => {
+  const n = A.length, a = A.map(r => r.slice()), V = a.map((r, i) => r.map((_, j) => +(i === j)));
+  for (let sw = 0; sw < 100; sw++) {
+    let off = 0; for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+    if (off < 1e-22) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      if (Math.abs(a[p][q]) < 1e-300) continue;
+      const th = (a[q][q] - a[p][p]) / (2 * a[p][q]), t = (th < 0 ? -1 : 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < n; k++) { const x = a[k][p], y = a[k][q]; a[k][p] = c * x - s * y; a[k][q] = s * x + c * y; }
+      for (let k = 0; k < n; k++) { const x = a[p][k], y = a[q][k]; a[p][k] = c * x - s * y; a[q][k] = s * x + c * y; }
+      for (let k = 0; k < n; k++) { const x = V[k][p], y = V[k][q]; V[k][p] = c * x - s * y; V[k][q] = s * x + c * y; }
+    }
+  }
+  const ord = a.map((r, i) => i).sort((i, j) => a[j][j] - a[i][i]);
+  return { val: ord.map(i => a[i][i]), vec: ord.map(i => V.map(v => v[i])) };       // de mayor a menor
+};
+const aQuad = (A, c) => A.reduce((s, row, i) => s + row.reduce((u, v, j) => u + c[i] * c[j] * v, 0), 0);
+const aNormK = A => A.map((row, i) => row.map((v, j) => A[i][i] && A[j][j] ? v / Math.sqrt(A[i][i] * A[j][j]) : 0));
+const aUnit = c => { const n = Math.hypot(...c); return c.map(v => v / n); };
+// Muestra de 5 puntos sin etiqueta (ilustrativa) y su matriz de Gram con el kernel polinomial de grado 2, c = 1.
+const aS = [[2, 1], [1, 2], [-1, 1], [-2, -1], [0, -2]], aSm = aS.length;
+const aG = aGramOf(aS, aPoly), aGe = aEig(aG), aGn = aNormK(aG), aGne = aEig(aGn);
+const aCv = [[1, 1, 1, 1, 1], [1, -1, 0, 0, 0], [0, 1, -1, 1, -1], aGe.vec[aSm - 1]].map(aUnit);   // vectores c de norma 1; el último, el peor caso
+const aCsP = [[0, 1], [1, 4], [2, 3]];                                             // pares del beat «props» (Cauchy-Schwarz)
+// Cadena del teorema 6.10: x · x′ → x · x′/σ² → exp(x · x′/σ²) → normalizado = gaussiano (6.12). Sobre la misma muestra.
+const aSg = 1.5;
+const aChK = [aDp, (x, y) => aDp(x, y) / (aSg * aSg), (x, y) => Math.exp(aDp(x, y) / (aSg * aSg)), (x, y) => aGauss(x, y, aSg)];
+const aCh = aChK.map(K => { const g = aGramOf(aS, K); return { g, min: Math.min(...aEig(g).val) }; });
+// Comprobación 2: tres tablas de 2 × 2 para el par (x_2, x_5). La del medio es la matriz de Gram verdadera.
+const aM0 = [[aG[1][1], aG[1][4]], [aG[4][1], aG[4][4]]], aOff = Math.ceil(Math.sqrt(aM0[0][0] * aM0[1][1])) + 4;
+const aM1 = [[aM0[0][0], aOff], [aOff, aM0[1][1]]], aM2 = [[aM0[0][0], aM0[0][1]], [aG[2][3], aM0[1][1]]];
+const aQ2 = [aM1, aM0, aM2], aQ2r = 1, aM0e = aEig(aM0).val, aM1q = aQuad(aM1, [1, -1]);
+// Esquema del RKHS en una dimensión, con el kernel gaussiano de σ = 1.
+const aK1 = (u, v, s = 1) => Math.exp(-(u - v) * (u - v) / (2 * s * s));
+const aU = 3.5, aV = 5, aHx = [2, 5, 7.5], aHa = [.9, .5, .7];
+const aHf = u => aHx.reduce((s, x, i) => s + aHa[i] * aK1(x, u), 0);                // h = Σ a_i K(x_i, ·)
+const aHn = aHx.reduce((s, x, i) => s + aHx.reduce((u, y, j) => u + aHa[i] * aHa[j] * aK1(x, y), 0), 0);   // ⟨h, h⟩
+/* aMATH:end */
+
+const aL = 3.2;                                                                    // medio lado del piso de la muestra «círculo»
+// Recorte de la recta n · x = c al cuadrado [−L, L]²: devuelve sus dos extremos, o null si no lo cruza.
+const aClipLn = (th, c, L) => {
+  const n = aN2(th); let k0 = -Infinity, k1 = Infinity;
+  [[c * n[0], -n[1]], [c * n[1], n[0]]].forEach(([o, d]) => { if (Math.abs(d) < 1e-9) { if (Math.abs(o) > L) k1 = -Infinity; return; } const a = (-L - o) / d, b = (L - o) / d; k0 = Math.max(k0, Math.min(a, b)); k1 = Math.min(k1, Math.max(a, b)); });
+  return k0 < k1 ? [k0, k1].map(k => [c * n[0] - k * n[1], c * n[1] + k * n[0]]) : null;
+};
+// Vista del plano con una tercera coordenada (proyección paralela): psi gira el piso, phi lo inclina (0 = visto desde arriba), lift ∈ [0, 1] sube los puntos.
+const aView = (cx, cy, sc, zs = .42) => {
+  const v = { psi: 0, phi: 0, lift: 0, sc };
+  v.pt = (x, y, z = 0) => { const c = Math.cos(v.psi), s = Math.sin(v.psi); return [cx + sc * (x * c - y * s), cy - sc * ((x * s + y * c) * Math.cos(v.phi) + z * zs * Math.sin(v.phi))]; };
+  v.s = (x, y, z) => v.pt(x, y, z).map(n => n.toFixed(1)).join(' ');
+  return v;
+};
+const aTilt = v => { v.psi = aDeg(28); v.phi = aDeg(62); };
+// La muestra «círculo» en esa vista: piso, curvas de nivel de la altura x1² + x2² (c3.gh), recta en el piso (c3.lg), círculo en el piso (c3.cg),
+// plano de altura aZ0 (c3.pg) y un tallo por punto. c3.redraw() vuelve a proyectar todo; los puntos de clase −1 se dibujan bajo el plano y los de +1 sobre él.
+const aCloud3 = (p, v, pts, { t0 = .4 } = {}) => {
+  const c3 = { v }, base = G(p, { o: 0 }), floor = mk('polygon', { fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, base), sq = [[-aL, -aL], [aL, -aL], [aL, aL], [-aL, aL]];
+  c3.gh = G(p, { o: 0 }); const lev = [1, 1.8, 2.6].map(r => [r, mk('path', { fill: 'none', stroke: COL.faint, 'stroke-width': 1.5 }, c3.gh)]);
+  c3.lg = G(p, { o: 0 }); c3.ln = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, c3.lg);
+  c3.cg = G(p, { o: 0 }); const circ = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, c3.cg);
+  const lo = G(p, { o: 0 }); c3.pg = G(p, { o: 0 }); const pln = mk('polygon', { fill: HUE.hyp, 'fill-opacity': .22, stroke: HUE.hyp, 'stroke-width': 2.5 }, c3.pg), hi = G(p, { o: 0 });
+  const els = pts.map(q => { const g = q[2] < 0 ? lo : hi; return [mk('path', { stroke: aHue(q[2]), 'stroke-width': 2, 'stroke-opacity': .55, fill: 'none' }, g), mk('circle', { r: 9, fill: aHue(q[2]) }, g)]; });
+  const ring = (r, z) => { let d = ''; for (let k = 0; k <= 48; k++) { const a = k / 48 * 2 * Math.PI; d += (k ? 'L' : 'M') + v.s(r * Math.cos(a), r * Math.sin(a), z); } return d; };
+  c3.at = i => v.pt(pts[i][0], pts[i][1], aDp(pts[i], pts[i]) * v.lift);
+  c3.redraw = () => {
+    floor.setAttribute('points', sq.map(c => v.s(c[0], c[1], 0)).join(' '));
+    lev.forEach(([r, e]) => e.setAttribute('d', ring(r, r * r * v.lift)));
+    pln.setAttribute('points', sq.map(c => v.s(c[0], c[1], aZ0)).join(' '));
+    circ.setAttribute('d', ring(Math.sqrt(aZ0), 0));
+    pts.forEach((q, i) => { const a = v.pt(q[0], q[1], 0), b = c3.at(i); els[i][0].setAttribute('d', `M${a[0].toFixed(1)} ${a[1].toFixed(1)}L${b[0].toFixed(1)} ${b[1].toFixed(1)}`); els[i][1].setAttribute('cx', b[0].toFixed(1)); els[i][1].setAttribute('cy', b[1].toFixed(1)); });
+  };
+  c3.line = (th, c) => { const s = aClipLn(th, c, aL); c3.ln.setAttribute('d', s ? `M${v.s(s[0][0], s[0][1], 0)}L${v.s(s[1][0], s[1][1], 0)}` : ''); };
+  c3.redraw(); [base, lo, hi].forEach(g => show(g, t0));
+  return c3;
+};
+// Plano visto desde arriba, centrado en el origen: marco, ejes con rótulo (opcional), una recta recortada al marco (f.lg, oculta) y puntos.
+const aFlat = (p, cx, cy, sc, L, { t0 = .4, ax = null } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), f = { X: x => cx + x * sc, Y: y => cy - y * sc, g, sc, L };
+  mk('rect', { x: cx - L * sc, y: cy - L * sc, width: 2 * L * sc, height: 2 * L * sc, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  if (ax) { mk('path', { d: `M${cx - L * sc} ${cy}H${cx + L * sc}M${cx} ${cy - L * sc}V${cy + L * sc}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g); aTx(g, ax[0], cx + L * sc - 10, cy + 32, null, { size: 24, fill: COL.dim, anchor: 'end' }); aTx(g, ax[1], cx + 12, cy - L * sc + 30, null, { size: 24, fill: COL.dim }); }
+  if (t0 != null) show(g, t0);
+  f.lg = G(p, { o: 0 }); f.ln = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, f.lg);
+  f.setLine = (th, c) => { const s = aClipLn(th, c, L); f.ln.setAttribute('d', s ? `M${f.X(s[0][0]).toFixed(1)} ${f.Y(s[0][1]).toFixed(1)}L${f.X(s[1][0]).toFixed(1)} ${f.Y(s[1][1]).toFixed(1)}` : ''); };
+  f.dot = (x, y, col, t, r = 11, par = p) => { const e = put(mk('circle', { r, fill: col }, par), { x: f.X(x), y: f.Y(y), o: t == null ? 1 : 0 }); if (t != null) show(e, t, .3); return e; };
+  return f;
+};
+// Tabla de celdas con su número: el brillo de cada celda sigue al valor absoluto (rosa si es negativo). gr.set(A) la rellena; gr.box(i, j, …) enmarca una celda.
+const aGrid = (p, x, y, cw, A, { t0 = .4, num = true, step = 0, top = .3, size = cw * .34 } = {}) => {
+  const g = G(p), n = A.length, gr = { g, x, y, cw, n };
+  gr.c = A.map((row, i) => row.map((v, j) => {
+    const c = G(g, { o: t0 == null ? 1 : 0 }), r = mk('rect', { x: x + j * cw + 1, y: y + i * cw + 1, width: cw - 2, height: cw - 2 }, c);
+    const t = num ? T(c, '', { x: x + j * cw + cw / 2, y: y + i * cw + cw / 2 + size * .35, size, anchor: 'middle', font: MATH, weight: 600 }) : null;
+    if (t0 != null) show(c, t0 + (i * n + j) * step, .3);
+    return [r, t];
+  }));
+  gr.set = (B, f = aCell) => { const m0 = Math.max(...B.flat().map(Math.abs)) || 1; B.forEach((row, i) => row.forEach((v, j) => { const [r, t] = gr.c[i][j]; r.setAttribute('fill', v < 0 ? HUE.alt : COL.chalk); r.setAttribute('fill-opacity', (.05 + (top - .05) * Math.abs(v) / m0).toFixed(3)); if (t) t.textContent = f(v, i, j); })); };
+  gr.box = (i, j, col, t0, t1) => { const e = put(mk('rect', { x: x + j * cw - 2, y: y + i * cw - 2, width: cw + 4, height: cw + 4, fill: 'none', stroke: col, 'stroke-width': 4 }, g), { o: 0 }); show(e, t0, .25); if (t1 != null) hide(e, t1, .25); return e; };
+  gr.heads = (t0, par = g) => { for (let i = 0; i < n; i++) { text(par, String(i + 1), x - 22, y + i * cw + cw / 2 + 9, t0, { size: 24, fill: COL.dim, anchor: 'middle', weight: 700 }); text(par, String(i + 1), x + i * cw + cw / 2, y - 14, t0, { size: 24, fill: COL.dim, anchor: 'middle', weight: 700 }); } };
+  gr.set(A);
+  return gr;
+};
+// Trazo de y = f(u) entre u0 y u1.
+const aCurve = (f, u0, u1, UX, UY, n = 120) => { let d = ''; for (let k = 0; k <= n; k++) { const u = u0 + (u1 - u0) * k / n; d += (k ? 'L' : 'M') + UX(u).toFixed(1) + ' ' + UY(f(u)).toFixed(1); } return d; };
+const NOTE = 'puntos ilustrativos · salmón = +1, azul = −1 · alturas y errores calculados en la página';
+const aQ1s = 74;                                                                  // escala del plano de imágenes de la comprobación 1
+const aXY = q => `(${aNum(q[0])}, ${aNum(q[1])})`;
+const aXIs = i => `(${aR2(aXI[i][0])}, ${aR2(aXI[i][1])})`;
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 11', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Kernels', { x: 800, y: 420, size: 64, weight: 600, anchor: 'middle' });
+    T(g, 'definidos positivos', { x: 800, y: 500, size: 48, weight: 600, anchor: 'middle', fill: COL.task });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Separar en otro espacio, sin pagar el costo de construirlo.', 800, 620, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['mapa', 'Cambiar de espacio', (m) => {
+    const p = panel(0), tl = m('line'), tm = m('map'), tf = m('lift'), tp = m('plane'), tb = m('back'), RX = 830;
+    aNote(p, NOTE);
+    aTitle(p, 'Una muestra que ninguna recta separa');
+    const v = aView(420, 500, 74), c3 = aCloud3(p, v, aC), g0 = G(p);
+    const er = text(g0, '', RX, 250, tl, { size: 30 });
+    text(g0, 'ninguna recta separa las dos clases', RX, 304, tl + 2.2, { size: 28, fill: HUE.hyp, weight: 600 });
+    // una recta que gira: siempre deja errores
+    const upd = (th, c) => { c3.line(th, c); er.textContent = `errores de la recta: ${aErrs(aC, th, c)} de ${aC.length}`; };
+    upd(...aCTour[0]); show(c3.lg, tl, .4);
+    const dt = (tm - tl - 1) / 3;
+    aCTour.slice(1).forEach((b, k) => { const a = aCTour[k]; prog(q => upd(a[0] + (b[0] - a[0]) * q, a[1] + (b[1] - a[1]) * q), tl + .8 + k * dt, dt * .8); });
+    hide(g0, tm - .3, .3); hide(c3.lg, tm - .3, .3);
+    // el mapa Φ: el piso se inclina y los puntos suben a su tercera coordenada
+    aTx(p, 'Φ : ℝ^{2} → ℝ^{3}', RX, 250, tm + 2.2, { size: 30, fill: COL.dim });
+    aTx(p, 'Φ(x)  =  ( x_{1},  x_{2},  x_{1}^{2} + x_{2}^{2} )', RX, 316, tm + 8, { size: 38, weight: 600 });
+    prog(q => { v.psi = aDeg(28) * q; v.phi = aDeg(62) * q; c3.redraw(); }, tm + .4, 2.4);
+    show(c3.gh, tm + 9, .8);
+    prog(q => { v.lift = q; c3.redraw(); }, tf + .2, 2.8);
+    aRow(p, [['altura:   '], [`azules ≤ ${aF2(aZin)}`, HUE.neg], ['   ·   '], [`salmón ≥ ${aF2(aZout)}`, HUE.pos]], RX, 410, [tf + .6, tf + .6, tf + 3, tf + 3], { size: 28, font: UI });
+    show(c3.pg, tp + .3, .7);
+    aTx(p, `un plano a altura ${aF2(aZ0)} separa las dos clases`, RX, 500, tp + .8, { size: 28, fill: HUE.hyp, weight: 600, font: UI });
+    aTx(p, `errores del plano: ${aZerr} de ${aC.length}`, RX, 546, tp + 2.6, { size: 28, font: UI });
+    show(c3.cg, tb + .6, .6);
+    aTx(p, 'en el plano original, esa frontera es un círculo:', RX, 640, tb + .8, { size: 26, font: UI });
+    aTx(p, 'separación lineal allá, no lineal aquí', RX, 684, tb + 3, { size: 26, font: UI });
+  }],
+
+  ['kernel', 'El kernel', (m) => {
+    const p = panel(0), tb = m('big'), tbo = m('bound'), tc = m('cost'), td = m('def'), tl = m('long'), ts = m('short'), tw0 = m('win'), RX = 830, n = 52;
+    aNote(p, NOTE);
+    aTitle(p, 'El precio de cambiar de espacio');
+    const v = aView(420, 500, 74); aTilt(v); v.lift = 1;
+    const c3 = aCloud3(p, v, aC); show(c3.gh, .4); tw(c3.pg, { o: .45 }, .4, .5);
+    // el espacio de características puede ser enorme: un vector Φ(x) que no deja de crecer
+    const g1 = G(p);
+    text(g1, 'el espacio de características puede ser enorme', RX, 250, tb, { size: 28 });
+    for (let k = 0; k < n; k++) show(put(mk('rect', { x: RX + k * 13, y: 286, width: 10, height: 34, fill: COL.dim }, g1), { o: 0 }), tb + 1 + k * .12, .15);
+    text(g1, '…', RX + n * 13 + 4, 312, tb + 1 + n * .12, { size: 30, fill: COL.dim });
+    const dl = aTx(g1, '', RX, 384, tb + 1, { size: 36, weight: 600 });
+    const setD = k => dl._set(k < 1 ? 'dim(ℍ) = 3' : `dim(ℍ) = 10^{${k}}`);
+    setD(0); prog(q => setD(Math.round(15 * q)), tb + 2, Math.max(2, tbo - tb - 3.5), lin);
+    text(g1, 'características: trigramas, vocabulario de 100 000 palabras', RX, 430, tb + 3.5, { size: 24, fill: COL.dim });
+    text(g1, 'cota por margen (cap. 10): no depende de la dimensión', RX, 520, tbo, { size: 26 });
+    aTx(g1, 'cada producto interno en ℍ cuesta del orden de dim(ℍ)', RX, 570, tc, { size: 26, weight: 600, font: UI });
+    hide(g1, td - .3, .3);
+    // el kernel: el mismo número por un camino corto
+    aTx(p, 'K(x, x′)  =  ⟨Φ(x), Φ(x′)⟩', RX, 260, td, { size: 40, fill: HUE.hyp, weight: 600 });
+    text(p, '(6.1)', RX + 470, 258, td, { size: 22, fill: COL.dim });
+    const o = v.pt(0, 0, 0), ga = G(p);
+    [[aPa, HUE.hyp, 'Φ(x)', aFa], [aPb, HUE.alt, 'Φ(x′)', aFb]].forEach(([i, col, name, f], k) => {
+      const b = c3.at(i), t = td + 3 + k * .5;
+      draw(aArrow(ga, o[0], o[1], b[0], b[1], col, 3.5), t, .6);
+      show(put(mk('circle', { r: 16, fill: 'none', stroke: col, 'stroke-width': 4 }, ga), { x: b[0], y: b[1], o: 0 }), t, .3);
+      aRow(p, [[name, col], [`  =  (${f.map(aF2).join(', ')})`]], 120, 730 + k * 46, t + .3, { size: 28, weight: 600 });
+    });
+    const f1 = aRow(p, [['con Φ:    ⟨Φ(x), Φ(x′)⟩  =  '], [`${aProd.map((u, k) => (k ? (u < 0 ? ' − ' : ' + ') + aF2(Math.abs(u)) : aF2(u))).join('')}  =  `], [aF2(aLong), HUE.hyp]], RX, 390, [tl, tl + 3, tl + 4.4], { size: 28, weight: 600 });
+    text(p, '3 productos y una suma, en el espacio de dimensión 3', RX, 432, tl + 3, { size: 22, fill: COL.dim });
+    aRow(p, [['sin Φ:    K(x, x′)  =  x · x′ + ‖x‖^{2} ‖x′‖^{2}  =  '], [aF2(aShort), HUE.hyp]], RX, 510, [ts, ts + 2.4], { size: 28, weight: 600 });
+    text(p, 'una cuenta en el plano original', RX, 552, ts + 2.4, { size: 22, fill: COL.dim });
+    aTx(p, 'eficiencia: K cuesta del orden de N, no de dim(ℍ)', RX, 640, tw0 + .8, { size: 26, font: UI });
+    aTx(p, 'flexibilidad: no hace falta construir Φ; basta con que exista', RX, 684, tw0 + 2.6, { size: 26, font: UI });
+  }],
+
+  ['xor', 'El problema XOR', (m) => {
+    const p = panel(0), tp = m('pts'), tl = m('line'), tk = m('poly'), tph = m('phi'), tg = m('go'), ts = m('sep'), MX = 580;
+    aNote(p, 'ejemplo del libro (figura 6.3), con c = 1 · a la derecha, dos de las seis coordenadas de Φ(x)');
+    aTitle(p, 'El problema XOR y el kernel polinomial de grado 2');
+    const A = aFlat(p, 330, 450, 100, 1.9, { ax: ['x_{1}', 'x_{2}'] }), B = aFlat(p, 1260, 450, 80, 2.4, { t0: tg - .8, ax: ['√2 x_{1}x_{2}', '√2 x_{1}'] });
+    const er = text(p, '', 330, 690, tl, { size: 26, anchor: 'middle' });
+    const upd = (th, c) => { A.setLine(th, c); er.textContent = `errores de la recta: ${aErrs(aX, th, c)} de ${aX.length}`; };
+    upd(...aXTour[0]); show(A.lg, tl, .3);
+    const dt = (tk - tl - .5) / 3;
+    aXTour.slice(1).forEach((b, k) => { const a = aXTour[k]; prog(q => upd(a[0] + (b[0] - a[0]) * q, a[1] + (b[1] - a[1]) * q), tl + .4 + k * dt, dt * .8); });
+    hide(A.lg, tk + .6, .4); hide(er, tk + .6, .4);
+    aX.forEach((q, i) => {
+      const t = tp + i * .35;
+      A.dot(q[0], q[1], aHue(q[2]), t, 13);
+      aHalo(text(p, aXY(q), A.X(q[0]), A.Y(q[1]) + (q[1] > 0 ? -24 : 44), t, { size: 24, anchor: 'middle', font: MATH }));
+      // la imagen viaja del plano de entrada al de las coordenadas 3 y 4
+      const e = put(mk('circle', { r: 13, fill: aHue(q[2]) }, p), { x: A.X(q[0]), y: A.Y(q[1]), o: 0 });
+      show(e, tg + .6, .2); tw(e, { x: B.X(aXI[i][0]), y: B.Y(aXI[i][1]) }, tg + .9 + i * .15, 1.6);
+      aHalo(text(p, aXIs(i), B.X(aXI[i][0]), B.Y(aXI[i][1]) + (aXI[i][1] > 0 ? -24 : 44), tg + 2.8, { size: 24, anchor: 'middle', font: MATH }));
+    });
+    aTx(p, 'K(x, x′)  =  (x · x′ + c)^{2}', MX, 300, tk + .6, { size: 34, weight: 600 });
+    text(p, '(6.3), con d = 2', MX, 340, tk + .6, { size: 22, fill: COL.dim });
+    const f = aRow(p, [['Φ(x) = ( x_{1}^{2},  x_{2}^{2},  '], ['√2 x_{1}x_{2},']], MX, 400, tph, { size: 28, weight: 600 });
+    const f2 = aRow(p, [['√(2c) x_{1},'], ['  √(2c) x_{2},  c )']], MX + 96, 446, tph, { size: 28, weight: 600 });
+    text(p, '(6.4)', MX, 446, tph, { size: 22, fill: COL.dim });
+    text(p, 'seis coordenadas', MX, 510, tph + 2.2, { size: 26 });
+    [f[1], f2[0]].forEach(e => tw(e, { c_fill: HUE.hyp }, tg + .3, .4));
+    text(p, 'se miran la tercera y la cuarta', MX, 556, tg + .5, { size: 26, fill: HUE.hyp, weight: 600 });
+    B.setLine(0, 0); show(B.lg, ts + 3.2, .5);
+    aTx(p, 'hiperplano:  x_{1}x_{2} = 0', 1260, 690, ts + 3.6, { size: 28, fill: HUE.hyp, weight: 600, anchor: 'middle' });
+    text(p, 'azules a un lado, salmón al otro', MX, 640, ts + .4, { size: 26 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), q0 = aX[aQ1x];
+    T(p, 'El mapa Φ del kernel polinomial de grado 2, con c = 1', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'A la derecha se ven las coordenadas 3 y 4 de Φ(x):   ( √2 x_{1}x_{2},  √2 x_{1} )', 100, 184, null, { size: 26, font: UI });
+    const A = aFlat(p, 400, 440, 92, 1.9, { t0: null, ax: ['x_{1}', 'x_{2}'] }), B = aFlat(p, 1150, 440, aQ1s, 2.4, { t0: null, ax: ['√2 x_{1}x_{2}', '√2 x_{1}'] });
+    aX.forEach(q => A.dot(q[0], q[1], aHue(q[2]), null, 12));
+    mk('circle', { cx: A.X(q0[0]), cy: A.Y(q0[1]), r: 22, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, p);
+    aHalo(T(p, `x = ${aXY(q0)}`, { x: A.X(q0[0]), y: A.Y(q0[1]) + 58, size: 26, anchor: 'middle', font: MATH, weight: 600 }));
+    aArrow(p, 620, 440, 920, 440, COL.dim); put(p.lastChild, { d: 1 }); T(p, 'Φ', { x: 770, y: 420, size: 34, anchor: 'middle', font: MATH, fill: COL.dim });
+    S.q1 = aQ1.map((i, k) => { const g = G(p), x = B.X(aXI[i][0]), y = B.Y(aXI[i][1]); mk('circle', { cx: x, cy: y, r: 13, fill: HUE.un }, g); T(g, 'PQRS'[k], { x: x + 24, y: y - 16, size: 30, weight: 700 }); return g; });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-fi', prompt: ['¿Cuál de los puntos de la derecha es la imagen del punto marcado?'],
+    build: pickEls(S.q1.map((el, k) => ({ el, box: [1150 + aXI[aQ1[k]][0] * aQ1s - 30, 440 - aXI[aQ1[k]][1] * aQ1s - 48, 96, 82], label: 'punto ' + 'PQRS'[k] })), aQ1r,
+      `Como x₁x₂ = ${aNum(aX[aQ1x][0] * aX[aQ1x][1])} y x₁ = ${aNum(aX[aQ1x][0])}, la imagen es ${aXIs(aQ1x)}.`,
+      k => `Ahí cae la imagen de ${aXY(aX[aQ1[k]])}: sus coordenadas son ${aXIs(aQ1[k])}.`),
+  }], done) }],
+
+  ['pds', 'Kernels PDS', (m) => {
+    const p = panel(0), tsm = m('sample'), tg = m('gram'), tpr = m('pair'), tsy = m('sym'), tpd = m('pds'), tq = m('quad'), te = m('eig'), GX = 720, GY = 250, CW = 72, BX = 1300, n = aSm;
+    aNote(p, 'muestra ilustrativa de 5 puntos · cada celda se calcula en la página');
+    aTitle(p, 'La matriz de Gram');
+    const A = aFlat(p, 350, 440, 80, 2.9, { ax: ['x_{1}', 'x_{2}'] }), gl = G(p);
+    aS.forEach((q, i) => { A.dot(q[0], q[1], HUE.un, tsm + i * .25, 12); aHalo(text(p, String(i + 1), A.X(q[0]) + 18, A.Y(q[1]) - 14, tsm + i * .25, { size: 26, weight: 700 })); });
+    aTx(p, 'K(x, x′)  =  (x · x′ + 1)^{2}', GX, 200, tg, { size: 30, weight: 600 });
+    const gr = aGrid(p, GX, GY, CW, aG, { t0: tg + .8, step: .08 }); gr.heads(tg + .4);
+    // cada celda sale de un par de puntos
+    const rd = aTx(p, '', GX, 668, tg + 3.4, { size: 28, fill: HUE.hyp, weight: 600 }), gv = G(p);
+    [[1, 3], [0, 2]].forEach(([i, j], k) => {
+      const t = tg + 3.4 + k * 2, vg = G(gl, { o: 0 });
+      [i, j].forEach(a => mk('path', { d: `M${A.X(0)} ${A.Y(0)}L${A.X(aS[a][0])} ${A.Y(aS[a][1])}`, stroke: HUE.hyp, 'stroke-width': 3.5, fill: 'none' }, vg));
+      show(vg, t, .3); hide(vg, t + 1.8, .3);
+      gr.box(i, j, HUE.hyp, t, t + 1.8);
+      prog(() => rd._set(`K(x_{${i + 1}}, x_{${j + 1}})  =  (${aNum(aDp(aS[i], aS[j]))} + 1)^{2}  =  ${aCell(aG[i][j])}`), t, 0);
+    });
+    text(gv, 'matriz de Gram de la muestra', GX + n * CW / 2, GY + n * CW + 100, tpr, { size: 26, anchor: 'middle' });
+    // simetría
+    [[0, 3], [3, 0]].forEach(([i, j]) => gr.box(i, j, HUE.alt, tsy + .4, tpd - .3));
+    prog(() => rd._set(`simétrica:  K(x_{1}, x_{4})  =  K(x_{4}, x_{1})  =  ${aCell(aG[0][3])}`), tsy + .4, 0);
+    hide(rd, tpd - .3, .3); hide(gv, tpd - .3, .3);
+    aTx(p, 'kernel PDS (def. 6.3): para toda muestra, esta matriz es simétrica y semidefinida positiva', 100, 746, tpd, { size: 26, weight: 600, font: UI });
+    // c⊤Kc con varios vectores c de norma 1: nunca es negativa
+    const f = aTx(p, 'c^{⊤}Kc  =  ∑_{i,j=1}^{m} c_{i} c_{j} K(x_{i}, x_{j})  ≥  0     para todo c', 100, 796, tq, { size: 28 });
+    text(p, '(6.2)', 100 + f.getComputedTextLength() + 30, 794, tq, { size: 22, fill: COL.dim });
+    const gc = G(p, { o: 0 }); show(gc, tq + .6);
+    T(gc, 'c', { x: BX, y: GY - 44, size: 30, weight: 700, anchor: 'middle', font: MATH }); T(gc, 'de norma 1', { x: BX, y: GY - 14, size: 22, fill: COL.dim, anchor: 'middle' });
+    mk('path', { d: `M${BX} ${GY}V${GY + n * CW}`, stroke: COL.faint, 'stroke-width': 2 }, gc);
+    const bars = aS.map((q, i) => mk('rect', { y: GY + i * CW + 16, height: CW - 32 }, gc)), qv = aTx(gc, '', BX - 150, 668, null, { size: 30, weight: 700, fill: HUE.hyp });
+    const setC = c => { c.forEach((u, i) => { const w = Math.abs(u) * 150, e = bars[i]; e.setAttribute('x', (u < 0 ? BX - w : BX).toFixed(1)); e.setAttribute('width', w.toFixed(1)); e.setAttribute('fill', u < 0 ? HUE.alt : HUE.hyp); }); qv._set(`c^{⊤}Kc  =  ${aF2(aQuad(aG, c))}`); };
+    setC(aCv[0]);
+    const dt = (te - tq - 1.2) / 3;
+    aCv.slice(1).forEach((b, k) => { const a = aCv[k]; prog(q => setC(aUnit(a.map((u, i) => u + (b[i] - u) * q))), tq + 1.6 + k * dt, dt * .7); });
+    aRow(p, [['valores propios de esta matriz:   '], [aGe.val.slice(0, -1).map(aF2).join(',   ') + ',   '], [aF2(aGe.val[n - 1]), HUE.hyp], ['      ninguno es negativo']], 100, 846, te, { size: 26, font: UI });
+  }],
+
+  ['ejemplos', 'Kernels estándar', (m) => {
+    const p = panel(0), tp = m('poly'), tg = m('gauss'), tsi = m('sim'), tw1 = m('wide'), tn = m('narrow'), tsg = m('sig'), x0 = aC[aGc], x1 = aC[aGt], DMAX = 5.2;
+    const DX = d => 780 + d * 135, KY = k => 620 - k * 290;
+    aNote(p, 'la muestra del comienzo · ámbar más intenso = más similitud con x · círculo punteado: radio σ');
+    aTitle(p, 'Tres kernels estándar');
+    const A = aFlat(p, 380, 440, 70, aL);
+    mk('rect', { x: A.X(-aL), y: A.Y(aL), width: 2 * aL * 70, height: 2 * aL * 70 }, mk('clipPath', { id: 'aClipEj' }, mk('defs', {}, p)));
+    const gg = G(p, { o: 0 }), sc = mk('circle', { cx: A.X(x0[0]), cy: A.Y(x0[1]), fill: HUE.hyp, 'fill-opacity': .08, stroke: HUE.hyp, 'stroke-width': 2.5, 'stroke-dasharray': '8 7', 'clip-path': 'url(#aClipEj)' }, gg);
+    aC.forEach(q => A.dot(q[0], q[1], COL.faint, .4, 11));
+    const glow = aC.map((q, i) => i === aGc ? null : mk('circle', { cx: A.X(q[0]), cy: A.Y(q[1]), r: 11, fill: HUE.hyp }, gg));
+    A.dot(x0[0], x0[1], HUE.hyp, .5, 12); show(put(mk('circle', { r: 20, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, p), { x: A.X(x0[0]), y: A.Y(x0[1]), o: 0 }), .5);
+    aHalo(text(p, 'x', A.X(x0[0]) + 26, A.Y(x0[1]) - 18, .5, { size: 30, weight: 700, font: MATH }));
+    mk('circle', { cx: A.X(x1[0]), cy: A.Y(x1[1]), r: 18, fill: 'none', stroke: HUE.alt, 'stroke-width': 3 }, gg); aHalo(T(gg, 'x′', { x: A.X(x1[0]) - 24, y: A.Y(x1[1]) - 16, size: 30, weight: 700, font: MATH, anchor: 'end', fill: HUE.alt }));
+    // la campana: K en función de la distancia entre los dos puntos
+    const ax = G(gg);
+    mk('path', { d: `M${DX(0)} ${KY(0)}H${DX(DMAX)}M${DX(0)} ${KY(0)}V${KY(1.1)}`, stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, ax);
+    for (let d = 1; d <= 5; d++) { mk('path', { d: `M${DX(d)} ${KY(0)}v8`, stroke: COL.dim, 'stroke-width': 2 }, ax); T(ax, String(d), { x: DX(d), y: KY(0) + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); }
+    mk('path', { d: `M${DX(0) - 6} ${KY(1)}h12`, stroke: COL.dim, 'stroke-width': 2 }, ax); T(ax, '1', { x: DX(0) - 14, y: KY(1) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH });
+    aTx(ax, 'distancia ‖x′ − x‖', DX(DMAX), KY(0) + 72, null, { size: 24, anchor: 'end' });
+    const cv = mk('path', { fill: 'none', stroke: HUE.hyp, 'stroke-width': 5, 'stroke-linejoin': 'round' }, gg), seg = mk('path', { stroke: HUE.alt, 'stroke-width': 3, 'stroke-dasharray': '7 6', fill: 'none' }, gg);
+    const cd = aC.map((q, i) => i === aGc ? null : mk('circle', { r: i === aGt ? 9 : 6, fill: i === aGt ? HUE.alt : HUE.hyp }, gg));
+    const sl = aTx(gg, '', DX(2.6), 262, null, { size: 38, fill: HUE.hyp, weight: 700 }), kl = aTx(gg, '', DX(2.6), 316, null, { size: 28, fill: HUE.alt, weight: 600 });
+    const upd = s => {
+      sc.setAttribute('r', (s * 70).toFixed(1)); cv.setAttribute('d', aCurve(d => Math.exp(-d * d / (2 * s * s)), 0, DMAX, DX, KY));
+      aC.forEach((q, i) => { if (i === aGc) return; const k = aGauss(x0, q, s); glow[i].setAttribute('fill-opacity', k.toFixed(3)); cd[i].setAttribute('cx', DX(aDist[i]).toFixed(1)); cd[i].setAttribute('cy', KY(k).toFixed(1)); });
+      const k1 = aGauss(x0, x1, s); seg.setAttribute('d', `M${DX(aDist[aGt]).toFixed(1)} ${KY(0)}V${KY(k1).toFixed(1)}`);
+      sl._set(`σ = ${aF2(s)}`); kl._set(`K(x, x′) = ${aF2(k1)}`);
+    };
+    upd(1); show(gg, tg, .6);
+    const go = (a, b, t0, dur) => prog(q => upd(a + (b - a) * q), t0, dur);
+    go(1, 2, tw1 + .6, 2.2); go(2, .5, tn + .3, 2); go(.5, 1, tsg + .2, 1.6);
+    // las tres fórmulas
+    [[100, 'polinomial', '(6.3)', 'K(x, x′) = (x · x′ + c)^{d}', 'características: monomios de grado ≤ d', tp],
+      [570, 'gaussiano', '(6.5)', 'K(x, x′) = exp( −‖x′ − x‖^{2} / 2σ^{2} )', 'medida de similitud entre x y x′', tg],
+      [1110, 'sigmoide', '(6.6)', 'K(x, x′) = tanh( a(x · x′) + b )', 'ligado a las redes neuronales simples', tsg]].forEach(([x, name, eq, form, sub, t], k) => {
+      text(p, name, x, 752, t, { size: 26, fill: HUE.hyp, weight: 600 }); text(p, eq, x + 150, 752, t, { size: 22, fill: COL.dim });
+      aTx(p, form, x, 798, t + .4, { size: 28, weight: 600 }); text(p, sub, x, 838, t + (k === 1 ? tsi - tg : 1.6), { size: 22, fill: COL.dim });
+    });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), CW = 120;
+    T(p, 'Tres tablas de 2 × 2 para un mismo par de puntos, x y x′', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'Fila 1 y columna 1: el punto x. Fila 2 y columna 2: el punto x′.', { x: 100, y: 184, size: 26 });
+    S.q2 = aQ2.map((A, k) => {
+      const x = 190 + k * 470, g = G(p);
+      T(g, 'tabla ' + (k + 1), { x: x + CW, y: 276, size: 28, weight: 700, fill: HUE.hyp, anchor: 'middle' });
+      aGrid(g, x, 330, CW, A, { t0: null, size: 40 });
+      ['x', 'x′'].forEach((s, i) => { T(g, s, { x: x + i * CW + CW / 2, y: 318, size: 26, fill: COL.dim, anchor: 'middle', font: MATH }); T(g, s, { x: x - 22, y: 330 + i * CW + CW / 2 + 9, size: 26, fill: COL.dim, anchor: 'middle', font: MATH }); });
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-gram', prompt: ['¿Cuál puede ser la matriz de Gram de un kernel PDS? Elegir la tabla.'],
+    build: pickEls(S.q2.map((el, k) => ({ el, box: [140 + k * 470, 240, 340, 350], label: 'tabla ' + (k + 1) })), aQ2r,
+      `Es simétrica y sus valores propios, ${aF2(aM0e[0])} y ${aF2(aM0e[1])}, no son negativos.`,
+      k => aQ2[k][0][1] !== aQ2[k][1][0] ? 'No es simétrica: las dos celdas fuera de la diagonal son distintas.'
+        : `Con c = (1, −1), la suma de (6.2) da ${aQ2[k][0][0]} + ${aQ2[k][1][1]} − 2 · ${aQ2[k][0][1]} = ${aNum(aM1q)}: es negativa.`),
+  }], done) }],
+
+  ['rkhs', 'Espacio de Hilbert con kernel reproductor', (m) => {
+    const p = panel(0), tt = m('thm'), tph = m('phi'), ti = m('inner'), th = m('h'), tr = m('rep'), tf = m('feat'), U0 = 0, U1 = 10, kuv = aK1(aU, aV);
+    const AX = u => 150 + u * 130, KY = k => 650 - k * 250;
+    aNote(p, 'esquema en una dimensión con el kernel gaussiano, σ = 1 · los valores se calculan en la página');
+    aTitle(p, 'Todo kernel PDS es un producto interno');
+    text(p, 'Teorema 6.8', 100, 204, tt, { size: 28, fill: HUE.hyp, weight: 600 });
+    aTx(p, 'si K es PDS, existen un espacio de Hilbert ℍ y un mapa Φ : X → ℍ tales que', 290, 204, tt + .8, { size: 24, fill: COL.dim, font: UI });
+    aTx(p, 'K(x, x′)  =  ⟨Φ(x), Φ(x′)⟩', 100, 268, tt + 4.5, { size: 38, weight: 600 }); text(p, '(6.8)', 560, 266, tt + 4.5, { size: 22, fill: COL.dim });
+    aTx(p, 'ℍ: espacio de Hilbert con kernel reproductor (RKHS)', 690, 266, tt + 7, { size: 24, fill: COL.dim, font: UI });
+    const ax = G(p, { o: 0 }); mk('path', { d: `M${AX(U0)} ${KY(0)}H${AX(U1)}`, stroke: COL.dim, 'stroke-width': 2 }, ax); T(ax, 'espacio de entrada X', { x: AX(U1), y: KY(0) + 40, size: 22, fill: COL.dim, anchor: 'end' }); show(ax, .4);
+    const bump = (par, c, col, w, t, k = 1) => draw(path(par, aCurve(u => k * aK1(c, u), U0, U1, AX, KY), { stroke: col, 'stroke-width': w }, { d: 0 }), t, 1.1);
+    const pt = (par, u, col, name, t) => { show(put(mk('circle', { r: 10, fill: col }, par), { x: AX(u), y: KY(0), o: 0 }), t, .3); return aTx(par, name, AX(u), KY(0) + 40, t, { size: 28, fill: col, weight: 700, anchor: 'middle' }); };
+    // la imagen de x es una función: K(x, ·)
+    const gA = G(p);
+    pt(gA, aU, HUE.hyp, 'x', tph); bump(gA, aU, HUE.hyp, 5, tph + 1.2);
+    aTx(gA, 'Φ(x)  =  K(x, ·):   cuánto se parece x a cada punto', 100, 760, tph + 1.2, { size: 30, weight: 600 });
+    pt(gA, aV, HUE.alt, 'x′', ti); bump(gA, aV, HUE.alt, 5, ti + .3);
+    [[aV, HUE.hyp], [aU, HUE.alt]].forEach(([u, col]) => draw(path(gA, `M${AX(u)} ${KY(0)}V${KY(kuv)}`, { stroke: COL.chalk, 'stroke-width': 5 }, { d: 0 }), ti + 5, .6));
+    show(put(mk('path', { d: `M${AX(aU)} ${KY(kuv)}H${AX(aV)}`, stroke: COL.chalk, 'stroke-width': 2.5, 'stroke-dasharray': '8 7', fill: 'none' }, gA), { o: 0 }), ti + 5.6, .4);
+    aRow(gA, [['⟨K(x, ·), K(x′, ·)⟩  =  K(x, x′)  =  '], [aF2(kuv), HUE.hyp], ['   la misma altura en los dos puntos', COL.dim]], 100, 812, [ti + 1.5, ti + 5.6, ti + 5.6], { size: 30, weight: 600 });
+    hide(gA, th - .4, .4);
+    // el espacio: combinaciones de esas funciones
+    const gB = G(p);
+    aHx.forEach((c, i) => { pt(gB, c, HUE.un, `x_{${i + 1}}`, th + .2 + i * .15); bump(gB, c, COL.dim, 2.5, th + .3 + i * .15, aHa[i]); });
+    draw(path(gB, aCurve(aHf, U0, U1, AX, KY), { stroke: COL.chalk, 'stroke-width': 5 }, { d: 0 }), th + 1.2, 1.4);
+    aHalo(aTx(gB, 'h', AX(aHx[0]) - 60, KY(aHf(aHx[0])) - 16, th + 2, { size: 34, weight: 700 }));
+    aTx(p, 'h  =  ∑_{i} a_{i} K(x_{i}, ·)', 100, 760, th + 1.2, { size: 30, weight: 600 });
+    aTx(p, `⟨h, h⟩  =  ∑_{i,j} a_{i} a_{j} K(x_{i}, x_{j})  =  ${aF2(aHn)}  ≥  0,   porque K es PDS`, 520, 760, th + 5, { size: 28 });
+    // propiedad reproductora: evaluar h en x es un producto interno
+    const gx = G(p, { o: 0 }), kb = mk('path', { fill: 'none', stroke: HUE.hyp, 'stroke-width': 3, 'stroke-opacity': .7 }, gx), sg = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, gx);
+    const d0 = mk('circle', { r: 10, fill: HUE.hyp, cy: KY(0) }, gx), d1 = mk('circle', { r: 10, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 3 }, gx), xl = T(gx, 'x', { y: KY(0) - 18, size: 28, fill: HUE.hyp, weight: 700, anchor: 'middle', font: MATH });
+    const rv = aRow(p, [['h(x)  =  ⟨h, K(x, ·)⟩  =  '], ['', HUE.hyp]], 100, 812, tr, { size: 30, weight: 600 }); text(p, '(6.9)  propiedad reproductora', 620, 810, tr + 1, { size: 22, fill: COL.dim });
+    const setX = u => { const hv = aHf(u); kb.setAttribute('d', aCurve(w => aK1(u, w), U0, U1, AX, KY)); sg.setAttribute('d', `M${AX(u).toFixed(1)} ${KY(0)}V${KY(hv).toFixed(1)}`); d0.setAttribute('cx', AX(u)); d1.setAttribute('cx', AX(u)); d1.setAttribute('cy', KY(hv)); put(xl, { x: AX(u) + 22 }); rv[1].textContent = aF2(hv); };
+    setX(1); show(gx, tr, .5);
+    prog(q => setX(1 + 8 * q), tr + .8, 4.2); prog(q => setX(9 - 2.8 * q), tr + 5.2, 1.8);
+    text(p, 'elegir un kernel PDS es elegir las características, sin escribirlas', 100, 856, tf, { size: 26, fill: HUE.hyp, weight: 600 });
+  }],
+
+  ['props', 'Propiedades', (m) => {
+    const p = panel(0), tc = m('cs'), tc2 = m('cs2'), tn = m('norm'), to = m('one'), tcl = m('close'), tch = m('chain'), t2 = m('c2'), t3 = m('c3'), t4 = m('c4'), GX = 150, GY = 250, CW = 80, RX = 660, n = aSm;
+    aNote(p, 'la muestra de 5 puntos y su matriz de Gram · en la cadena final σ = 1.5 y rosa = valor negativo · todo se calcula en la página');
+    aTitle(p, 'Propiedades de los kernels PDS');
+    const gA = G(p), gr = aGrid(gA, GX, GY, CW, aG, { t0: .4 }); gr.heads(.4, gA);
+    aTx(gA, 'K(x, x′) = (x · x′ + 1)^{2},  sobre la muestra de antes', GX, GY + n * CW + 44, .5, { size: 22, fill: COL.dim, font: UI });
+    // Cauchy-Schwarz: una celda al cuadrado contra las dos de la diagonal
+    text(gA, 'Lema 6.7 · Cauchy-Schwarz', RX, 256, tc, { size: 28, fill: HUE.hyp, weight: 600 });
+    aTx(gA, 'K(x, x′)^{2}  ≤  K(x, x) K(x′, x′)', RX, 316, tc + 1.4, { size: 34, weight: 600 }); text(gA, '(6.7)', RX + 470, 314, tc + 1.4, { size: 22, fill: COL.dim });
+    const cs = aTx(gA, '', RX, 376, tc2, { size: 28 }), dc = (tn - tc2) / aCsP.length;
+    aCsP.forEach(([i, j], k) => {
+      const t = tc2 + k * dc, a = aG[i][j], b = aG[i][i], c = aG[j][j];
+      gr.box(i, j, HUE.alt, t, t + dc - .2); gr.box(i, i, HUE.hyp, t, t + dc - .2); gr.box(j, j, HUE.hyp, t, t + dc - .2);
+      prog(() => cs._set(`${aCell(a)}^{2} = ${aInt(a * a)}   ≤   ${aCell(b)} · ${aCell(c)} = ${aInt(b * c)}`), t, 0);
+    });
+    hide(cs, tn - .2, .2);
+    // normalización: la tabla pasa a la del kernel normalizado
+    text(gA, 'Normalización', RX, 470, tn, { size: 28, fill: HUE.hyp, weight: 600 });
+    aTx(gA, 'K′(x, x′)  =  K(x, x′) / √( K(x, x) K(x′, x′) )', RX, 530, tn + 1, { size: 32, weight: 600 }); text(gA, '(6.11)', RX + 640, 528, tn + 1, { size: 22, fill: COL.dim });
+    const sw = (q, i, j) => q * n * n > i * n + j;                                 // las celdas cambian de a una: nunca se ve un valor intermedio
+    prog(q => gr.set(aG.map((row, i) => row.map((u, j) => sw(q, i, j) ? aGn[i][j] : u)), (u, i, j) => sw(q, i, j) ? aF2(u) : aCell(u)), tn + 2.6, 2.6, lin);
+    aTx(gA, 'diagonal 1 · cada celda: coseno del ángulo entre Φ(x) y Φ(x′)', RX, 600, to, { size: 24, font: UI });
+    aTx(gA, `sigue siendo PDS (lema 6.9) · menor valor propio: ${aF2(aGne.val[n - 1])}`, RX, 644, to + 4, { size: 24, font: UI });
+    hide(gA, tcl - .4, .4);
+    // cierre (teorema 6.10) y la cadena que lleva al kernel gaussiano
+    text(p, 'Teorema 6.10', 100, 210, tcl, { size: 28, fill: HUE.hyp, weight: 600 }); text(p, 'los kernels PDS son cerrados bajo:', 300, 210, tcl + .3, { size: 24, fill: COL.dim });
+    [[100, 'suma', 'K + K′', 1], [390, 'producto', 'K · K′', 2.2], [680, 'límite puntual', 'lim_{n → ∞} K_{n}', 5.2], [1060, 'serie de potencias', '∑_{n} a_{n} K^{n},   a_{n} ≥ 0', 7.2]].forEach(([x, name, form, dt]) => {
+      text(p, name, x, 268, tcl + dt, { size: 24 }); aTx(p, form, x, 314, tcl + dt + .2, { size: 32, fill: HUE.hyp, weight: 600 });
+    });
+    const CX = [150, 510, 870, 1230], MW = 30, MY = 450, ts = [tch + 2.2, t2, t3, t4];
+    const forms = ['x · x′', 'x · x′ / σ^{2}', 'exp( x · x′ / σ^{2} )', 'exp( −‖x′ − x‖^{2} / 2σ^{2} )'], steps = [['producto', 'por 1/σ^{2} > 0'], ['serie de potencias', 'a_{n} = 1/n! > 0'], ['normalizar', '(6.12)']];
+    aCh.forEach((c, k) => {
+      const x = CX[k], cxm = x + n * MW / 2;
+      aGrid(p, x, MY, MW, c.g, { t0: ts[k], num: false, top: .95, step: .02 });
+      aTx(p, forms[k], cxm, MY - 22, ts[k], { size: 26, weight: 600, anchor: 'middle' });
+      text(p, 'menor valor propio', cxm, MY + n * MW + 38, ts[k] + .6, { size: 22, fill: COL.dim, anchor: 'middle' });
+      aTx(p, aF2(c.min) + '  ≥  0', cxm, MY + n * MW + 76, ts[k] + .6, { size: 28, weight: 700, anchor: 'middle' });
+      if (k) { const x0 = CX[k - 1] + n * MW + 26, x1 = x - 26; draw(aArrow(p, x0, MY + 75, x1, MY + 75, HUE.hyp), ts[k] - .5, .5); steps[k - 1].forEach((s, r) => aTx(p, s, (x0 + x1) / 2, r ? MY + 112 : MY + 58, ts[k] - .4, { size: 22, fill: r ? COL.dim : HUE.hyp, anchor: 'middle', font: UI, weight: r ? 500 : 600 })); }
+    });
+    text(p, 'por eso el kernel gaussiano es PDS', 1570, 770, t4 + 2, { size: 30, fill: HUE.hyp, weight: 600, anchor: 'end' });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Un mapa Φ a más dimensiones puede volver separable una muestra.', 'w1'], ['Un kernel da el producto interno ⟨Φ(x), Φ(x′)⟩ sin construir Φ.', 'w2'],
+      ['PDS: toda matriz de Gram es simétrica y semidefinida positiva.', 'w3'], ['Todo kernel PDS es un producto interno. Sumas, productos y límites lo conservan.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 31, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['Para usar un kernel hay que calcular primero ', $m('Φ(x)'), ' para cada punto.'], ans: ['f'], why: 'El kernel da el producto interno directamente: basta con que el mapa exista.' },
+      { parts: ['Con el kernel polinomial de grado 2, los cuatro puntos del XOR quedan separables.'], ans: ['v'], why: 'En el espacio de seis coordenadas los separa un hiperplano: el producto de las coordenadas igual a 0.' },
+      { parts: ['Si ', $m('K'), ' es PDS, ningún valor ', $m('K(x, x′)'), ' puede ser negativo.'], ans: ['f'], why: 'Lo que no es negativo es la suma de (6.2). Una celda sí puede serlo: el producto interno es PDS.' },
+      { parts: ['El kernel gaussiano vale 1 cuando los dos puntos coinciden y baja al alejarse.'], ans: ['v'], why: 'Es una campana sobre la distancia: por eso se lee como medida de similitud.' },
+      { parts: ['La suma y el producto de dos kernels PDS son kernels PDS.'], ans: ['v'], why: 'Es parte del teorema 6.10, junto con el límite y las series de potencias.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

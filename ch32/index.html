@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Identificación en el límite</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 32, title: 'Identificación en el límite', minutes: 6, language: 'es', next: '../ch33/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 31) ---------- */
+// Sin clases en este capítulo. Ámbar = estado o camino activo, y la hipótesis · verde/rojo = acepta/rechaza, es/no es el objetivo ·
+// rosa = lo que viola la reversibilidad · violeta = bloques de la partición y la muestra característica · tiza = el árbol y el objetivo.
+// Los bloques finales de la partición se distinguen con cuatro tonos (violeta, azul, salmón, gris): solo sirven para seguirlos.
+const HUE = { act: COL.task, yes: COL.good, no: COL.bad, bad: COL.rat, blk: COL.real };
+const aBC = [COL.real, COL.whole, COL.nat, COL.dim];
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'x_{j}', 'a^{*}'. Con t0 = null queda visible desde el inicio. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξχΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯≠π⊆])/;                        // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aAt = (fn, t) => prog(() => fn(), t, 0);                                      // un cambio instantáneo en el instante t
+const aHideAll = (els, t) => els.forEach(e => hide(e, t, .3));
+const aShade = (hex, k = .42) => '#' + [1, 3, 5].map(i => Math.round(parseInt(COL.board.slice(i, i + 2), 16) * (1 - k) + parseInt(hex.slice(i, i + 2), 16) * k).toString(16).padStart(2, '0')).join('');
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSIG = ['a', 'b'];
+const aGo = (A, x, q = A.ini) => { for (const c of x) q = A.d[q][c]; return q; };
+const aAcc = (A, x) => A.fin[aGo(A, x)];
+const aDiff = (A, B) => {
+  const seen = new Set([A.ini + ',' + B.ini]), qu = [[A.ini, B.ini, '']];
+  for (let k = 0; k < qu.length; k++) {
+    const [p, q, x] = qu[k];
+    if (A.fin[p] !== B.fin[q]) return x;
+    for (const c of aSIG) { const p2 = A.d[p][c], q2 = B.d[q][c], key = p2 + ',' + q2; if (!seen.has(key)) { seen.add(key); qu.push([p2, q2, x + c]); } }
+  }
+  return null;
+};
+// DFA parcial → completo (agrega un estado sumidero si falta alguna transición), para poder comparar con aDiff.
+const aTot = A => { if (A.d.every(r => aSIG.every(c => r[c] != null))) return A; const z = A.d.length; return { ini: A.ini, fin: [...A.fin, false], d: [...A.d.map(r => Object.fromEntries(aSIG.map(c => [c, r[c] ?? z]))), Object.fromEntries(aSIG.map(c => [c, z]))] }; };
+const aAccP = (A, x) => { let q = A.ini; for (const c of x) { q = A.d[q][c]; if (q == null) return false; } return A.fin[q]; };
+// PT(S): autómata árbol de prefijos. Un estado por prefijo, numerados en preorden (a antes que b), como en la figura 16.7a.
+const aPT = smp => {
+  const pre = new Set(['']), us = []; smp.forEach(x => { for (let k = 1; k <= x.length; k++) pre.add(x.slice(0, k)); });
+  const dfs = u => { us.push(u); aSIG.forEach(c => { if (pre.has(u + c)) dfs(u + c); }); }; dfs('');
+  return { ini: 0, us, lab: us.map((_, i) => String(i)), fin: us.map(u => smp.includes(u)), d: us.map(u => Object.fromEntries(aSIG.filter(c => pre.has(u + c)).map(c => [c, us.indexOf(u + c)]))) };
+};
+// A/π: autómata cociente. blk[q] = bloque del estado q. Estados = bloques, ordenados por su menor estado; mem = estados de cada bloque.
+const aQuo = (A, blk) => {
+  const ids = [...new Set(blk)].sort((p, q) => p - q), at = q => ids.indexOf(blk[q]), mem = ids.map(b => blk.map((v, q) => v === b ? q : -1).filter(q => q >= 0)), d = ids.map(() => ({}));
+  let det = true;
+  A.d.forEach((row, q) => aSIG.forEach(c => { if (row[c] == null) return; const B = at(q), B2 = at(row[c]); if (d[B][c] != null && d[B][c] !== B2) det = false; d[B][c] = B2; }));
+  const acc = mem.map(m => m.map(q => A.us[q]).sort((u, v) => u.length - v.length || (u < v ? -1 : 1))[0]);
+  return { ini: at(A.ini), fin: mem.map(m => m.some(q => A.fin[q])), d, mem, det, acc, lab: acc.map(u => u || 'ε') };
+};
+// ¿Reversible? (definición 16.7) A determinista y su reverso también: un solo estado final y, hacia cada estado, a lo sumo una transición por símbolo.
+const aIsRev = A => A.fin.filter(v => v).length === 1 && A.d.every((_, q) => aSIG.every(c => A.d.filter(r => r[c] === q).length <= 1));
+// LearnReversibleAutomata() (figura 16.6). La lista se atiende en orden de llegada. Devuelve el árbol, la partición final, el cociente y un paso por fusión:
+// { q1, q2, why: 'fin' | 'succ' | 'pred', c: símbolo, src: estado del bloque que originó el par, blk: partición después de fusionar, n: bloques que quedan }.
+const aRev = smp => {
+  const A = aPT(smp), blk = A.d.map((_, q) => q), succ = A.d.map(r => ({ ...r })), pred = A.d.map(() => ({})), steps = [];
+  A.d.forEach((r, q) => aSIG.forEach(c => { if (r[c] != null) pred[r[c]][c] = q; }));
+  const fs = A.fin.map((v, q) => v ? q : -1).filter(q => q >= 0), list = fs.map(f => [fs[0], f, 'fin']);
+  let n = A.d.length, skip = 0;
+  while (list.length) {
+    const [q1, q2, why, c, src] = list.shift(), B1 = blk[q1], B2 = blk[q2];
+    if (B1 === B2) { skip++; continue; }
+    aSIG.forEach(a => {
+      if (succ[B1][a] != null && succ[B2][a] != null) list.push([succ[B1][a], succ[B2][a], 'succ', a, q1]);
+      if (pred[B1][a] != null && pred[B2][a] != null) list.push([pred[B1][a], pred[B2][a], 'pred', a, q1]);
+      if (succ[B1][a] == null) succ[B1][a] = succ[B2][a];
+      if (pred[B1][a] == null) pred[B1][a] = pred[B2][a];
+    });
+    blk.forEach((v, q) => { if (v === B2) blk[q] = B1; });
+    steps.push({ q1, q2, why, c, src, blk: [...blk], n: --n });
+  }
+  const fb = blk.map(v => Math.min(...blk.map((w, q) => w === v ? q : Infinity)));
+  return { A, blk: fb, steps, skip, Q: aQuo(A, fb) };
+};
+const aMem = (blk, q) => blk.map((v, i) => v === blk[q] ? i : -1).filter(i => i >= 0);
+// --- Datos.
+// Muestra de la figura 16.7 del libro, y el autómata de la figura 16.7b (pares de a y de b) como objetivo: estados ε, a, b, ab.
+const aSM = ['', 'aa', 'bb', 'aaaa', 'abab', 'abba', 'baba'], aRUN = aRev(aSM);
+const aL = { ini: 0, fin: [true, false, false, false], d: [{ a: 1, b: 2 }, { a: 0, b: 3 }, { a: 3, b: 0 }, { a: 2, b: 1 }], lab: ['ε', 'a', 'b', 'ab'] };
+// Una presentación positiva: tras cada cadena se ejecuta el algoritmo sobre todas las vistas. Por ronda: x, hipótesis H, id = número de hipótesis distinta,
+// ch = ¿cambió?, dif = cadena más corta en que difiere de L (null = es L), same = rondas seguidas sin cambiar.
+const aPres = xs => { let id = 0, same = 0; const o = []; xs.forEach((x, n) => { const H = aRev([...new Set(xs.slice(0, n + 1))]).Q, ch = !n || aDiff(aTot(H), aTot(o[n - 1].H)) != null; if (ch) { id++; same = 0; } else same++; o.push({ x, H, id, ch, same, dif: aDiff(aTot(H), aL) }); }); return o; };
+const aStab = rs => rs.length - rs[rs.length - 1].same;                                   // primera ronda desde la que no cambia (entre las mostradas)
+const aT1 = aPres(['', 'aa', 'bb', 'aaaa', 'abab', 'abba', 'baab', 'aabb', 'baba', 'bbbb']), aN1 = aStab(aT1);
+const aT2 = aPres(['', 'aa', 'aaaa', 'bb', 'abab', 'bbaa', 'abba', 'baab', 'baba', 'aabb']), aN2 = aStab(aT2);
+// Muestra característica S_L (proposición 16.8): d[q] f[q] por estado y d[q] a f[q′] por transición (d, f: cadenas más cortas desde el inicial y hasta el final).
+const aShort = A => { const qu = [[A.ini, '']], o = {}; for (let k = 0; k < qu.length; k++) { const [q, x] = qu[k]; if (o[q] == null) { o[q] = x; aSIG.forEach(c => qu.push([A.d[q][c], x + c])); } } return o; };
+const aAll = n => n ? [...Array(1 << n)].map((_, i) => [...Array(n)].map((_, j) => aSIG[i >> (n - 1 - j) & 1]).join('')) : [''];
+const aSL = A => { const dd = aShort(A), ff = A.d.map((_, q) => { for (let n = 0; ; n++) { const x = aAll(n).find(y => A.fin[aGo(A, y, q)]); if (x != null) return x; } }); const o = new Set(); A.d.forEach((r, q) => { o.add(dd[q] + ff[q]); aSIG.forEach(c => o.add(dd[q] + c + ff[r[c]])); }); return [...o].sort((p, q) => p.length - q.length || (p < q ? -1 : 1)); };
+const aCHAR = aSL(aL);
+// Autómata chico que no es reversible (propio) y su reverso; comprobación 2 (muestra propia).
+const aNR = { ini: 0, fin: [false, false, true], d: [{ a: 1, b: 2 }, { b: 2 }, {}], lab: ['0', '1', '2'] };
+const aS2 = ['ab', 'b'], aRUN2 = aRev(aS2);
+const aNch = 1 + Math.max(...aCHAR.map(x => aT1.findIndex(r => r.x === x)));               // ronda en la que ya apareció toda la muestra característica
+const aNRl = [0, 1, 2, 3].flatMap(aAll).filter(x => aAccP(aNR, x));                           // L(A) del autómata chico
+const aNRr = { ini: 2, inis: [2], fin: [true, false, false], lab: aNR.lab, ed: aNR.d.flatMap((r, q) => aSIG.filter(c => r[c] != null).map(c => [r[c], c, q])) };   // su reverso
+const aQ2s = aRUN2.steps[1], aQ2r = aQ2s.q1 === 0 ? aQ2s.q2 : aQ2s.q1;                        // comprobación 2: el estado que se fusiona con el 0
+const aTg = (A, q) => aGo(aL, A.us[q]);                                                       // estado del objetivo al que corresponde un prefijo
+const aEps = u => u || 'ε', aPl = (n, s) => `${n} ${s}${n === 1 ? '' : 's'}`;
+/* aMATH:end */
+
+// Cadena como fila de casillas (la del cap. 13). s.lit(i, col, ta, tb) tiñe la casilla i desde ta y la devuelve a su color en tb.
+const aStr = (p, str, x, y, { cw = 60, t0 = .4, fill = COL.chalk } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), s = { g, x, y, cw, n: str.length, end: x + str.length * cw }, size = cw * .62;
+  s.c = [...str].map((ch, i) => [mk('rect', { x: x + i * cw + 2, y: y + 2, width: cw - 4, height: cw - 4, fill: 'none', stroke: fill === COL.chalk ? COL.faint : fill, 'stroke-width': 2 }, g), T(g, ch, { x: x + i * cw + cw / 2, y: y + cw / 2 + size * .3, size, fill, anchor: 'middle', font: MATH, weight: 600 })]);
+  if (t0 != null) show(g, t0);
+  s.lit = (i, col, ta, tb) => { const [r, t] = s.c[i]; tw(r, { c_stroke: col }, ta, .15); tw(t, { c_fill: col }, ta, .15); if (tb != null) { tw(r, { c_stroke: COL.faint }, tb, .25); tw(t, { c_fill: fill }, tb, .25); } };
+  return s;
+};
+// Autómata como grafo, con los estados en cualquier lugar (generaliza el aGraph del cap. 31). A = { ini, fin, d, lab } (DFA, puede ser parcial) o, para un
+// autómata cualquiera, { inis, fin, lab, ed: [[origen, símbolo, destino]] }. pos = [[x, y], …]. Estado inicial = círculo grueso; final = círculo doble.
+// Dos transiciones opuestas con el mismo símbolo se dibujan como una sola flecha de dos puntas (como en la figura 16.7b); si los símbolos difieren, dos flechas curvas.
+// up: los rótulos de las flechas van siempre del lado de arriba (árboles). Un rótulo de estado con «\n» sale en dos líneas.
+// gr.of[estado + símbolo] y gr.ek['p>q'] = índice de la flecha · gr.hot tiñe una flecha · gr.mark tiñe el borde de un estado · gr.tint / gr.paint lo rellenan ·
+// gr.run(ficha, x, …) lee una cadena desde el estado inicial (solo DFA).
+const aGraph = (p, A, pos, { t0 = .4, tE = null, rad = 38, size = 26, col = COL.chalk, up = false, fs = null } = {}) => {
+  const g = G(p, { o: t0 == null ? 1 : 0 }), ge = G(g, { o: tE == null ? 1 : 0 }), gs = G(g), gr = { g, ge, pos, A, rad, ring: [], inner: [], sg: [], ed: [], of: {}, dir: {}, ek: {} };
+  const f = Q => Q.map(v => v.toFixed(1)).join(' '), inis = A.inis || [A.ini], w0 = id => inis.includes(id) ? 7 : 3, ext = rad * 2.3;
+  const cen = [0, 1].map(i => pos.reduce((s, q) => s + q[i], 0) / pos.length);
+  const eds = A.ed || A.d.flatMap((row, a) => aSIG.filter(c => row[c] != null).map(c => [a, c, row[c]])), by = {};
+  eds.forEach(([a, c, b]) => { (by[a + '>' + b] = by[a + '>' + b] || { a, b, cs: [] }).cs.push(c); });
+  const off = (U, V, r) => { const l = Math.hypot(V[0] - U[0], V[1] - U[1]); return [U[0] + (V[0] - U[0]) * r / l, U[1] + (V[1] - U[1]) * r / l]; };
+  const head = (Q, C) => { const ha = Math.atan2(Q[1] - C[1], Q[0] - C[0]), u = [Math.cos(ha), Math.sin(ha)]; return `M${f([Q[0] + 12 * u[0], Q[1] + 12 * u[1]])}L${f([Q[0] - 4 * u[0] - 8 * u[1], Q[1] - 4 * u[1] + 8 * u[0]])}L${f([Q[0] - 4 * u[0] + 8 * u[1], Q[1] - 4 * u[1] - 8 * u[0]])}Z`; };
+  Object.values(by).sort((e1, e2) => e1.a - e2.a || e1.b - e2.b).forEach(({ a, b, cs }) => {
+    const rv = a !== b && by[b + '>' + a], twin = rv && rv.cs.join() === cs.join();
+    if (twin && gr.ek[b + '>' + a] != null) { const k = gr.ek[b + '>' + a]; gr.ek[a + '>' + b] = k; cs.forEach(c => { gr.of[a + c] = k; gr.dir[a + c] = -1; }); return; }
+    const [x1, y1] = pos[a], [x2, y2] = pos[b], eg = G(ge), hd = [];
+    let d, Q0, Q2, C, lx, ly;
+    if (a === b) {
+      const th = -Math.PI / 2, pt = (ang, r) => [x1 + r * Math.cos(ang), y1 + r * Math.sin(ang)], C1 = pt(th - .75, rad + ext);
+      C = pt(th + .75, rad + ext); Q2 = pt(th + .5, rad + 13); d = `M${f(pt(th - .5, rad))}C${f(C1)} ${f(C)} ${f(Q2)}`;
+      lx = x1; ly = y1 - (.769 * rad + 1.4 + .549 * ext) - 10;
+    } else {
+      const len = Math.hypot(x2 - x1, y2 - y1), nx = -(y2 - y1) / len, ny = (x2 - x1) / len, bd = rv && !twin ? .2 * len : 0;
+      C = [(x1 + x2) / 2 + nx * bd, (y1 + y2) / 2 + ny * bd]; Q2 = off([x2, y2], C, rad + 13); Q0 = off([x1, y1], C, rad + (twin ? 13 : 0));
+      const mid = [(Q0[0] + 2 * C[0] + Q2[0]) / 4, (Q0[1] + 2 * C[1] + Q2[1]) / 4], sd = bd ? 1 : up ? (ny > 0 ? -1 : 1) : ((mid[0] - cen[0]) * nx + (mid[1] - cen[1]) * ny >= 0 ? 1 : -1);
+      d = `M${f(Q0)}Q${f(C)} ${f(Q2)}`; lx = mid[0] + nx * sd * size * .62; ly = mid[1] + ny * sd * size * .62 + size * .34;
+    }
+    const pe = mk('path', { d, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-linecap': 'round' }, eg);
+    hd.push(mk('path', { d: head(Q2, C), fill: COL.dim }, eg));
+    if (twin) hd.push(mk('path', { d: head(Q0, C), fill: COL.dim }, eg));
+    T(eg, cs.join(', '), { x: lx, y: ly, size, anchor: 'middle', font: MATH, weight: 600 });
+    gr.ek[a + '>' + b] = gr.ed.length; cs.forEach(c => { gr.of[a + c] = gr.ed.length; gr.dir[a + c] = 1; });
+    gr.ed.push({ g: eg, pe, hd });
+  });
+  A.lab.forEach((lab0, id) => {
+    const [x, y] = pos[id], sg = G(gs), ls = String(lab0).split('\n'), wid = Math.max(...ls.map(s => s.length)), sz = fs || (wid > 2 ? 22 : wid > 1 ? 24 : rad < 30 ? 24 : 30);
+    gr.ring[id] = mk('circle', { cx: x, cy: y, r: rad, fill: COL.board, stroke: col, 'stroke-width': w0(id) }, sg);
+    gr.inner[id] = A.fin[id] ? mk('circle', { cx: x, cy: y, r: rad - 8, fill: 'none', stroke: col, 'stroke-width': 2.5 }, sg) : null;
+    ls.forEach((s, i) => T(sg, s, { x, y: y + sz * .34 + (i - (ls.length - 1) / 2) * sz * 1.15, size: sz, anchor: 'middle', font: MATH, weight: 600, fill: col }));
+    gr.sg[id] = sg;
+  });
+  if (t0 != null) show(g, t0);
+  if (tE != null) show(ge, tE);
+  gr.hot = (k, ta, tb, c = HUE.act) => { const { pe, hd } = gr.ed[k]; tw(pe, { c_stroke: c }, ta, .15); hd.forEach(e => tw(e, { c_fill: c }, ta, .15)); if (tb != null) { tw(pe, { c_stroke: COL.dim }, tb, .3); hd.forEach(e => tw(e, { c_fill: COL.dim }, tb, .3)); } };
+  gr.mark = (id, c, ta, tb) => { const e = gr.ring[id]; tw(e, { c_stroke: c, 'a_stroke-width': w0(id) + 4 }, ta, .25, out); if (tb != null) tw(e, { c_stroke: col, 'a_stroke-width': w0(id) }, tb, .4); };
+  gr.flash = (id, t, c = HUE.act) => gr.mark(id, c, t, t + .8);
+  gr.tint = (id, c, t) => tw(gr.ring[id], { c_fill: aShade(c) }, t, .35);
+  gr.paint = (id, c) => gr.ring[id].setAttribute('fill', aShade(c));
+  gr.tok = () => put(mk('circle', { r: Math.max(9, rad * .3), fill: HUE.act, stroke: COL.board, 'stroke-width': 3 }, g), { x: pos[A.ini][0], y: pos[A.ini][1], o: 0 });
+  gr.run = (tok, x, ta, dt, tb, str) => {
+    aAt(() => put(tok, { x: pos[A.ini][0], y: pos[A.ini][1] }), ta - .15); show(tok, ta - .15, .15);
+    let q = A.ini;
+    [...x].forEach((c, j) => {
+      const k = gr.of[q + c], t = ta + j * dt, e = gr.ed[k].pe, to = A.d[q][c], bk = gr.dir[q + c] < 0;
+      gr.hot(k, t, t + dt + .15); prog(v => { const Q = e.getPointAtLength((bk ? 1 - v : v) * e.getTotalLength()); put(tok, { x: Q.x, y: Q.y }); }, t, dt * .8); tw(tok, { x: pos[to][0], y: pos[to][1] }, t + dt * .8, dt * .15);
+      if (str) str.lit(j, HUE.act, t, tb);
+      q = to;
+    });
+    gr.mark(q, A.fin[q] ? HUE.yes : HUE.no, ta + x.length * dt - .05, tb);
+    hide(tok, ta + x.length * dt + .5, .3);
+    return q;
+  };
+  return gr;
+};
+// Contador con rótulo: devuelve set(valor, instante).
+const aCnt = (p, x, y, lab, v0, t0, w = 440) => {
+  const g = G(p, { o: 0 }); show(g, t0); T(g, lab, { x, y, size: 24, fill: COL.dim });
+  const e = T(g, String(v0), { x: x + w, y: y + 3, size: 34, weight: 700, anchor: 'end', font: MATH });
+  return (v, t) => { aAt(() => { e.textContent = String(v); }, t); tw(e, { c_fill: HUE.act }, t, .15); tw(e, { c_fill: COL.chalk }, t + .8, .5); };
+};
+// Lugares de los estados de un árbol de prefijos, como en la figura 16.7a: la profundidad avanza a la derecha; el hijo «a» sigue en la fila y el hijo «b» abre otra.
+const aTpos = (A, x0 = 120, y0 = 250, dx = 150, dy = 95) => { const pos = []; const place = (q, dep, row) => { pos[q] = [x0 + dep * dx, y0 + row * dy]; let last = row; const qa = A.d[q].a, qb = A.d[q].b; if (qa != null) last = place(qa, dep + 1, row); if (qb != null) last = place(qb, dep + 1, qa != null ? last + 1 : row); return last; }; place(A.ini, 0, 0); return pos; };
+// Rombo de cuatro lugares (arriba, izquierda, derecha, abajo), en el orden de los estados del objetivo: ε, a, b, ab (figura 16.7b).
+const aDia = (cx, cy, dx, dy) => [[cx, cy - dy], [cx - dx, cy], [cx + dx, cy], [cx, cy + dy]];
+const aHpos = (H, dia) => H.acc.map(u => dia[aGo(aL, u)]);                                   // cada estado de una hipótesis, en el lugar del estado del objetivo que le corresponde
+// Cinta de una presentación positiva: una columna por ronda con su número, la cadena en un recuadro y la etiqueta de la hipótesis (H con subíndice; ámbar si cambió).
+// tS, tH = instantes de cada cadena y de cada etiqueta (null = visibles desde el inicio). Devuelve { g, box, tag, cx }.
+const aTX = 250, aTW = 130;
+const aTape = (p, rs, y, tS, tH) => {
+  const tp = { g: [], box: [], tag: [], cx: rs.map((_, k) => aTX + k * aTW + aTW / 2), y };
+  [['ronda', 0, COL.dim], ['cadena', 52, COL.chalk], ['hipótesis', 108, HUE.act]].forEach(([s, dy, c]) => T(p, s, { x: 100, y: y + dy, size: 22, fill: c }));
+  rs.forEach((r, k) => {
+    const go = G(p), g = G(go, { o: tS ? 0 : 1 }), x = tp.cx[k];
+    T(g, String(k + 1), { x, y, size: 22, fill: COL.dim, anchor: 'middle' });
+    tp.box[k] = mk('rect', { x: x - aTW / 2 + 6, y: y + 16, width: aTW - 12, height: 54, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+    T(g, aEps(r.x), { x, y: y + 53, size: 28, anchor: 'middle', font: MATH, weight: 600 });
+    if (tS) { put(g, { x: 30 }); tw(g, { o: 1, x: 0 }, tS[k], .4, out); }
+    tp.tag[k] = aTx(go, `H_{${r.id}}`, x, y + 110, tH ? tH[k] : null, { size: 28, fill: r.ch ? HUE.act : COL.dim, anchor: 'middle', weight: 700 });
+    tp.g[k] = go;
+  });
+  return tp;
+};
+// Las tres razones para fusionar, en dos líneas cada una (rótulo y por qué). ts = instantes; devuelve los elementos.
+const aWHY = [['dos estados finales', 'un autómata reversible tiene un único estado final'], ['un bloque, un símbolo, dos destinos', 'el cociente no sería determinista'], ['dos orígenes, un símbolo, un mismo bloque de destino', 'el reverso del cociente no sería determinista']];
+const aWhy = (p, x, y, ts, dy = 90) => aWHY.flatMap(([s, w], i) => [aRow(p, [[`${i + 1}   `, HUE.bad, UI], [s, COL.chalk, UI]], x, y + i * dy, ts ? ts[i] : null, { size: 24, weight: 600 }), [aTx(p, w, x + 34, y + i * dy + 32, ts ? ts[i] + .5 : null, { size: 22, font: UI, fill: COL.dim })]].flat());
+// El árbol de prefijos de la figura 16.7a, con sus estados teñidos según la partición blk (los bloques de un solo estado quedan sin teñir).
+const aTreeOf = (p, run, opts = {}) => aGraph(p, run.A, aTpos(run.A), { rad: 28, size: 24, up: true, ...opts });
+const aBcol = q => aBC[aTg(aRUN.A, q)];                                                     // tono del bloque final al que va a parar el estado q
+const aLang = 'cadenas con un número par de a y un número par de b';
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 850;
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 32', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Identificación en el límite', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Acertar tarde o temprano, y no cambiar más.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['lim', 'El marco', (m) => {
+    const p = panel(0), tt = m('tape'), th = [m('h1'), m('h2'), m('h3'), m('h4'), m('h5')], t7 = m('h7'), ts = m('stay'), tp = m('pres'), td = m('def'), tr = m('real'), tn = m('neg');
+    const tk = aT1.map((_, k) => k < 5 ? th[k] : k === 5 ? th[4] + (t7 - th[4]) * .55 : k === 6 ? t7 : ts + .2 + (k - 7) * 1.1), dia = aDia(400, 520, 160, 112), CX = 700;
+    aNote(p, 'presentación ilustrativa · el aprendiz es el algoritmo de este capítulo, ejecutado en la página · objetivo: el lenguaje de la figura 16.7b del libro');
+    aTitle(p, 'Identificar en el límite: la hipótesis deja de cambiar, y es la correcta');
+    const tape = aTape(p, aT1, 200, tk.map((t, k) => k ? t - .6 : tt + .7), tk);
+    text(p, 'hipótesis actual', 100, 410, th[0], { size: 24, fill: HUE.act, weight: 600 });
+    const same = aCnt(p, CX, 560, 'rondas sin cambiar', 0, th[0], 330);
+    aRow(p, [['L', COL.chalk, MATH, 26], [':   ' + aLang.replace('y un número par de', 'y de') + '   (el aprendiz no lo ve)', COL.dim, UI]], CX, 630, tt, { size: 22 });
+    aT1.forEach((r, k) => {
+      const t0 = tk[k], t1 = k + 1 < aT1.length ? tk[k + 1] - .15 : null, nx = aT1.findIndex((q, j) => j > k && q.ch), isL = r.dif == null;
+      if (r.ch) { const gr = aGraph(p, r.H, aHpos(r.H, dia), { t0: null, rad: 32, size: 24, col: HUE.act }); put(gr.g, { o: 0 }); show(gr.g, t0 + (k ? .2 : 0), .4); if (nx > 0) hide(gr.g, tk[nx], .25); if (isL) r.H.lab.forEach((_, i) => gr.mark(i, HUE.yes, t0 + .5 + i * .1, t0 + 3)); }
+      const es = [aRow(p, [[`tras la ronda ${k + 1}:   `, COL.chalk, UI, 26], [`H_{${r.id}}`, HUE.act, MATH, 30], [`,   ${aPl(r.H.lab.length, 'estado')}`, COL.chalk, UI, 26], [r.ch ? '' : '   (no cambió)', COL.dim, UI, 24]], CX, 440, t0, { weight: 600 }),
+        aRow(p, isL ? [['es el lenguaje objetivo L', HUE.yes, UI]] : [['todavía no es L:   no acepta  ', HUE.no, UI], [r.dif, HUE.no, MATH, 30]], CX, 494, t0 + .3, { size: 26, weight: 600 })].flat();
+      if (t1 != null) aHideAll(es, t1);
+      same(r.same, t0 + .2);
+    });
+    const e1 = aRow(p, [['presentación positiva de L', HUE.act, UI], [':   sucesión infinita de cadenas; su conjunto es exactamente L', COL.chalk, UI]], 100, 720, tp, { size: 26, weight: 600 });
+    aRow(p, [['identifica L en el límite', HUE.act, UI], [':   existe N tal que, para toda ronda n ≥ N, la hipótesis es L', COL.chalk, UI]], 100, 772, td, { size: 26, weight: 600 });
+    const e3 = aTx(p, 'sin cota para el número de ejemplos ni para el costo del algoritmo:  un marco menos realista en lo computacional', 100, 824, tr, { size: 22, font: UI, fill: COL.dim });
+    aHideAll([...e1, e3], tn - .4);
+    aRow(p, [['Teorema 16.6', COL.chalk, UI], [':   los autómatas deterministas  ', COL.chalk, UI], ['no son identificables en el límite', HUE.no, UI], ['  a partir de ejemplos positivos', COL.chalk, UI]], 100, 824, tn + 3, { size: 24, weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    T(p, 'Otra presentación positiva del mismo lenguaje', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    const tape = aTape(p, aT2, 250, null, null), last = aT2[aT2.length - 1];
+    aTx(p, 'la misma etiqueta en dos rondas seguidas:  la hipótesis no cambió', 100, 460, null, { size: 26, font: UI, weight: 600 });
+    aRow(p, [[`H_{${last.id}}`, HUE.act, MATH, 30], [`  es el lenguaje objetivo, y las rondas que siguen a la ${aT2.length} tampoco la cambian`, COL.dim, UI]], 100, 520, null, { size: 24 });
+    S.q1 = tape;
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-ronda', prompt: ['¿Cuál es la primera ronda desde la que la hipótesis ya no cambia?'],
+    build: pickEls(aT2.map((r, k) => ({ el: S.q1.g[k], box: [S.q1.cx[k] - aTW / 2 + 2, 222, aTW - 4, 156], label: 'ronda ' + (k + 1) })), aN2 - 1,
+      `En la ronda ${aN2} aparece H${aT2[aN2 - 1].id}, que es el objetivo, y las rondas siguientes la conservan.`,
+      k => { const nx = aT2.findIndex((q, j) => j > k && q.ch); return nx > 0 ? `Después de la ronda ${k + 1} la hipótesis vuelve a cambiar: en la ronda ${nx + 1} pasa a ser H${aT2[nx].id}.` : `En la ronda ${k + 1} ya no cambia, pero en la ${k} tampoco: se pide la primera.`; }),
+  }], done) }],
+
+  ['rev', 'Autómatas reversibles', (m) => {
+    const p = panel(0), tr = m('rev'), tm = m('mir'), td = m('def'), tb = m('bad'), tg = m('good'), to = m('one'), tl = m('lang'), P1 = [[150, 470], [300, 330], [450, 470]], P2 = P1.map(([x, y]) => [x + 440, y]);
+    aNote(p, 'izquierda: autómata propio, ilustrativo · derecha: el autómata de la figura 16.7b del libro · rosa: lo que impide la reversibilidad');
+    aTitle(p, 'Autómatas reversibles: deterministas en los dos sentidos');
+    const g1 = aGraph(p, aNR, P1, { t0: .4, rad: 34 }), g2 = aGraph(p, aNRr, P2, { t0: tr, rad: 34 });
+    aTx(p, 'A', 300, 560, .5, { size: 30, anchor: 'middle', weight: 600 }); aTx(p, 'A^{R}', 740, 560, tr, { size: 30, anchor: 'middle', weight: 600 });
+    text(p, 'el reverso', 740, 214, tr, { size: 24, fill: COL.dim, anchor: 'middle' });
+    aTx(p, `acepta  ${aNRl.join(',  ')}`, 300, 604, tm, { size: 24, font: UI, fill: COL.dim, anchor: 'middle' }); aTx(p, `acepta  ${aNRl.map(x => [...x].reverse().join('')).join(',  ')}`, 740, 604, tm + .8, { size: 24, font: UI, fill: COL.dim, anchor: 'middle' });
+    g1.flash(aNR.ini, tr + 3); g2.flash(0, tr + 3.6); g1.flash(2, tr + 6.5); g2.flash(2, tr + 7.2);
+    const two = aNRr.ed.filter(([a, c]) => aNRr.ed.filter(([a2, c2]) => a2 === a && c2 === c).length > 1);
+    two.forEach(([a, , b]) => g2.hot(g2.ek[a + '>' + b], tb + 1.5, null, HUE.bad)); g2.mark(two[0][0], HUE.bad, tb + 1.5, null);
+    text(p, aIsRev(aNR) ? 'reversible' : 'no es reversible', 520, 660, tb, { size: 26, fill: HUE.bad, anchor: 'middle', weight: 700 });
+    const g3 = aGraph(p, aL, aDia(1260, 410, 170, 140), { t0: tg, rad: 36 });
+    text(p, aIsRev(aL) ? 'reversible' : 'no es reversible', 1260, 660, tg + 1, { size: 26, fill: HUE.yes, anchor: 'middle', weight: 700 });
+    text(p, 'número par de a y número par de b', 1260, 214, tg + 7, { size: 24, fill: COL.dim, anchor: 'middle' });
+    g3.ed.forEach((e, k) => g3.hot(k, tg + 2.2 + k * .25, tg + 5));
+    g3.flash(aL.ini, to + 1.5, HUE.act);
+    aRow(p, [['Definición 16.7', HUE.act, UI], [':   A es reversible si A y su reverso ', COL.chalk, UI], ['A^{R}', COL.chalk, MATH, 28], [' son deterministas', COL.chalk, UI]], 100, 726, td, { size: 26, weight: 600 });
+    aTx(p, 'consecuencia:  un autómata reversible tiene un único estado final', 100, 778, to, { size: 26, font: UI, weight: 600 });
+    aTx(p, 'lenguaje reversible:  el que acepta algún autómata reversible', 100, 830, tl, { size: 26, font: UI, weight: 600 });
+  }],
+
+  ['pt', 'Árbol de prefijos', (m) => {
+    const p = panel(0), tt = m('tree'), tg = m('grow'), tc = m('cnt'), tpa = m('part'), tm = m('merge'), tq = m('quo'), A = aRUN.A, dt = (tc + 3 - tg) / aSM.length, seen = new Set([0]);
+    aNote(p, 'muestra S y árbol: figura 16.7a del libro, con su numeración de estados · PT(S): prefix-tree automaton');
+    aTitle(p, 'Partición de estados: del árbol de prefijos al autómata cociente');
+    const gr = aTreeOf(p, aRUN, { t0: null });
+    gr.sg.forEach(e => put(e, { o: 0 })); gr.ed.forEach(e => put(e.g, { o: 0 })); gr.inner.forEach(e => e && put(e, { o: 0 }));
+    show(gr.sg[0], tt, .4);
+    text(p, 'muestra S', RX, 214, tt, { size: 24, fill: COL.dim });
+    let cx = RX;
+    aSM.forEach((x, i) => {
+      const row = i < 4 ? 0 : 1; if (i === 4) cx = RX;
+      const sx = aStr(p, aEps(x), cx, 232 + row * 62, { cw: 40, t0: tt + .3 + i * .1 }), t0 = tg + i * dt, st = dt * .55 / Math.max(x.length, 1); cx = sx.end + 26;
+      [...aEps(x)].forEach((_, j) => sx.lit(j, HUE.act, t0, t0 + dt));
+      let q = 0;
+      [...x].forEach((c, j) => { const k = gr.of[q + c], to = A.d[q][c], t = t0 + j * st; if (!seen.has(to)) { seen.add(to); show(gr.ed[k].g, t, .25); show(gr.sg[to], t + .1, .25); } gr.hot(k, t, t0 + dt); q = to; });
+      show(gr.inner[q], t0 + x.length * st, .3); gr.mark(q, HUE.act, t0 + x.length * st, t0 + dt);
+    });
+    aRow(p, [['PT(S)', COL.chalk, MATH, 28], [`:   un estado por prefijo   →   ${aPl(A.lab.length, 'estado')}, ${A.fin.filter(v => v).length} finales`, COL.chalk, UI]], RX, 420, tc, { size: 24, weight: 600 });
+    aRow(p, [['partición trivial', HUE.blk, UI], [':   cada estado es un bloque', COL.chalk, UI]], RX, 480, tpa, { size: 24, weight: 600 });
+    A.lab.forEach((_, q) => gr.mark(q, HUE.blk, tpa + .3 + q * .06, tpa + 2.2));
+    aTx(p, 'se fusionan bloques, hasta que no queda fusión posible', RX, 540, tm, { size: 24, font: UI, weight: 600 });
+    aRow(p, [['autómata cociente  ', HUE.act, UI], ['A/π', HUE.act, MATH, 28], [':   cada bloque es un estado;', COL.chalk, UI]], RX, 612, tq, { size: 24, weight: 600 });
+    aTx(p, 'hay transición entre dos bloques si la hay', RX, 652, tq + 3.5, { size: 24, font: UI, weight: 600 });
+    aTx(p, 'entre dos de sus estados', RX, 690, tq + 3.5, { size: 24, font: UI, weight: 600 });
+  }],
+
+  ['merge', 'Fusionar estados', (m) => {
+    const p = panel(0), tf = m('fin'), t9 = m('n9'), tsu = m('succ'), tpr = m('pred'), tre = m('rest'), te = m('end'), A = aRUN.A, st = aRUN.steps, nf = st.filter(s => s.why === 'fin').length;
+    aNote(p, 'algoritmo de la figura 16.6 del libro, ejecutado en la página, con la lista en orden de llegada · rosa: lo que viola · los tonos solo distinguen bloques');
+    aTitle(p, 'Fusionar mientras algo impida que el cociente sea reversible');
+    const gr = aTreeOf(p, aRUN, { t0: .3 });
+    const nb = aCnt(p, RX, 214, 'bloques de la partición', A.lab.length, .4), nm = aCnt(p, RX, 262, 'fusiones', 0, .4);
+    aWhy(p, RX, 340, [tf, tsu, tpr]);
+    // instantes de las fusiones: las de estados finales, seguidas; la primera de cada uno de los otros dos motivos, despacio; el resto, de corrido
+    const k2 = st.findIndex(s => s.why === 'succ'), k3 = st.findIndex(s => s.why === 'pred'), rest = st.map((_, k) => k).filter(k => k >= nf && k !== k2 && k !== k3), d1 = (t9 - .3 - (tf + 3.2)) / nf, d3 = Math.max(1.1, (te + .6 - tre - .4) / rest.length);
+    const at = k => k < nf ? [tf + 3.2 + k * d1, d1] : k === k2 ? [tsu + 1.2, tpr - tsu - 1.6] : k === k3 ? [tpr + 1.2, tre - tpr - 1.6] : [tre + .4 + rest.indexOf(k) * d3, d3];
+    st.forEach((s, k) => {
+      const [t0, du] = at(k), tm = t0 + du * (k === k2 || k === k3 ? .76 : .6), { q1, q2, why, c } = s, into = q => gr.of[A.d.findIndex(r => r[c] === q) + c];
+      [q1, q2].forEach(q => gr.mark(q, HUE.bad, t0, tm + .3));
+      if (why !== 'fin') (why === 'succ' ? [into(q1), into(q2)] : [gr.of[q1 + c], gr.of[q2 + c]]).forEach(e => gr.hot(e, t0, tm + .3, HUE.bad));
+      aMem(s.blk, q1).forEach(q => gr.tint(q, aBcol(q), tm));
+      nb(s.n, tm); nm(k + 1, tm);
+      const es = [aTx(p, `se fusionan ${q1} y ${q2}`, RX, 628, t0, { size: 26, font: UI, fill: HUE.bad, weight: 700 }), aTx(p, why === 'fin' ? 'los dos son finales' : why === 'succ' ? `con ${c}, desde un mismo bloque se llega a los dos` : `con ${c}, desde los dos se llega a un mismo bloque`, RX, 668, t0, { size: 24, font: UI, weight: 600 })];
+      aHideAll(es, k + 1 < st.length ? at(k + 1)[0] - .15 : te + 1.6);
+    });
+    aRow(p, [[aIsRev(aRUN.Q) ? 'ninguna violación' : 'quedan violaciones', HUE.yes, UI], [`:   ${st.length} fusiones,  ${aPl(aRUN.Q.lab.length, 'bloque')}`, COL.chalk, UI]], RX, 640, te + 2, { size: 26, weight: 700 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), A = aRUN2.A, pos = aTpos(A, 180, 330, 200, 170), gr = aGraph(p, A, pos, { t0: null, rad: 38, up: true }), s0 = aRUN2.steps[0];
+    T(p, 'Otra muestra, con los estados finales ya fusionados', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'muestra', { x: 100, y: 214, size: 24, fill: COL.dim });
+    let cx = 210; aS2.forEach(x => { cx = aStr(p, x, cx, 180, { cw: 44, t0: null }).end + 26; });
+    aMem(s0.blk, s0.q1).forEach(q => gr.paint(q, HUE.blk));
+    aTx(p, `bloque  { ${aMem(s0.blk, s0.q1).join(', ')} }`, 180, 610, null, { size: 24, font: UI, fill: HUE.blk, weight: 600 });
+    T(p, 'se fusionan dos estados si hay:', { x: RX, y: 290, size: 24, fill: COL.dim });
+    aWhy(p, RX, 350, null);
+    S.q2 = [1, 2, 3].map(q => ({ el: gr.sg[q], box: [pos[q][0] - 52, pos[q][1] - 52, 104, 104], label: 'estado ' + q, q }));
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-fusion', prompt: ['Los finales ya son un bloque. ¿Qué estado se fusiona ahora con el 0?'],
+    build: pickEls(S.q2, S.q2.findIndex(it => it.q === aQ2r),
+      `Con ${aQ2s.c}, del 0 y del ${aQ2r} se llega al mismo bloque: el reverso no sería determinista.`,
+      k => `El 0 y el ${S.q2[k].q} no son los dos finales, ni comparten con un mismo símbolo el bloque de origen o el de destino.`),
+  }], done) }],
+
+  ['quo', 'El autómata cociente', (m) => {
+    const p = panel(0), tb = m('blocks'), te = m('edges'), ts = m('same'), tp = m('p'), tt = m('t'), tc = m('cost'), A = aRUN.A, Q = aRUN.Q;
+    aNote(p, 'árbol y cociente: figura 16.7 del libro · α: inversa de la función de Ackermann;  α(n) ≤ 4 para n ≤ 10^{80}');
+    aTitle(p, 'El cociente: el menor lenguaje reversible que contiene la muestra');
+    const gr = aTreeOf(p, aRUN, { t0: .3 }); A.lab.forEach((_, q) => gr.paint(q, aBcol(q)));
+    const QA = { ...Q, lab: Q.mem.map(ms => ms.length > 4 ? ms.slice(0, 4).join(' ') + '\n' + ms.slice(4).join(' ') : ms.join(' ')) };
+    const gq = aGraph(p, QA, aHpos(Q, aDia(1200, 420, 200, 150)), { t0: null, rad: 60, fs: 22 });
+    gq.ed.forEach(e => put(e.g, { o: 0 })); gq.sg.forEach(e => put(e, { o: 0 }));
+    Q.mem.forEach((ms, i) => { const t0 = tb + .2 + i * .55; gq.paint(i, aBcol(ms[0])); show(gq.sg[i], t0, .4); ms.forEach(q => gr.mark(q, COL.chalk, t0, t0 + .7)); });
+    gq.ed.forEach((e, k) => { show(e.g, te + k * .3, .3); gq.hot(k, te + k * .3, te + k * .3 + .8); });
+    text(p, 'autómata cociente', 1110, 226, tb, { size: 24, fill: HUE.act, anchor: 'end', weight: 600 });
+    const eq = aDiff(aTot(Q), aL) == null;
+    aTx(p, eq ? 'número par de a y número par de b:  el de la figura 16.7b' : 'no coincide con la figura 16.7b', 1200, 660, ts, { size: 24, font: UI, fill: eq ? HUE.yes : HUE.no, anchor: 'middle', weight: 600 });
+    aRow(p, [['Proposición 16.9', COL.chalk, UI], [':   la partición final es la más fina para la cual el cociente es reversible', COL.chalk, UI]], 100, 730, tp, { size: 24, weight: 600 });
+    aRow(p, [['Teorema 16.10', HUE.act, UI], [':   el autómata devuelto acepta el menor lenguaje reversible que contiene la muestra S', COL.chalk, UI]], 100, 782, tt, { size: 24, weight: 600 });
+    aRow(p, [['costo:   ', COL.dim, UI], ['O(n α(n))', COL.chalk, MATH, 28], [',   casi lineal;  n = suma de los largos de las cadenas de S', COL.dim, UI]], 100, 834, tc, { size: 24 });
+  }],
+
+  ['thm', 'Por qué identifica', (m) => {
+    const p = panel(0), tsl = m('sl'), t6 = m('six'), tn = m('N'), ta = m('after'), tt = m('t'), xN = aTX + aNch * aTW;
+    aNote(p, 'la presentación del comienzo · muestra característica calculada en la página, con la construcción de la proposición 16.8');
+    aTitle(p, 'Por qué el algoritmo identifica en el límite');
+    const tape = aTape(p, aT1, 200, null, null);
+    aRow(p, [['Proposición 16.8', COL.chalk, UI], [':   todo lenguaje reversible L tiene una muestra característica finita  ', COL.chalk, UI], ['S_{L}', HUE.blk, MATH, 30]], 100, 420, tsl, { size: 24, weight: 600 });
+    aRow(p, [['un lenguaje reversible que contiene  ', COL.dim, UI], ['S_{L}', HUE.blk, MATH, 28], ['  contiene a L', COL.dim, UI]], 100, 464, tsl + 5, { size: 24 });
+    aTx(p, `S_{L}  =  { ${aCHAR.map(aEps).join(',  ')} }`, 100, 540, t6, { size: 32, fill: HUE.blk, weight: 600 });
+    aTx(p, `${aCHAR.length} cadenas`, 760, 538, t6 + .6, { size: 24, font: UI, fill: COL.dim });
+    aCHAR.forEach((x, i) => { const k = aT1.findIndex(r => r.x === x); tw(tape.box[k], { c_stroke: HUE.blk, 'a_stroke-width': 5 }, t6 + .8 + i * .25, .3, out); });
+    const gl = G(p, { o: 0 }); mk('path', { d: `M${xN} 180V326`, stroke: HUE.act, 'stroke-width': 4, 'stroke-linecap': 'round', fill: 'none' }, gl); show(gl, tn + 5);
+    aTx(p, `N = ${aNch}:  ya apareció toda S_{L}`, xN, 362, tn + 5.4, { size: 24, font: UI, fill: HUE.act, anchor: 'middle', weight: 600 });
+    aT1.forEach((r, k) => { if (k + 1 >= aNch && r.dif == null) tw(tape.tag[k], { c_fill: HUE.yes }, ta + .4 + (k + 1 - aNch) * .3, .3); });
+    aRow(p, [[`desde la ronda ${aN1}`, HUE.yes, UI], [':   el menor lenguaje reversible que contiene lo visto es L;  la hipótesis no cambia más', COL.chalk, UI]], 100, 620, ta, { size: 24, weight: 600 });
+    aRow(p, [['Teorema 16.11', HUE.act, UI], [':   si L es un lenguaje reversible, el algoritmo identifica L en el límite', COL.chalk, UI]], 100, 740, tt, { size: 26, weight: 600 });
+    aTx(p, 'a partir de una presentación positiva', 100, 782, tt + 5, { size: 26, font: UI, weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Identificar en el límite:  tras un número finito de ejemplos, la hipótesis es el objetivo y no cambia más.', 'w1'], ['Con ejemplos solo positivos, los autómatas deterministas no son identificables en el límite.', 'w2'],
+      ['Reversible:  el autómata y su reverso son deterministas. Esa subclase sí se identifica.', 'w3'], ['Árbol de prefijos y fusiones:  sale el menor lenguaje reversible que contiene la muestra.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 26, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['El marco de identificación en el límite fija una cota para el número de ejemplos que se pueden usar.'], ans: ['f'], why: 'No acota el número de ejemplos ni el costo del algoritmo.' },
+      { parts: ['Los autómatas deterministas son identificables en el límite a partir de ejemplos positivos.'], ans: ['f'], why: 'El teorema 16.6 dice lo contrario.' },
+      { parts: ['Un autómata es reversible si él y su reverso son deterministas.'], ans: ['v'], why: 'Es la definición 16.7.' },
+      { parts: ['Un autómata reversible puede tener varios estados finales.'], ans: ['f'], why: 'Tiene un único estado final: es una consecuencia de la definición.' },
+      { parts: ['El algoritmo devuelve un autómata cuyo lenguaje es el menor lenguaje reversible que contiene la muestra.'], ans: ['v'], why: 'Es el teorema 16.10.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-pares', prompt: ['El algoritmo acaba de fusionar dos bloques. ¿Qué pares de estados agrega a su lista?'],
+    build: choice([['todos los pares de estados que todavía no comparten bloque'], ['los pares de estados que aceptan las mismas cadenas'], ['los sucesores y los predecesores de los dos bloques, símbolo por símbolo'], ['ninguno: cada fusión es independiente de las demás']], 2,
+      'Son las líneas 10 a 13 de la figura 16.6: si los dos bloques tienen sucesor (o predecesor) con un símbolo, ese par va a la lista.',
+      ['Así terminaría todo en un solo bloque. Solo se agregan pares que una fusión obliga a unir.', 'El algoritmo no compara lenguajes: solo mira las transiciones de los dos bloques fusionados.', null, 'Una fusión puede dejar dos transiciones con el mismo símbolo desde un bloque, o hacia él.']),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

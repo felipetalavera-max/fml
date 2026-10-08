@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Validación cruzada, regularización y pérdidas convexas</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 8, title: 'Validación cruzada, regularización y pérdidas convexas', minutes: 6, language: 'es', next: '../ch09/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 7) ---------- */
+// rosa: muestra o pliegue de validación · violeta: término de complejidad · ámbar: lo elegido · amarillo, rosa y violeta: las tres pérdidas sustitutas
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, val: COL.rat, pen: COL.real, hin: COL.int, exp: COL.rat, log: COL.real };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R_{D}(h_{S})'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    // la α de la fuente de interfaz se confunde con una «a»: va siempre en la fuente matemática
+    (k ? s.slice(2, -1) : s).split(/(α)/).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(q === 'α' && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill]) => { xs.push(x); const e = aTx(p, str, x, y, t0, { ...opts, fill: fill || COL.chalk }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF3 = v => v.toFixed(3), aF2 = v => v.toFixed(2);
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;                                       // etiqueta +1 = salmón, etiqueta −1 = azul
+const aSq = (p, x, y, fill, t0, o = .85) => { const e = put(mk('rect', { x, y: y - 18, width: 20, height: 20, fill, 'fill-opacity': o }, p), { o: 0 }); show(e, t0); return e; };
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aSum = l => l.reduce((s, v) => s + v, 0);
+const aR6 = v => Math.round(v * 1e6) / 1e6;
+const aArg = l => l.indexOf(Math.min(...l));                                       // posición del mínimo (el primero si hay empate)
+const aBinom = (n, q) => { const o = []; let lc = 0; for (let k = 0; k <= n; k++) { o.push(Math.exp(lc + k * Math.log(q) + (n - k) * Math.log(1 - q))); lc += Math.log(n - k) - Math.log(k + 1); } return o; };
+// El ejemplo del cap. 7: x uniforme en [0, 1); la etiqueta más probable es 1 en dos tramos (en celdas de 1/32) y se invierte con probabilidad aNu.
+const aC = 32, aPos = [[1, 8], [12, 22]], aNu = .1, aM = 100, aK = 8, aKs = Array.from({ length: aK }, (_, i) => i + 1);
+const aBay = Array.from({ length: aC }, (_, i) => aPos.some(([a, b]) => i >= a && i < b) ? 1 : 0);     // clasificador de Bayes, celda por celda
+const aBins = k => 2 ** (k - 1);                                                   // H_k: funciones constantes en 2^(k−1) tramos iguales (anidados)
+const aDraw = (seed, m) => { const r = aRng(seed); return Array.from({ length: m }, () => { const x = r(), y = aBay[Math.floor(x * aC)]; return [x, r() < aNu ? 1 - y : y]; }); };
+const aAt = (h, x) => h[Math.min(h.length - 1, Math.floor(x * h.length))];
+const aRisk = h => { let s = 0; for (let c = 0; c < 128; c++) { const x = (c + .5) / 128; s += (aAt(h, x) === aAt(aBay, x) ? aNu : 1 - aNu) / 128; } return s; };   // error de generalización exacto
+const aErm = (smp, k) => { const N = aBins(k), v = Array(N).fill(0); smp.forEach(([x, y]) => v[Math.floor(x * N)] += y ? 1 : -1); return v.map(t => t > 0 ? 1 : 0); };   // ERM en H_k: voto por mayoría en cada tramo
+const aEmp = (smp, h) => smp.filter(([x, y]) => aAt(h, x) !== y).length / smp.length;
+const aRad = (m, k) => { const N = aBins(k), pmf = N > 1 ? aBinom(m, 1 / N) : null; let s = 0, g = 0; for (let n = 1; n <= m; n++) { g = n === 1 ? 1 : n % 2 ? g * n / (n - 1) : g; s += pmf ? pmf[n] * g : 0; } return (pmf ? N * s : g) / m; };   // ℜ_m(H_k) exacta, x uniforme
+const aLogT = (m, k) => Math.sqrt(Math.log(k) / m);
+const aS = aDraw(3, aM);                                                           // la misma muestra del cap. 7, en el orden en que se extrajo
+// §4.4 — una muestra de validación apartada: S1 = los primeros (1 − α)m puntos, S2 = los últimos αm.
+const aAl = .2, aN1 = Math.round((1 - aAl) * aM), aS1 = aS.slice(0, aN1), aS2 = aS.slice(aN1);
+const aHo = aKs.map(k => { const h = aErm(aS1, k); return { k, h, tr: aEmp(aS1, h), va: aEmp(aS2, h), R: aR6(aRisk(h)) }; });
+const aKcv = aArg(aHo.map(o => o.va)) + 1, aKtr = aArg(aHo.map(o => o.tr)) + 1;    // el k que elige la validación y el que elegiría el error de entrenamiento
+const aKsrm = aArg(aHo.map(o => o.tr + aRad(aN1, o.k) + aLogT(aN1, o.k))) + 1;     // SRM entrenado con S1
+const aRhs = (al, m, k, d) => 2 * Math.sqrt(Math.log(k) / (al * m)) + 2 * Math.sqrt(Math.log(4 / d) / (2 * al * m));   // lado derecho del teorema 4.4
+const aDl = .05, aMb = 1000, aKm = Math.max(aKcv, aKsrm);
+const aQ = (() => { const s = aDraw(8, aM), s1 = s.slice(0, aN1), s2 = s.slice(aN1); return [3, 5, 8].map(k => { const h = aErm(s1, k); return { k, tr: aEmp(s1, h), va: aEmp(s2, h) }; }); })(), aQr = aArg(aQ.map(o => o.va));   // comprobación 1: otra muestra
+// §4.5 — n pliegues: bloques consecutivos en el orden de extracción (la muestra es i.i.d., así que es una partición al azar).
+const aFold = (smp, n) => Array.from({ length: n }, (_, i) => { const a = Math.round(i * smp.length / n), b = Math.round((i + 1) * smp.length / n); return [smp.filter((_, j) => j < a || j >= b), smp.slice(a, b)]; });
+const aNf = 5, aF5 = aFold(aS, aNf);
+const aCv = aKs.map(k => { const hs = aF5.map(([tr]) => aErm(tr, k)), es = hs.map((h, i) => aEmp(aF5[i][1], h)); return { k, hs, es, cv: aR6(aSum(es) / aNf) }; });
+const aK0 = aArg(aCv.map(o => o.cv)) + 1, aR0 = aR6(aRisk(aErm(aS, aK0)));         // θ0 y el error de la hipótesis entrenada con toda la muestra
+// §4.6 — regularización: H = constantes en 128 celdas, ℛ(h) = número de saltos de h. Mínimo exacto de R̂_S(h) + λℛ(h) por programación dinámica.
+const aReg = (smp, lam) => {
+  const N = 128, m = smp.length, c = Array.from({ length: N }, () => [0, 0]); smp.forEach(([x, y]) => c[Math.floor(x * N)][1 - y] += 1 / m);
+  let d = [c[0][0], c[0][1]]; const bk = [];
+  for (let i = 1; i < N; i++) { const n = [0, 0], b = [0, 0]; for (let v = 0; v < 2; v++) { const s = d[v], j = d[1 - v] + lam; b[v] = j < s - 1e-12 ? 1 - v : v; n[v] = Math.min(s, j) + c[i][v]; } bk.push(b); d = n; }
+  let v = d[1] < d[0] - 1e-12 ? 1 : 0; const h = Array(N);
+  for (let i = N - 1; i >= 0; i--) { h[i] = v; if (i) v = bk[i - 1][v]; }
+  return h;
+};
+const aJ = h => h.filter((v, i) => i && v !== h[i - 1]).length;
+const aLs = [0, .005, .01, .02, .05, .1, .3];
+const aRg = aLs.map(l => { const h = aReg(aS, l), J = aJ(h), emp = aEmp(aS, h); return { l, h, J, emp, pen: l * J, R: aR6(aRisk(h)), cv: aR6(aSum(aF5.map(([tr, te]) => aEmp(te, aReg(tr, l)))) / aNf) }; });
+const aLcv = aArg(aRg.map(o => o.cv));                                             // el λ que elige la validación cruzada de 5 pliegues
+// §4.7 — pérdidas sustitutas Φ(u) y constantes (s, c) del teorema 4.7.
+const aPhi = [['bisagra', u => Math.max(0, 1 + u), 1, .5, '1/2'], ['exponencial', u => Math.exp(u), 2, Math.SQRT1_2, '1/√2'], ['logística', u => Math.log2(1 + Math.exp(u)), 2, Math.SQRT1_2, '1/√2']];
+const aBd = (c, s, e) => 2 * c * e ** (1 / s);                                      // 2c · (exceso de pérdida Φ)^(1/s)
+/* aMATH:end */
+
+// Hipótesis constante por tramos como franja de celdas de color.
+const aStrip = (p, h, x, y, w, ht = 30) => { const g = G(p), cw = w / h.length; h.forEach((v, i) => mk('rect', { x: (x + i * cw).toFixed(2), y, width: (cw + .5).toFixed(2), height: ht, fill: aHue(v), 'fill-opacity': .82 }, g)); return g; };
+// Barra vertical que crece desde la base.
+const aUp = (p, x, base, w, h, t0, fill, o = .85) => { const e = mk('rect', { x, y: base, width: w, height: 0, fill, 'fill-opacity': o }, p); put(e, {}); tw(e, { a_y: base - h, a_height: h }, t0, .6, out); return e; };
+const aTr = k => aBins(k) === 1 ? '1 tramo' : aBins(k) + ' tramos';
+const aMs = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');                       // 10000 → «10 000»
+// La muestra como fila de puntos, en el orden de extracción; fx(j) da la x del punto j. Devuelve los puntos (se mueven con tw sobre x).
+const aDots = (p, smp, fx, y, t0) => smp.map(([, v], j) => { const e = put(mk('circle', { r: 5, fill: aHue(v) }, p), { x: fx(j), y, o: 0 }); show(e, t0 + j * .006, .3); return e; });
+// Posiciones de la fila partida en n bloques separados por un hueco.
+const aXs = (n, gap, x0 = 110) => j => x0 + j * 13 + Math.floor(j * n / aM) * gap;
+// Barra horizontal fina (subrayado de un bloque de la fila).
+const aBar = (p, x1, x2, y, fill, t0, h = 7) => { const e = put(mk('rect', { x: x1, y, width: x2 - x1, height: h, fill }, p), { o: t0 == null ? 1 : 0 }); if (t0 != null) show(e, t0, .4); return e; };
+// Cambia el contenido de un texto simple (creado con T o text) en el instante t.
+const aSet = (e, str, t) => prog(() => { e.textContent = str; }, t, 0);
+// Curva y = f(u) como trazo, recortada a f ≤ top.
+const aCurve = (f, u0, u1, UX, UY, top) => { let d = ''; for (let i = 0, n = 240; i <= n; i++) { const u = u0 + (u1 - u0) * i / n, v = f(u); if (v <= top) d += (d ? 'L' : 'M') + UX(u).toFixed(1) + ' ' + UY(v).toFixed(1); } return d; };
+const aStep = (u0, u1, UX, UY) => `M${UX(u0)} ${UY(1)}H${UX(0)}V${UY(0)}H${UX(u1)}`;     // la pérdida 0-1 como función de y·h(x)
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 8', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Validación cruzada, regularización', { x: 800, y: 420, size: 64, weight: 600, anchor: 'middle' });
+    T(g, 'y pérdidas convexas', { x: 800, y: 500, size: 48, weight: 600, anchor: 'middle', fill: COL.task });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'SRM suele ser intratable: las alternativas que se usan en la práctica.', 800, 620, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['cv', 'Apartar una muestra de validación', (m) => {
+    const p = panel(0), ts = m('split'), te = m('erm'), tv = m('val'), tp = m('pick'), tr = m('real'), Y = 240, x0 = aXs(1, 0), BX = k => 190 + (k - 1) * 92, base = 790, sc = 520, RX = 1000;
+    aNote(p, 'ejemplo del cap. 7: H_{k} = constantes en 2^{k−1} tramos · datos ilustrativos · errores calculados en la página');
+    aTitle(p, 'Validación cruzada: apartar parte de la muestra para elegir k');
+    const cap = text(p, `muestra S · m = ${aM} puntos, en el orden en que se extrajeron`, 110, 196, .4, { size: 22, fill: COL.dim });
+    const ds = aDots(p, aS, x0, Y, .4);
+    ds.forEach((e, j) => { if (j >= aN1) tw(e, { x: x0(j) + 50 }, ts, .8); });
+    hide(cap, ts, .4);
+    aBar(p, x0(0) - 8, x0(aN1 - 1) + 8, Y + 20, COL.chalk, ts + .7); aBar(p, x0(aN1) + 42, x0(aM - 1) + 58, Y + 20, HUE.val, ts + .7);
+    aTx(p, `S_{1} · entrenamiento · (1 − α)m = ${aN1}`, 110, Y + 64, ts + 1, { size: 24, weight: 600, font: UI });
+    aTx(p, `S_{2} · validación · αm = ${aM - aN1}`, x0(aM - 1) + 58, Y + 64, ts + 4, { size: 24, fill: HUE.val, weight: 600, font: UI, anchor: 'end' });
+    // gráfico: por cada k, el error de la solución de ERM (entrenada con S1) en S1 y en S2
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${BX(1) - 60} ${base - .6 * sc}V${base}H${BX(aK) + 60}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    [0, .2, .4, .6].forEach(v => { T(ax, v ? v.toFixed(1) : '0', { x: BX(1) - 72, y: base - v * sc + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); mk('path', { d: `M${BX(1) - 66} ${base - v * sc}h6`, stroke: COL.dim, 'stroke-width': 2 }, ax); });
+    T(ax, 'k', { x: BX(1) - 72, y: base + 34, size: 24, anchor: 'end', font: MATH });
+    show(ax, te - .4);
+    const kl = aHo.map(o => text(p, String(o.k), BX(o.k), base + 34, te - .4, { size: 24, anchor: 'middle', font: MATH }));
+    aHo.forEach(o => {
+      aUp(p, BX(o.k) - 30, base, 28, o.tr * sc, te + 2.6 + (o.k - 1) * .35, COL.chalk, .8);
+      aUp(p, BX(o.k) + 2, base, 28, o.va * sc, tv + (o.k - 1) * .3, HUE.val, .9);
+      text(p, aF2(o.va), BX(o.k) + 20, base - o.va * sc - 10, tv + .5 + (o.k - 1) * .3, { size: 22, fill: HUE.val, anchor: 'middle' });
+    });
+    aSq(p, RX, 430, COL.chalk, te, .8); aTx(p, 'error en S_{1} de la solución de ERM en H_{k}', RX + 32, 428, te, { size: 24, font: UI });
+    aSq(p, RX, 472, HUE.val, tv, .9); aTx(p, 'error de la misma hipótesis en S_{2}', RX + 32, 470, tv, { size: 24, fill: HUE.val, font: UI });
+    const top = base - Math.max(aHo[aKcv - 1].va, aHo[aKcv - 1].tr) * sc;
+    show(put(mk('rect', { x: BX(aKcv) - 44, y: top - 44, width: 92, height: base - top + 52, fill: 'none', stroke: COL.task, 'stroke-width': 4 }, p), { o: 0 }), tp + 3.6, .4);
+    tw(kl[aKcv - 1], { c_fill: COL.task }, tp + 3.6, .3);
+    const f = G(p);
+    aTx(f, 'h^{CV}_{S}  =  argmin R̂_{S₂}(h)', RX, 570, tp, { size: 34, weight: 600 }); text(f, '(4.7)', RX + 470, 568, tp, { size: 22, fill: COL.dim });
+    aTx(f, 'h ∈ { h^{ERM}_{S₁,k} : k ≥ 1 }', RX + 130, 622, tp + .6, { size: 28 });
+    hide(f, tr - .3, .3);
+    aTx(p, `R(h^{CV}_{S}) = ${aF3(aHo[aKcv - 1].R)}`, RX, 570, tr, { size: 34, fill: COL.task, weight: 600 });
+    aTx(p, `con k = ${aKcv}, el de menor error en S_{2}`, RX, 614, tr + .4, { size: 24, font: UI });
+    aTx(p, `eligiendo por el error en S_{1}: k = ${aKtr}, R = ${aF3(aHo[aKtr - 1].R)}`, RX, 680, tr + 3, { size: 24, fill: COL.dim, font: UI });
+  }],
+
+  ['garantia', 'La garantía de la validación cruzada', (m) => {
+    const p = panel(0), tf = m('fix'), tpr = m('prop'), tu = m('union'), tt = m('thm'), tsm = m('small'), tb = m('big'), ta = tt + 8, BX0 = 100, BW = 1000, BY = 440, cut = a => BX0 + (1 - a) * BW;
+    aNote(p, `valores de la cota: ilustrativos, con m = ${aMs(aMb)}, max k = ${aKm} y δ = ${aDl}`);
+    aTitle(p, 'La garantía de la validación cruzada');
+    // la muestra como barra: S1 | S2, con el corte en (1 − α)m
+    const r1 = put(mk('rect', { x: BX0, y: BY, width: cut(aAl) - BX0, height: 44, fill: COL.chalk, 'fill-opacity': .28 }, p), { o: 0 }), r2 = put(mk('rect', { x: cut(aAl), y: BY, width: BX0 + BW - cut(aAl), height: 44, fill: HUE.val, 'fill-opacity': .85 }, p), { o: 0 });
+    show(r1, .3); show(r2, .3);
+    aTx(p, 'S_{1} · entrenamiento', BX0 + 16, BY + 31, .4, { size: 24, font: UI, weight: 600 });
+    aTx(p, 'S_{2} · validación', BX0 + BW + 24, BY + 14, .4, { size: 24, fill: HUE.val, font: UI, weight: 600 });
+    const la = text(p, `α = ${aF2(aAl)}`, BX0 + BW + 24, BY + 48, .4, { size: 30, fill: HUE.val, weight: 700, font: MATH });
+    // la idea de la proposición 4.3
+    const gF = G(p);
+    show(put(aStrip(gF, aHo[aKcv - 1].h, BX0, BY + 66, cut(aAl) - BX0, 26), { o: 0 }), tf, .6);
+    aTx(gF, 'h^{ERM}_{S₁,k}: queda fija una vez vista S_{1}', BX0, BY + 134, tf + .6, { size: 26, font: UI });
+    aTx(gF, 'S_{2} es independiente de ella: su error en S_{2} es un promedio de αm puntos nuevos (Hoeffding)', BX0, BY + 180, tf + 5, { size: 26, font: UI });
+    hide(gF, tt, .4);
+    const gP = G(p);
+    text(gP, 'Proposición 4.3', 100, 204, tpr, { size: 26, fill: COL.task, weight: 600 }); aTx(gP, 'para todo α > 0 y todo m ≥ 1', 320, 204, tpr + .4, { size: 22, fill: COL.dim, font: UI });
+    const f = aRow(gP, [['P[ sup_{k≥1} | R(h^{ERM}_{S₁,k}) − R̂_{S₂}(h^{ERM}_{S₁,k}) | > ε + '], ['√[ log k / αm ]'], [' ]  ≤  4 exp( −2αmε^{2} )']], 100, 262, tpr + .8, { size: 28 });
+    tw(f[1], { c_fill: COL.task }, tu, .4);
+    text(gP, 'el precio de mirar todos los k a la vez', f.xs[1] - 80, 304, tu + .6, { size: 22, fill: COL.task, weight: 600 });
+    hide(gP, tt, .4);
+    text(p, 'Teorema 4.4 · validación cruzada frente a SRM', 100, 204, tt + .5, { size: 26, fill: COL.task, weight: 600 }); text(p, 'con probabilidad ≥ 1 − δ', 720, 204, tt + .9, { size: 22, fill: COL.dim });
+    aTx(p, 'R(h^{CV}_{S}) − R(h^{SRM}_{S₁})  ≤  2√[ log max( k(h^{CV}_{S}), k(h^{SRM}_{S₁}) ) / αm ]  +  2√[ log(4/δ) / 2αm ]', 100, 262, tt + 1, { size: 28 });
+    aTx(p, 'h^{SRM}_{S₁}: SRM entrenado con S_{1}  ·  k(h): el menor índice de un conjunto que contiene a h', 100, 306, tt + 4, { size: 22, fill: COL.dim, font: UI });
+    // el dial de α: se mueve el corte y cambian los puntos de entrenamiento y el lado derecho de la cota
+    aTx(p, 'puntos para entrenar, (1 − α)m:', BX0, BY + 124, ta, { size: 26, font: UI }); const n1 = text(p, '', 560, BY + 124, ta, { size: 28, weight: 700 });
+    text(p, 'lado derecho de la cota:', BX0, BY + 176, ta, { size: 26 }); const rh = text(p, '', 560, BY + 176, ta, { size: 28, weight: 700, fill: HUE.pen });
+    const rb = put(mk('rect', { x: 680, y: BY + 152, width: 0, height: 28, fill: HUE.pen, 'fill-opacity': .85 }, p), { o: 0 }); show(rb, ta);
+    const one = put(mk('path', { d: `M${680 + 600} ${BY + 142}v48`, stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '6 6' }, p), { o: 0 }); show(one, ta); text(p, '1', 680 + 600, BY + 216, ta, { size: 22, fill: COL.dim, anchor: 'middle', font: MATH });
+    const setAl = a => { const c = cut(a), v = aRhs(a, aMb, aKm, aDl); r1.setAttribute('width', c - BX0); r2.setAttribute('x', c); r2.setAttribute('width', BX0 + BW - c); la.textContent = `α = ${aF2(a)}`; n1.textContent = aMs(Math.round((1 - a) * aMb)); rh.textContent = aF3(v); rb.setAttribute('width', Math.min(1.45, v) * 600); };
+    setAl(aAl);
+    prog(q => setAl(aAl + (.02 - aAl) * q), tsm + .3, 3); prog(q => setAl(.02 + (.5 - .02) * q), tb + .3, 3);
+    aTx(p, 'α pequeño: la cota supera 1 y deja de informar', BX0, BY + 280, tsm + 2.6, { size: 26, fill: COL.task, weight: 600, font: UI });
+    aTx(p, 'α grande: quedan pocos puntos para entrenar', BX0, BY + 324, tb + 2.6, { size: 26, fill: COL.task, weight: 600, font: UI });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0);
+    T(p, `Otra muestra del mismo ejemplo: ${aN1} puntos para entrenar (S₁) y ${aM - aN1} apartados (S₂)`, { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'Tres conjuntos, con el error de su solución de ERM en cada parte.', { x: 100, y: 184, size: 26 });
+    S.q1 = aQ.map((o, i) => {
+      const x = 100 + i * 480, g = G(p);
+      mk('rect', { x, y: 240, width: 420, height: 380, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+      T(g, 'ABC'[i], { x: x + 24, y: 286, size: 32, weight: 700, fill: HUE.hyp });
+      aTx(g, `H_{${o.k}}`, x + 210, 350, null, { size: 60, anchor: 'middle', weight: 600 }); T(g, aTr(o.k), { x: x + 210, y: 396, size: 24, anchor: 'middle', fill: COL.dim });
+      aTx(g, 'error en S_{1}', x + 40, 490, null, { size: 26, font: UI }); T(g, aF3(o.tr), { x: x + 380, y: 490, size: 28, anchor: 'end', weight: 600 });
+      aTx(g, 'error en S_{2}', x + 40, 550, null, { size: 26, fill: HUE.val, font: UI }); T(g, aF3(o.va), { x: x + 380, y: 550, size: 28, anchor: 'end', weight: 600, fill: HUE.val });
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-cv', prompt: ['¿Qué conjunto elige la validación cruzada? Elegir la tarjeta.'],
+    build: pickEls(S.q1.map((el, i) => ({ el, box: [100 + i * 480, 240, 420, 380], label: 'tarjeta ' + 'ABC'[i] })), aQr,
+      `Elige el menor error en S₂, la parte apartada: ${aF3(aQ[aQr].va)}.`,
+      i => i > aQr ? 'Tiene el menor error en S₁, pero con S₁ se entrenó: ese error engaña.' : `Su error en S₂ es ${aF3(aQ[i].va)}: hay una tarjeta con menos.`),
+  }], done) }],
+
+  ['pliegues', 'Validación cruzada de n pliegues', (m) => {
+    const p = panel(0), tpa = m('part'), tr = m('rot'), ta = m('avg'), tl = m('all'), tf = m('full'), Y = 240, x0 = aXs(1, 0), x5 = aXs(aNf, 24), o5 = aCv[aK0 - 1], step = (ta - tr - .4) / aNf, nf = aM / aNf;
+    const BX = k => 190 + (k - 1) * 92, base = 800, sc = 380, RX = 1000;
+    aNote(p, 'el mismo ejemplo · pliegues: bloques en el orden de extracción · errores calculados en la página');
+    aTitle(p, 'Validación cruzada de n pliegues (n-fold)');
+    const ds = aDots(p, aS, x0, Y, .4);
+    ds.forEach((e, j) => tw(e, { x: x5(j) }, tpa, .8));
+    text(p, `n = ${aNf} pliegues de m/n = ${nf} puntos`, 110, 196, tpa + .6, { size: 24, weight: 600 });
+    const gB = G(p), bars = aF5.map((_, i) => aBar(gB, x5(i * nf) - 7, x5(i * nf + nf - 1) + 7, Y + 20, COL.dim, tpa + .8));
+    // por turnos: un pliegue se aparta, se entrena con los demás (franja) y se anota el error en el pliegue apartado
+    const sg = G(p);
+    aTx(sg, `h_{i}: ERM en H_{${aK0}} sin el pliegue i`, 110, Y + 132, tr, { size: 24, font: UI });
+    aF5.forEach((_, i) => {
+      const t = tr + .2 + i * step, s = put(aStrip(sg, o5.hs[i], 560, Y + 108, 880, 30), { o: 0 });
+      tw(bars[i], { c_fill: HUE.val }, t, .3); tw(bars[i], { c_fill: COL.dim }, i < aNf - 1 ? t + step : tl, .3);
+      show(s, t, .3); if (i < aNf - 1) hide(s, t + step, .3);
+      text(gB, aF2(o5.es[i]), (x5(i * nf) + x5(i * nf + nf - 1)) / 2, Y + 64, t + .5, { size: 26, fill: HUE.val, anchor: 'middle', weight: 600 });
+    });
+    hide(sg, tl, .4);
+    aTx(p, 'R̂_{CV}(θ)  =  (1/n) ∑_{i=1}^{n} [ error de h_{i} en el pliegue i ]', 110, 466, ta, { size: 30, weight: 600 });
+    text(p, 'θ: parámetros libres · aquí, k', 1000, 464, ta + 1.6, { size: 22, fill: COL.dim });
+    const nl = text(p, `=  ( ${o5.es.map(aF2).join(' + ')} ) / ${aNf}  =  ${aF3(o5.cv)}`, 256, 512, ta + 2, { size: 28, font: MATH }); hide(nl, tl, .4);
+    // el error de validación cruzada para cada k
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${BX(1) - 60} ${base}H${BX(aK) + 60}`, stroke: COL.dim, 'stroke-width': 2 }, ax); T(ax, 'k', { x: BX(1) - 72, y: base + 34, size: 24, anchor: 'end', font: MATH });
+    show(ax, tl);
+    const kl = aCv.map(o => { aUp(p, BX(o.k) - 22, base, 44, o.cv * sc, tl + .3 + (o.k - 1) * .25, HUE.val, .9); text(p, aF2(o.cv), BX(o.k), base - o.cv * sc - 10, tl + .8 + (o.k - 1) * .25, { size: 22, anchor: 'middle' }); return text(p, String(o.k), BX(o.k), base + 34, tl, { size: 24, anchor: 'middle', font: MATH }); });
+    aSq(p, RX, 610, HUE.val, tl + .5, .9); aTx(p, 'R̂_{CV}(θ)', RX + 32, 608, tl + .5, { size: 26 }); text(p, 'para cada valor de k', RX + 150, 608, tl + .5, { size: 24 });
+    const top = base - aCv[aK0 - 1].cv * sc;
+    show(put(mk('rect', { x: BX(aK0) - 34, y: top - 44, width: 68, height: base - top + 52, fill: 'none', stroke: COL.task, 'stroke-width': 4 }, p), { o: 0 }), tf, .4);
+    tw(kl[aK0 - 1], { c_fill: COL.task }, tf, .3);
+    aTx(p, `θ_{0}: k = ${aK0}, el de menor error`, RX, 668, tf, { size: 28, fill: COL.task, weight: 600, font: UI });
+    hide(gB, tf + 2.6, .4); ds.forEach((e, j) => tw(e, { x: x0(j) + 48 }, tf + 2.6, .8));
+    aTx(p, `con θ_{0}, entrenar sobre los ${aM} puntos`, RX, 730, tf + 2.8, { size: 26, font: UI });
+    aTx(p, `R(h) = ${aF3(aR0)}`, RX, 780, tf + 4.2, { size: 32, weight: 600 });
+  }],
+
+  ['ene', '¿Cuántos pliegues?', (m, D) => {
+    const p = panel(0), tS = m('small'), tB = m('big'), tT = m('typ'), tL = m('loo'), Y = 240, RX = 900;
+    const CX = t => 150 + t * 5.6, CY = e => 800 - e * 480, cf = t => .12 + .9 / Math.sqrt(t);
+    const ST = [[5, 24, .4], [2, 60, tS], [10, 12, tB], [aM, 0, tL]].map(([n, gap, t]) => ({ n, t, fx: n === aM ? j => 158 + j * 13 : aXs(n, gap), tr: aM - aM / n }));
+    aNote(p, 'curva: esquema de la figura 4.5b, sin escala');
+    aTitle(p, '¿Cuántos pliegues? La elección de n');
+    const ds = aDots(p, aS, ST[0].fx, Y, .4);
+    // el esquema: el error baja al crecer la muestra de entrenamiento; la marca está en m(1 − 1/n)
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${CX(0)} ${CY(.62)}V${CY(0)}H${CX(aM) + 30}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    mk('path', { d: `M${CX(aM)} ${CY(0)}v10`, stroke: COL.dim, 'stroke-width': 2 }, ax);
+    T(ax, 'm', { x: CX(aM), y: CY(0) + 36, size: 24, anchor: 'middle', font: MATH, fill: COL.dim }); T(ax, '0', { x: CX(0), y: CY(0) + 36, size: 22, anchor: 'middle', font: MATH, fill: COL.dim });
+    T(ax, 'puntos de entrenamiento', { x: CX(50), y: CY(0) + 36, size: 22, anchor: 'middle', fill: COL.dim }); T(ax, 'error', { x: CX(0) - 12, y: CY(.62) + 16, size: 22, fill: COL.dim, anchor: 'end' });
+    mk('path', { d: aCurve(cf, 3, aM, CX, CY, 9), fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, ax);
+    show(ax, .4);
+    const mkr = G(p, { x: CX(ST[0].tr), o: 0 });
+    mk('path', { d: `M0 ${CY(.5)}V${CY(0)}`, stroke: COL.task, 'stroke-width': 4 }, mkr);
+    const ml = T(mkr, '', { x: 0, y: CY(.5) - 14, size: 24, fill: COL.task, anchor: 'middle', weight: 600 });
+    show(mkr, .6);
+    let prev = null;
+    ST.forEach((s, i) => {
+      const t = s.t, g = G(p, { o: 0 }), b = G(p, { o: 0 }), sz = aM / s.n;
+      if (s.n < aM) for (let k = 0; k < s.n; k++) aBar(b, s.fx(k * sz) - 6, s.fx(k * sz + sz - 1) + 6, Y + 20, k ? COL.dim : HUE.val, null);
+      T(g, s.n === aM ? `n = m = ${aM}` : `n = ${s.n}`, { x: RX, y: 470, size: 44, fill: COL.task, weight: 700 });
+      T(g, `entrena con ${s.tr} · valida con ${sz}`, { x: RX, y: 530, size: 28 });
+      T(g, ['', 'más sesgo · menos varianza', 'menos sesgo · más varianza', 'dejar uno fuera (leave-one-out): m entrenamientos'][i], { x: RX, y: 582, size: 26, fill: i === 3 ? COL.chalk : HUE.pen, weight: 600 });
+      if (prev) { hide(prev.g, t, .3); hide(prev.b, t, .3); ds.forEach((e, j) => tw(e, { x: s.fx(j) }, t, .8)); tw(mkr, { x: CX(s.tr) }, t, .8); }
+      show(g, i ? t + .4 : .6, .4); show(b, i ? t + .7 : .8, .4);
+      aSet(ml, s.n === aM ? `m − 1 = ${s.tr}` : `m(1 − 1/n) = ${s.tr}`, i ? t + .4 : 0);
+      prev = { g, b };
+    });
+    text(p, 'en la práctica: n = 5 o n = 10', RX, 680, tT, { size: 28, weight: 600 });
+    // dejar uno fuera: el punto apartado recorre la muestra
+    const ring = put(mk('circle', { r: 10, fill: 'none', stroke: HUE.val, 'stroke-width': 4 }, p), { x: ST[3].fx(0), y: Y, o: 0 });
+    show(ring, tL + 1.2, .3); tw(ring, { x: ST[3].fx(aM - 1) }, tL + 1.6, Math.max(3, D - tL - 2), lin);
+  }],
+
+  ['regular', 'Algoritmos basados en regularización', (m) => {
+    const p = panel(0), tf = m('fam'), to = m('obj'), td = m('dial'), tz = m('zero'), tt = m('turn'), tx = m('max'), tc = m('cv');
+    const DX = 260, DY = 650, DR = 130, SX = 620, SW = 840, BX = i => 700 + i * 118, base = 760, sc = 520;
+    aNote(p, 'el mismo ejemplo · ℛ(h) = número de saltos de h (elección ilustrativa) · mínimo exacto, calculado en la página');
+    aTitle(p, 'Algoritmos basados en regularización');
+    hide(text(p, 'SRM (cap. 7): error empírico más una penalización por complejidad', 100, 204, .5, { size: 26, fill: COL.dim }), tf - .4, .3);
+    const gf = G(p);
+    aTx(gf, 'H = ⋃_{γ>0} H_{γ}', 100, 204, tf, { size: 34, weight: 600 });
+    aTx(gf, 'unión no numerable de conjuntos anidados · por ejemplo, funciones lineales con ‖w‖ ≤ γ', 400, 202, tf + 2.5, { size: 22, fill: COL.dim, font: UI });
+    const f = aRow(p, [['argmin_{h∈H}   R̂_{S}(h)  +  '], ['λ ℛ(h)', HUE.pen]], 100, 290, to, { size: 40, weight: 600 });
+    text(p, 'error empírico', f.xs[1] - 60, 330, to + 1, { size: 22, fill: COL.dim, anchor: 'end' });
+    text(p, 'término de regularización · λ > 0', f.xs[1], 330, to + 2.6, { size: 22, fill: HUE.pen, weight: 600 });
+    text(p, '(p. 73)', f.end + 30, 288, to, { size: 22, fill: COL.dim });
+    hide(gf, td - .4, .4);
+    // el dial de λ
+    const dg = G(p, { o: 0 });
+    mk('path', { d: `M${DX - DR} ${DY}A${DR} ${DR} 0 0 1 ${DX + DR} ${DY}`, fill: 'none', stroke: COL.dim, 'stroke-width': 4 }, dg);
+    aLs.forEach((l, i) => { const a = Math.PI - i * Math.PI / 6, c = Math.cos(a), s = -Math.sin(a); mk('path', { d: `M${DX + c * (DR - 10)} ${DY + s * (DR - 10)}L${DX + c * (DR + 10)} ${DY + s * (DR + 10)}`, stroke: COL.chalk, 'stroke-width': 3 }, dg); T(dg, String(l), { x: DX + c * (DR + 40), y: DY + s * (DR + 34) + 8, size: 22, anchor: 'middle', font: MATH }); });
+    mk('circle', { cx: DX, cy: DY, r: 12, fill: HUE.pen }, dg);
+    const nd = G(dg, { x: DX, y: DY, r: 0 }); mk('path', { d: `M0 0H${-(DR - 22)}`, stroke: HUE.pen, 'stroke-width': 7, 'stroke-linecap': 'round' }, nd);
+    show(dg, td, .5);
+    const lv = text(p, '', DX, DY + 62, td, { size: 34, fill: HUE.pen, weight: 700, anchor: 'middle' }), lj = text(p, '', DX, DY + 104, td, { size: 28, anchor: 'middle', font: MATH });
+    // las franjas: h_Bayes de referencia y la solución para el λ del dial
+    aTx(p, 'h_{Bayes}', SX - 16, 404, td, { size: 26, anchor: 'end', weight: 600 }); show(put(aStrip(p, aBay, SX, 380, SW, 28), { o: 0 }), td, .5);
+    aTx(p, 'solución con λ', SX - 16, 452, td + .4, { size: 24, anchor: 'end', font: UI });
+    const strips = aRg.map(o => put(aStrip(p, o.h, SX, 428, SW, 28), { o: 0 }));
+    // las barras: error empírico y λ·ℛ(h), apilados, para cada posición del dial
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${BX(0) - 60} ${base}H${BX(6) + 60}`, stroke: COL.dim, 'stroke-width': 2 }, ax);
+    T(ax, 'λ', { x: BX(0) - 72, y: base + 32, size: 24, anchor: 'end', font: MATH }); T(ax, 'R(h)', { x: BX(0) - 72, y: base + 68, size: 24, anchor: 'end', font: MATH, fill: COL.dim });
+    show(ax, td + .4);
+    aSq(p, SX, 512, COL.chalk, td + .6, .8); aTx(p, 'R̂_{S}(h)', SX + 30, 510, td + .6, { size: 24 });
+    aSq(p, SX + 170, 512, HUE.pen, td + .6, .9); aTx(p, 'λ ℛ(h)', SX + 200, 510, td + .6, { size: 24, fill: HUE.pen });
+    const seq = [[0, td + .6], [1, tt + .5], [2, tt + 1.9], [3, tt + 3.3], [4, tx + .3], [5, tx + 1.3], [6, tx + 2.3], [aLcv, tc + 4.4]];
+    const kl = [];
+    seq.forEach(([i, t], n) => {
+      const o = aRg[i];
+      tw(nd, { r: i * 30 }, t, .5); aSet(lv, `λ = ${o.l}`, t + .25); aSet(lj, `ℛ(h) = ${o.J} ${o.J === 1 ? 'salto' : 'saltos'}`, t + .25);
+      if (n) hide(strips[seq[n - 1][0]], t + .1, .3);
+      show(strips[i], t + .1, .3);
+      if (n < 7) {
+        aUp(p, BX(i) - 28, base, 56, o.emp * sc, t + .3, COL.chalk, .8); aUp(p, BX(i) - 28, base - o.emp * sc, 56, o.pen * sc, t + .5, HUE.pen, .9);
+        kl[i] = text(p, String(o.l), BX(i), base + 32, t + .3, { size: 24, anchor: 'middle', font: MATH }); text(p, aF3(o.R), BX(i), base + 68, t + .7, { size: 22, anchor: 'middle', fill: COL.dim });
+      }
+    });
+    const oc = aRg[aLcv], top = base - (oc.emp + oc.pen) * sc;
+    show(put(mk('rect', { x: BX(aLcv) - 46, y: top - 16, width: 92, height: base - top + 100, fill: 'none', stroke: COL.task, 'stroke-width': 4 }, p), { o: 0 }), tc + 4.8, .4);
+    text(p, `validación cruzada de ${aNf} pliegues: elige λ = ${oc.l}`, SX, 566, tc + 4.8, { size: 24, fill: COL.task, weight: 600 });
+  }],
+
+  ['convexa', 'Pérdidas sustitutas convexas', (m) => {
+    const p = panel(0), tg = m('sign'), ts = m('step'), tch = m('chord'), tsu = m('sur'), ta = m('above'), tk = [m('hinge'), m('exp'), m('log')];
+    const UX = u => 480 + u * 150, UY = v => 780 - v * 140, U0 = -2.4, U1 = 2.5, RX = 920, cols = [HUE.hin, HUE.exp, HUE.log];
+    aNote(p, 'curvas calculadas en la página con las Φ de la p. 77');
+    aTitle(p, 'Pérdidas sustitutas convexas');
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${UX(U0)} ${UY(0)}H${UX(U1)}M${UX(0)} ${UY(0)}V${UY(3.3)}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    [-2, -1, 0, 1, 2].forEach(u => { mk('path', { d: `M${UX(u)} ${UY(0)}v8`, stroke: COL.dim, 'stroke-width': 2 }, ax); T(ax, (u < 0 ? '−' : '') + Math.abs(u), { x: UX(u), y: UY(0) + 34, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+    [1, 2, 3].forEach(v => { mk('path', { d: `M${UX(0) - 6} ${UY(v)}h12`, stroke: COL.dim, 'stroke-width': 2 }, ax); T(ax, String(v), { x: UX(0) + 16, y: UY(v) + 8, size: 22, fill: COL.dim, font: MATH }); });
+    T(ax, 'y · h(x)', { x: UX(U1) + 4, y: UY(0) + 70, size: 26, anchor: 'end', font: MATH });
+    show(ax, .3);
+    text(p, 'falla', UX(-1.2), UY(0) + 70, tg + 5.5, { size: 22, fill: COL.dim, anchor: 'middle' }); text(p, 'acierta', UX(1), UY(0) + 70, tg + 5.5, { size: 22, fill: COL.dim, anchor: 'middle' });
+    const g1 = G(p);
+    aTx(g1, 'h : X → ℝ   ·   se clasifica por el signo de h(x)', RX, 220, tg, { size: 26, font: UI });
+    aTx(g1, 'acierta cuando  y · h(x) > 0', RX, 264, tg + 4.6, { size: 26, font: UI });
+    draw(path(p, aStep(U0, U1, UX, UY), { stroke: COL.chalk, 'stroke-width': 7, 'stroke-linejoin': 'miter' }, { d: 0 }), ts, 1.2);
+    text(p, 'pérdida 0-1', UX(U0) + 6, UY(1) - 18, ts + .6, { size: 24, weight: 600 });
+    // no es convexa: una cuerda entre dos puntos de la gráfica pasa por debajo de ella
+    const ch = G(p);
+    draw(path(ch, `M${UX(-1.6)} ${UY(1)}L${UX(1.6)} ${UY(0)}`, { stroke: COL.bad, 'stroke-width': 4 }, { d: 0 }), tch, .8);
+    [[-1.6, 1], [1.6, 0]].forEach(([u, v]) => show(put(mk('circle', { cx: UX(u), cy: UY(v), r: 8, fill: COL.bad }, ch), { o: 0 }), tch, .3));
+    text(g1, 'no es convexa: parte de la cuerda queda bajo la gráfica', RX, 340, tch + .4, { size: 24, fill: COL.bad, weight: 600 });
+    text(g1, 'minimizarla suele ser intratable', RX, 384, tch + 2, { size: 26 });
+    hide(ch, tsu, .4); hide(g1, tsu, .4);
+    text(p, 'Pérdida sustituta', RX, 220, tsu + .5, { size: 28, fill: COL.task, weight: 600 });
+    aTx(p, 'Φ convexa y no decreciente, con 1_{u ≤ 0} ≤ Φ(−u)', RX, 268, tsu + 2.4, { size: 26 });
+    aTx(p, 'pérdida de h en (x, y):  Φ( −y · h(x) )', RX, 312, tsu + 4, { size: 24, fill: COL.dim });
+    aPhi.forEach(([name, phi], i) => {
+      const t = tk[i], y = 400 + i * 56;
+      draw(path(p, aCurve(u => phi(-u), U0, U1, UX, UY, 3.3), { stroke: cols[i], 'stroke-width': 5 }, { d: 0 }), t, 1.2);
+      show(put(mk('path', { d: `M${RX} ${y - 8}h44`, stroke: cols[i], 'stroke-width': 5 }, p), { o: 0 }), t);
+      text(p, name, RX + 60, y, t, { size: 26, fill: cols[i], weight: 600 });
+      aTx(p, ['Φ(u) = max(0, 1 + u)', 'Φ(u) = e^{u}', 'Φ(u) = log_{2}(1 + e^{u})'][i], RX + 250, y, t + .3, { size: 26 });
+    });
+    text(p, 'convexas y por encima del escalón:', RX, 610, ta, { size: 26, fill: COL.task, weight: 600 });
+    text(p, 'el problema de optimización es convexo', RX, 650, ta + .4, { size: 26, fill: COL.task, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), fs = [u => Math.max(0, -u), u => Math.max(0, 1 - u) ** 2, u => Math.min(1, Math.max(0, 1 - u))];
+    T(p, 'Tres curvas sobre el escalón de la pérdida 0-1', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'Eje horizontal: y · h(x). En blanco, el escalón; en ámbar, una candidata a pérdida sustituta.', { x: 100, y: 184, size: 26 });
+    S.q2 = fs.map((fn, i) => {
+      const x = 100 + i * 480, g = G(p), UX = u => x + 210 + u * 80, UY = v => 580 - v * 100;
+      mk('rect', { x, y: 230, width: 420, height: 410, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+      T(g, 'ABC'[i], { x: x + 24, y: 276, size: 32, weight: 700, fill: HUE.hyp });
+      mk('path', { d: `M${UX(-2.4)} ${UY(0)}H${UX(2.4)}M${UX(0)} ${UY(0)}V${UY(3.1)}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, g);
+      [-2, -1, 1, 2].forEach(u => { mk('path', { d: `M${UX(u)} ${UY(0)}v6`, stroke: COL.dim, 'stroke-width': 2 }, g); T(g, (u < 0 ? '−' : '') + Math.abs(u), { x: UX(u), y: UY(0) + 30, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+      T(g, '1', { x: UX(0) + 12, y: UY(1) - 10, size: 22, fill: COL.dim, font: MATH });
+      mk('path', { d: aStep(-2.4, 2.4, UX, UY), fill: 'none', stroke: COL.chalk, 'stroke-width': 9, 'stroke-opacity': .9 }, g);
+      mk('path', { d: aCurve(fn, -2.4, 2.4, UX, UY, 3.1), fill: 'none', stroke: HUE.hyp, 'stroke-width': 4, 'stroke-linejoin': 'round' }, g);
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-sust', prompt: ['¿Qué curva es convexa y cubre al escalón por arriba?'],
+    build: pickEls(S.q2.map((el, i) => ({ el, box: [100 + i * 480, 230, 420, 410], label: 'curva ' + 'ABC'[i] })), 1,
+      'Es convexa y nunca baja del escalón: sirve como pérdida sustituta.',
+      i => i ? 'Cubre el escalón, pero no es convexa: plana, diagonal y plana otra vez.' : 'Es convexa, pero entre −1 y 0 queda por debajo del escalón.'),
+  }], done) }],
+
+  ['teorema', 'Lo que garantiza la pérdida sustituta', (m) => {
+    const p = panel(0), tlo = m('loss'), tu = m('upper'), tt = m('thm'), tb = m('bars'), tz = m('zero'), BX0 = 560, sc = 860, cols = [HUE.hin, HUE.exp, HUE.log];
+    aNote(p, 's y c: valores de la p. 77 · el exceso de pérdida Φ que se recorre es ilustrativo');
+    aTitle(p, 'Teorema 4.7 · lo que garantiza la pérdida sustituta');
+    hide(text(p, '¿Minimizar la pérdida sustituta controla el error 0-1?', 100, 214, .5, { size: 28 }), tlo - .4, .3);
+    const g0 = G(p);
+    aTx(g0, 'L_{Φ}(h)  =  E_{(x,y)∼D} [ Φ( −y h(x) ) ]', 100, 214, tlo, { size: 34 }); text(g0, '(4.10) · pérdida esperada con Φ', 700, 212, tlo + .5, { size: 22, fill: COL.dim });
+    aTx(g0, 'R(h)  ≤  L_{Φ}(h)', 100, 280, tu, { size: 34 }); text(g0, 'porque Φ cubre al escalón', 700, 278, tu + .5, { size: 22, fill: COL.dim });
+    const gT = G(p);
+    const f = aRow(gT, [['R(h) − R^{*}', COL.task], ['  ≤  2c [ ', COL.task], ['L_{Φ}(h) − L^{*}_{Φ}', COL.chalk], [' ]^{1/s}', COL.task]], 100, 390, tt, { size: 42, weight: 600 });
+    text(gT, 'exceso de error', f.xs[0], 432, tt + 1.4, { size: 22, fill: COL.task, weight: 600 }); text(gT, 'exceso de pérdida Φ', f.xs[2], 432, tt + 5.4, { size: 22, weight: 600 });
+    aTx(gT, 'R^{*}: error de Bayes · L^{*}_{Φ}: la menor pérdida Φ posible · vale si Φ cumple una condición con constantes s ≥ 1 y c > 0', 100, 478, tt + 3, { size: 22, fill: COL.dim, font: UI });
+    hide(g0, tb - .3, .4); tw(gT, { y: -170 }, tb, .8);
+    // las tres cotas, al encogerse el exceso de pérdida Φ
+    const E0 = .5, E1 = .005, t1 = tb + 2.4, rows = [[400, 'exceso de pérdida Φ', COL.chalk, e => e], ...aPhi.map(([name, , s, c, cs], i) => [480 + i * 62, `${name} · s = ${s}, c = ${cs}`, cols[i], e => aBd(c, s, e)])];
+    const live = rows.map(([y, lab, col, fn], i) => {
+      const t = tb + .9 + i * .25;
+      text(p, lab, 100, y, t, { size: 26, fill: col, weight: 600 });
+      const b = put(mk('rect', { x: BX0, y: y - 22, width: 0, height: 28, fill: col, 'fill-opacity': .85 }, p), { o: 0 }), v = text(p, '', BX0, y, t, { size: 24, fill: col, weight: 600 }); show(b, t);
+      return [b, v, fn, i ? 'cota: ' : ''];
+    });
+    const setE = e => live.forEach(([b, v, fn, pre]) => { const w = fn(e) * sc; b.setAttribute('width', w.toFixed(1)); v.setAttribute('x', (w + 14).toFixed(1)); v.textContent = pre + aF3(fn(e)); });
+    setE(E0);
+    prog(q => setE(E0 * (E1 / E0) ** q), t1, Math.max(6, tz + 4 - t1), lin);
+    text(p, 'si el exceso de pérdida Φ tiende a 0, el exceso de error también', 100, 740, tz, { size: 28, fill: COL.task, weight: 600 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Validación cruzada: entrenar con S₁ y elegir con la parte apartada, S₂.', 'w1'], ['Con n pliegues, cada punto sirve para entrenar y para validar.', 'w2'],
+      ['Regularización: error empírico más λ por un término de complejidad.', 'w3'], ['Una pérdida sustituta convexa cubre a la 0-1 y hace tratable el problema.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 220, size: 31, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['La validación cruzada elige la solución de ERM con menor error en S₁, la parte de entrenamiento.'], ans: ['f'], why: 'Elige por el error en S₂, la parte apartada. El error en S₁ no sube al crecer k: premiaría al conjunto más rico.' },
+      { parts: ['Con n = m pliegues (dejar uno fuera) hay que entrenar m veces.'], ans: ['v'], why: 'Cada vuelta aparta un solo punto y entrena con los otros m − 1.' },
+      { parts: ['Con λ = 0, un algoritmo de regularización coincide con ERM.'], ans: ['v'], why: 'El término de regularización deja de pesar y solo queda el error empírico.' },
+      { parts: ['La pérdida 0-1 se reemplaza por una sustituta porque es convexa.'], ans: ['f'], why: 'Al revés: no es convexa. Se reemplaza por una cota superior convexa, como la bisagra, la exponencial o la logística.' },
+      { parts: ['Según el teorema 4.7, un exceso pequeño de pérdida sustituta asegura un exceso pequeño de error.'], ans: ['v'], why: 'R(h) − R* ≤ 2c [L_Φ(h) − L*_Φ]^(1/s), con las constantes s y c de cada pérdida.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perceptron y Winnow</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 17, title: 'Perceptron y Winnow', minutes: 6, language: 'es', next: '../ch18/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 16) ---------- */
+// salmón = clase +1, azul = clase −1 · ámbar = el algoritmo (su vector w, su recta, sus actualizaciones) · verde = acierto, rojo = fallo ·
+// blanco = el separador de referencia v (margen máximo), como el mejor experto del cap. 16 · rosa (local) = pesos de Winnow y la norma de w
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, un: COL.dim, cx: COL.real, w: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'r^{2}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηφρσλμ‖ℜ√∑∏⟹⟺≈∼∞ŷ])/;                                            // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aNum = v => String(+v.toFixed(2)).replace('-', '−');                           // sin ceros de relleno: 2, −0.25
+const aVec = w => `(${aNum(w[0])}, ${aNum(w[1])})`;
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aDot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+const aNrm = a => Math.sqrt(aDot(a, a));
+// --- Perceptron (figura 8.6, con η = 1 y w_0 = 0). seq = [[x, y]]; ker = null usa el producto interno.
+// Se actualiza cuando y_t (w_t · x_t) ≤ 0, como en (8.23): sgn(0) cuenta como fallo. Por ronda: w (antes), u = y (w · x), upd, wn (después), M (actualizaciones acumuladas).
+const aPerc = seq => { let w = seq[0][0].map(() => 0), M = 0; return seq.map(([x, y]) => { const u = y * aDot(w, x), upd = u <= 0, wn = upd ? w.map((v, i) => v + y * x[i]) : w; M += upd ? 1 : 0; const row = { w, u, upd, wn, M }; w = wn; return row; }); };
+// Pasadas sobre una muestra fija, en el mismo orden, hasta una pasada completa sin actualizaciones (o maxPass pasadas).
+const aPasses = (pts, maxPass, stop = true) => { let seq = []; for (let k = 1; k <= maxPass; k++) { seq = seq.concat(pts); const rows = aPerc(seq); if (stop && rows.slice(-pts.length).every(q => !q.upd)) return { seq, rows, conv: true, passes: k }; } return { seq, rows: aPerc(seq), conv: false, passes: maxPass }; };
+// Mayor margen de un hiperplano por el origen en el plano: distancia del origen a la envolvente convexa de los y_i x_i (se prueban vértices y lados).
+const aMargin = pts => { const z = pts.map(([x, y]) => x.map(v => v * y)), cand = [...z]; for (let i = 0; i < z.length; i++) for (let j = i + 1; j < z.length; j++) { const d = [z[j][0] - z[i][0], z[j][1] - z[i][1]], s = -aDot(z[i], d) / aDot(d, d); if (s > 0 && s < 1) cand.push([z[i][0] + s * d[0], z[i][1] + s * d[1]]); } let v = null, rho = -Infinity; cand.forEach(c => { const n = aNrm(c); if (n < 1e-9) return; const q = c.map(u => u / n), g = Math.min(...z.map(u => aDot(u, q))); if (g > rho) { rho = g; v = q; } }); return { v, rho }; };
+const aMarginOf = (w, pts) => Math.min(...pts.map(([x, y]) => y * aDot(w, x) / aNrm(w)));
+// F(w) de (8.21) sobre una muestra.
+const aF = (w, pts) => aSum(pts.map(([x, y]) => Math.max(0, -y * aDot(w, x)))) / pts.length;
+// --- Cota del teorema 8.11 (segunda forma) para v unitario y ρ dados: (r/ρ + √‖l_ρ‖₁)², con l_t = max(0, 1 − y_t (v · x_t)/ρ) sobre las rondas con actualización.
+const aL1 = (run, v, rho) => aSum(run.rows.map((q, t) => q.upd ? Math.max(0, 1 - run.seq[t][1] * aDot(v, run.seq[t][0]) / rho) : 0));
+const aB811 = (run, r, v, rho) => (r / rho + Math.sqrt(aL1(run, v, rho))) ** 2;
+const aB811a = (run, r, v, rho) => ((r / rho + Math.sqrt(r * r / rho / rho + 4 * aL1(run, v, rho))) / 2) ** 2;   // primera forma, más ajustada
+// El ínfimo se aproxima por una grilla de direcciones y de ρ: cualquier valor de la grilla ya es una cota válida.
+const aInf811 = (run, r, f = aB811) => { let best = { b: Infinity }; for (let a = 0; a < 720; a++) { const v = [Math.cos(a * Math.PI / 360), Math.sin(a * Math.PI / 360)]; for (let k = 1; k <= 400; k++) { const rho = k * .02, b = f(run, r, v, rho); if (b < best.b) best = { b, v, rho, l1: aL1(run, v, rho) }; } } return best; };
+// --- Perceptron dual y con kernel (figuras 8.8 y 8.9): α_s cuenta las actualizaciones del punto s; predicción sgn(∑ α_s y_s K(x_s, x)).
+const aKperc = (pts, K, maxPass) => { const al = pts.map(() => 0), f = x => aSum(pts.map(([xs, ys], s) => al[s] ? al[s] * ys * K(xs, x) : 0)); let M = 0, passes = 0, conv = false; while (passes < maxPass && !conv) { passes++; conv = true; pts.forEach(([x, y], t) => { if (y * f(x) <= 0) { al[t]++; M++; conv = false; } }); } return { al, M, passes, conv, f }; };
+const aLin = (a, b) => aDot(a, b), aPoly2 = (a, b) => (aDot(a, b) + 1) ** 2;
+// --- Winnow (figura 8.10): w_1 = 1/N; si falla, w_{t+1,i} = w_{t,i} exp(η y_t x_{t,i}) / Z_t.
+const aWinnow = (seq, eta) => { let w = seq[0][0].map(() => 1 / seq[0][0].length), M = 0; return seq.map(([x, y]) => { const u = y * aDot(w, x), upd = u <= 0; let wn = w; if (upd) { const e = w.map((v, i) => v * Math.exp(eta * y * x[i])), Z = aSum(e); wn = e.map(v => v / Z); M++; } const row = { w, u, upd, wn, M }; w = wn; return row; }); };
+const aB88 = (r, rho) => r * r / (rho * rho);                                        // teorema 8.8
+const aB813 = (rinf, rhoinf, n) => 2 * rinf * rinf / (rhoinf * rhoinf) * Math.log(n);  // teorema 8.13
+// --- Las ejecuciones del capítulo.
+// Muestra separable (ilustrativa, escrita a mano): 12 puntos [x, y], recorridos siempre en este orden.
+const aP = [[-1.75, .25, 1], [.75, 2, -1], [-2.5, -.75, 1], [-1.5, 2.25, -1], [-2.25, 1.25, 1], [-2.5, 0, 1], [-1, -2, 1], [2, .75, -1], [.75, 2.75, -1], [2, -.75, -1], [2, 1.5, -1], [.25, -2.75, 1]].map(([a, b, y]) => [[a, b], y]);
+const aRun = aPasses(aP, 30), aTT = aRun.rows.length, aMM = aRun.rows[aTT - 1].M, aWfin = aRun.rows[aTT - 1].wn;
+const aSep = aMargin(aP), aR = Math.max(...aP.map(q => aNrm(q[0]))), aBnd = aB88(aR, aSep.rho), aMfin = aMarginOf(aWfin, aP);
+const aUpd = aRun.rows.map((q, t) => q.upd ? t : -1).filter(t => t >= 0);            // rondas (desde 0) con actualización
+const aWk = [aRun.rows[0].w, ...aUpd.map(t => aRun.rows[t].wn)];                     // w tras k actualizaciones
+const aVw = aWk.map(w => aDot(aSep.v, w)), aNw = aWk.map(aNrm), aFk = aWk.map(w => aF(w, aP));
+const aAl = aP.map((_, i) => aUpd.filter(t => t % aP.length === i).length);          // α_s: actualizaciones del punto s
+// Paso de subgradiente que se muestra: la segunda actualización (la primera parte de w = 0).
+const aS1 = (() => { const t = aUpd[1], [x, y] = aRun.seq[t], q = aRun.rows[t]; return { t, u0: q.u, x2: aDot(x, x), u1: y * aDot(q.wn, x) }; })();
+// Muestra no separable: la anterior más dos puntos del lado equivocado; tres pasadas.
+const aP2 = [...aP, [[1.25, 1.25], 1], [[-1.75, -1], -1]], aRun2 = aPasses(aP2, 3, false), aT2 = aRun2.rows.length, aM2 = aRun2.rows[aT2 - 1].M;
+const aR2 = Math.max(...aP2.map(q => aNrm(q[0]))), aL2 = aL1(aRun2, aSep.v, aSep.rho), aBnd2 = aB811(aRun2, aR2, aSep.v, aSep.rho);
+// Muestra para el kernel (ilustrativa): clase +1 cerca del origen, clase −1 alrededor.
+const aPk = [[1.5, -2, -1], [-.25, -.25, 1], [0, -2.75, -1], [.5, 3, -1], [.75, .5, 1], [2, -1.5, -1], [.75, -2.25, -1], [-2.5, .5, -1], [.25, -1, 1], [-.5, -1, 1], [0, 2.25, -1], [.5, -.25, 1], [.25, 1, 1], [-2.5, 1.75, -1]].map(([a, b, y]) => [[a, b], y]);
+const aKr = aKperc(aPk, aPoly2, 500), aKlin = aKperc(aPk, aLin, 50);
+// Winnow: N características con valores ±1 sorteados (semilla); la etiqueta es el signo de la suma de las tres relevantes.
+const aWN = 32, aWT = 200, aRel = [4, 13, 26], aV = Array.from({ length: aWN }, (_, i) => aRel.includes(i) ? 1 : 0);
+const aWseq = (() => { const r = aRng(193), seq = []; for (let t = 0; t < aWT; t++) { const x = Array.from({ length: aWN }, () => r() < .5 ? 1 : -1); seq.push([x, Math.sign(aDot(aV, x))]); } return seq; })();
+const aRinf = Math.max(...aWseq.map(([x]) => Math.max(...x.map(Math.abs)))), aRhoInf = Math.min(...aWseq.map(([x, y]) => y * aDot(aV, x) / aSum(aV)));
+const aEta = aRhoInf / (aRinf * aRinf), aWin = aWinnow(aWseq, aEta), aWinM = aWin[aWT - 1].M, aBw = aB813(aRinf, aRhoInf, aWN);
+const aPw = aPerc(aWseq), aPwM = aPw[aWT - 1].M, aRw2 = Math.max(...aWseq.map(([x]) => aNrm(x))), aRhoW2 = Math.min(...aWseq.map(([x, y]) => y * aDot(aV, x) / aNrm(aV))), aBp = aB88(aRw2, aRhoW2);
+const aWrel = aSum(aRel.map(i => aWin[aWT - 1].wn[i]));                                // peso final en las tres relevantes
+// Comprobación 1: el estado antes de la ronda 28 y tres puntos marcados; uno solo obliga a actualizar.
+const aQ1k = 27, aQ1 = [0, 3, 9], aQ1w = aRun.rows[aQ1k].w, aQ1bad = aQ1.map(i => aP[i][1] * aDot(aQ1w, aP[i][0]) <= 0), aQ1r = aQ1bad.indexOf(true);
+// Comprobación 2: radio y margen escritos a mano.
+const aQ2 = { r: 2, rho: .5 }, aQ2o = [aQ2.r / aQ2.rho, aQ2.r * aQ2.r / aQ2.rho, aB88(aQ2.r, aQ2.rho)], aQ2r = 2;
+/* aMATH:end */
+
+// Flecha que se redibuja: e._to(x0, y0, x1, y1); con largo casi nulo no dibuja nada.
+const aArrow = (g, col, sw = 5) => {
+  const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, g);
+  e._to = (x0, y0, x1, y1) => {
+    const L = Math.hypot(x1 - x0, y1 - y0);
+    if (L < 2) { e.setAttribute('d', ''); return; }
+    const ux = (x1 - x0) / L, uy = (y1 - y0) / L, h = Math.min(18, L * .45), bx = x1 - ux * h, by = y1 - uy * h, f = v => v.toFixed(1);
+    e.setAttribute('d', `M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}M${f(bx - uy * h * .55)} ${f(by + ux * h * .55)}L${f(x1)} ${f(y1)}L${f(bx + uy * h * .55)} ${f(by - ux * h * .55)}`);
+  };
+  return e;
+};
+// Plano de dos clases centrado en el origen: marco cuadrado de lado 2 · half que cubre de −view a view; pts = [[x, y]].
+// pl.setW(w): flecha ámbar del vector w desde el origen y su recta w · x = 0 (recortada al marco); con w = 0 no hay recta.
+// pl.step(run, r): estado en la ronda r (real) de una ejecución sobre pts recorridos en orden: entra el anillo del punto,
+// luego ✓ o ✗, luego la flecha y_t x_t puesta en la punta de w y, al final, w pasa a w + y_t x_t y la recta gira.
+// pl.circle(r): círculo de radio r · pl.sep(v, ρ): recta de referencia perpendicular a v con su franja de margen · pl.cells(f): signo de f por celdas.
+const aOrig = (p, cx, cy, half, view, pts, id, { t0 = .4, dotR = 10 } = {}) => {
+  const sc = half / view, X = v => cx + v * sc, Y = v => cy - v * sc, pl = { X, Y, sc, pts, cx, cy, half, view }, box = { x: cx - half, y: cy - half, width: 2 * half, height: 2 * half };
+  mk('rect', box, mk('clipPath', { id }, mk('defs', {}, p)));
+  pl.g = G(p, { o: t0 == null ? 1 : 0 }); if (t0 != null) show(pl.g, t0);
+  const cg = mk('g', { 'clip-path': `url(#${id})` }, pl.g);
+  pl.under = G(cg);
+  mk('path', { d: `M${cx - half} ${cy}h${2 * half}M${cx} ${cy - half}v${2 * half}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '4 8', fill: 'none' }, cg);
+  mk('rect', { ...box, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, pl.g);
+  pl.lg = G(cg, { o: 0 });
+  pl.ln = mk('path', { stroke: HUE.hyp, 'stroke-width': 4, fill: 'none' }, pl.lg);
+  pl.dg = G(pl.g);
+  pl.dots = pts.map(([x, y]) => put(mk('circle', { r: dotR, fill: y > 0 ? HUE.pos : HUE.neg }, pl.dg), { x: X(x[0]), y: Y(x[1]) }));
+  pl.og = G(pl.g);
+  pl.gh = aArrow(pl.og, COL.chalk, 4); pl.wa = aArrow(pl.og, HUE.hyp, 6);
+  pl.wl = put(aHalo(T(pl.og, 'w', { size: 28, fill: HUE.hyp, font: MATH, weight: 700, anchor: 'middle' })), { o: 0 });
+  pl.ring = put(mk('circle', { r: dotR + 9, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, pl.og), { o: 0 });
+  const mark = (d, col) => put(mk('path', { d, fill: 'none', stroke: col, 'stroke-width': 5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, pl.og), { o: 0 });
+  pl.ok = mark('M-9 0L-3 8L10 -9', COL.good); pl.no = mark('M-8 -8L8 8M8 -8L-8 8', COL.bad);
+  pl.setW = w => {
+    const n = aNrm(w), on = n > 1e-9;
+    put(pl.lg, { o: on ? 1 : 0 }); put(pl.wl, { o: on ? 1 : 0 });
+    if (!on) { pl.wa._to(0, 0, 0, 0); return; }
+    const L = 3 * view / n;
+    pl.ln.setAttribute('d', `M${X(-w[1] * L).toFixed(1)} ${Y(w[0] * L).toFixed(1)}L${X(w[1] * L).toFixed(1)} ${Y(-w[0] * L).toFixed(1)}`);
+    pl.wa._to(cx, cy, X(w[0]), Y(w[1]));
+    put(pl.wl, { x: X(w[0]) + w[0] / n * 26, y: Y(w[1]) - w[1] / n * 26 + 9 });
+  };
+  pl.step = (run, r) => {
+    const n = run.rows.length, rr = Math.max(0, Math.min(n, r)), k = Math.min(n - 1, Math.floor(rr)), f = rr >= n ? 1 : rr - k, q = run.rows[k], [x, y] = pts[k % pts.length];
+    const u = q.upd ? Math.max(0, Math.min(1, (f - .7) / .3)) : 0, live = rr < n && f > .02, px = X(x[0]), py = Y(x[1]);
+    pl.setW(q.w.map((v, j) => v + (q.wn[j] - v) * u));
+    put(pl.ring, { x: px, y: py, o: live ? 1 : 0 });
+    put(pl.ok, { x: px + 24, y: py - 24, o: live && f > .25 && !q.upd ? 1 : 0 });
+    put(pl.no, { x: px + 24, y: py - 24, o: live && f > .25 && q.upd ? 1 : 0 });
+    if (live && q.upd && f > .45) { pl.gh.setAttribute('stroke', y > 0 ? HUE.pos : HUE.neg); pl.gh._to(X(q.w[0]), Y(q.w[1]), X(q.wn[0]), Y(q.wn[1])); } else pl.gh._to(0, 0, 0, 0);
+    return { k, q, M: rr >= n ? q.M : q.M - (q.upd && f <= .7 ? 1 : 0), w: rr >= n || (q.upd && f > .7) ? q.wn : q.w };
+  };
+  pl.circle = r => put(mk('circle', { cx, cy, r: r * sc, fill: 'none', stroke: COL.dim, 'stroke-width': 3, 'stroke-dasharray': '3 9', 'stroke-linecap': 'round' }, pl.under), { o: 0 });
+  pl.sep = (v, rho) => {
+    const g = G(pl.under, { o: 0 }), L = 3 * view, P = (k, d) => X(v[0] * d - v[1] * k).toFixed(1) + ' ' + Y(v[1] * d + v[0] * k).toFixed(1), ln = d => `M${P(-L, d)}L${P(L, d)}`;
+    mk('polygon', { points: [P(-L, -rho), P(L, -rho), P(L, rho), P(-L, rho)].join(' '), fill: COL.chalk, 'fill-opacity': .1 }, g);
+    mk('path', { d: ln(rho) + ln(-rho), stroke: COL.chalk, 'stroke-width': 1.5, 'stroke-opacity': .5, fill: 'none' }, g);
+    mk('path', { d: ln(0), stroke: COL.chalk, 'stroke-width': 3, 'stroke-dasharray': '12 9', fill: 'none' }, g);
+    return g;
+  };
+  pl.cells = (f, n = 30) => { const g = G(pl.under, { o: 0 }), s = 2 * half / n; for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = f([(i + .5) / n * 2 * view - view, view - (j + .5) / n * 2 * view]); mk('rect', { x: cx - half + i * s, y: cy - half + j * s, width: s + .5, height: s + .5, fill: v > 0 ? HUE.pos : HUE.neg, 'fill-opacity': .24 }, g); } return g; };
+  return pl;
+};
+const aVIEW = 4.6;
+const aMain = (p, id, pts = aP, opts = {}) => aOrig(p, 390, 450, 270, aVIEW, pts, id, opts);
+const aLeg = (p, x, y, t0 = .5) => { const g = G(p, { o: 0 }); aSq(g, x, y, HUE.pos, 'clase +1', { dot: true }); aSq(g, x + 170, y, HUE.neg, 'clase −1', { dot: true }); show(g, t0); return g; };
+// Gráfica por pasos (0 … tmax). yt = [[valor, rótulo]]; xlab = rótulo del eje horizontal.
+// ch.line(vals, col, t, dur, { dash, from, dots }) traza vals[from … ]; ch.fn(f, col, t, dur, { dash }) traza y = f(k); ch.live(vals, col) devuelve r => dibuja hasta r.
+const aPlot = (p, x0, y0, w, h, { t0 = .4, tmax = 10, v0 = 0, v1 = 1, yt = [], xt = [], xlab = 'ronda' } = {}) => {
+  const CX = t => x0 + t / tmax * w, VY = v => y0 - (v - v0) / (v1 - v0) * h, g = G(p, { o: t0 == null ? 1 : 0 }), ch = { CX, VY, g };
+  mk('path', { d: `M${x0} ${y0 - h - 12}V${y0}H${x0 + w + 10}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  yt.forEach(([v, s]) => { mk('path', { d: `M${x0 - 8} ${VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, s, { x: x0 - 16, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  xt.forEach(t => { mk('path', { d: `M${CX(t)} ${y0}v8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(t), { x: CX(t), y: y0 + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  T(g, xlab, { x: x0 + w + 10, y: y0 + 62, size: 22, fill: COL.dim, anchor: 'end' });
+  const dOf = (vals, from, upto) => { let d = ''; const n = Math.min(vals.length - 1, Math.floor(upto + 1e-9)); for (let t = from; t <= n; t++) d += (t > from ? 'L' : 'M') + CX(t).toFixed(1) + ' ' + VY(vals[t]).toFixed(1); return d; };
+  ch.line = (vals, col, tt, dur, { dash = null, from = 0, sw = 4, dots = false } = {}) => {
+    const d = dOf(vals, from, vals.length - 1);
+    let e;
+    if (dash) { e = put(mk('path', { d, fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-dasharray': dash }, p), { o: 0 }); show(e, tt, dur); }
+    else { e = path(p, d, { stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round' }, { d: 0 }); draw(e, tt, dur); }
+    if (dots) vals.forEach((v, t) => { if (t >= from) show(put(mk('circle', { cx: CX(t), cy: VY(v), r: 6, fill: col }, p), { o: 0 }), tt + dur * (t - from) / Math.max(1, vals.length - 1 - from), .25); });
+    return e;
+  };
+  ch.fn = (f, col, tt, dur, { dash = '10 8', sw = 3 } = {}) => { let d = ''; for (let k = 0; k <= tmax * 8; k++) d += (k ? 'L' : 'M') + CX(k / 8).toFixed(1) + ' ' + VY(f(k / 8)).toFixed(1); const e = put(mk('path', { d, fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-dasharray': dash }, p), { o: 0 }); show(e, tt, dur); return e; };
+  if (t0 != null) show(g, t0);
+  return ch;
+};
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 17', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Perceptron y Winnow', { x: 800, y: 450, size: 72, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Dos algoritmos on-line para clasificar con un hiperplano: uno corrige sumando, y el otro, multiplicando.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['algo', 'El algoritmo Perceptron', (m, D) => {
+    const p = panel(0), tw_ = m('w'), tp = m('pred'), to = m('ok'), tu = m('upd'), tt = m('turn'), tr = m('run'), RX = 780;
+    aNote(p, 'datos ilustrativos: 12 puntos escritos a mano, recorridos en orden · algoritmo de la figura 8.6, con η = 1 y w_{0} = 0');
+    aTitle(p, 'Perceptron: un clasificador lineal on-line (en línea)');
+    const pl = aMain(p, 'aClipAlgo'); aLeg(p, 130, 766);
+    const info = aTx(p, '', RX, 650, tw_ + 1.5, { size: 26, font: UI, weight: 600 });
+    const setR = r => { const s = pl.step(aRun, r); info._set(`ronda ${s.k + 1}        w = ${aVec(s.w)}        actualizaciones: ${s.M}`); };
+    setR(0);
+    prog(q => setR(q), tw_ + 1.5, 3.2, lin);                       // ronda 1: w parte de 0, así que actualiza
+    prog(q => setR(1 + .2 * q), tp, 1, lin);                       // ronda 2: llega el punto …
+    prog(q => setR(1.2 + .8 * q), to - .3, 1.2, lin);              // … y acierta
+    prog(q => setR(2 + q), to + 1, 1.7, lin);                      // ronda 3: acierta
+    prog(q => setR(3 + .44 * q), tu - .3, 1.2, lin);               // ronda 4: falla
+    prog(q => setR(3.44 + .25 * q), tu + 2, 1, lin);               // la flecha y x en la punta de w
+    prog(q => setR(3.7 + .3 * q), tt, 1.8);                        // w se mueve y la recta gira
+    prog(q => setR(4 + q), tr - .3, 2.8, lin);                     // ronda 5: otro error
+    prog(q => setR(5 + (aP.length - 5) * q), tr + 2.7, D - tr - 3, lin);
+    const n0 = aTx(p, 'w_{0} = 0: en la primera ronda siempre se actualiza', RX, 710, tw_ + 2, { size: 22, fill: COL.dim, font: UI }); hide(n0, tp - .4, .3);
+    aRow(p, [['w_{t}', HUE.hyp], [':  vector de pesos        recta:   ', COL.dim, UI], ['w_{t} · x = 0', HUE.hyp]], RX, 250, tw_, { size: 28, weight: 600 });
+    aRow(p, [['llega x_{t} y se predice      ', COL.dim, UI], ['ŷ_{t} = sgn(w_{t} · x_{t})']], RX, 334, tp, { size: 28, weight: 600 });
+    aRow(p, [['si acierta:      ', COL.dim, UI], ['w_{t+1} = w_{t}']], RX, 418, to, { size: 28, weight: 600 });
+    aRow(p, [['si falla:      ', COL.dim, UI], ['w_{t+1} = w_{t} + y_{t} x_{t}', HUE.hyp]], RX, 492, tu, { size: 32, weight: 600 });
+    aTx(p, 'flecha fina: y_{t} x_{t}, puesta en la punta de w', RX, 546, tu + 2, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['sgd', 'Descenso por subgradiente', (m) => {
+    const p = panel(0), tl = m('loss'), tf = m('F'), ts = m('sub'), tst = m('step'), tpl = m('plot'), OX = 420, OY = 570, U = 60, RX = 860, f4 = v => String(+v.toFixed(4)).replace('-', '−');
+    aNote(p, `el punto que se mueve es el de la ronda ${aS1.t + 1} del ejemplo (segunda actualización) · F se calcula sobre los 12 puntos`);
+    aTitle(p, 'Por qué esa suma: descenso por subgradiente estocástico');
+    // izquierda: la pérdida de un punto en función de y (w · x)
+    const g = G(p, { o: 0 }); show(g, .4);
+    mk('path', { d: `M${OX - 4.3 * U} ${OY}H${OX + 5.3 * U}M${OX} ${OY + 10}V${OY - 4.3 * U}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+    [-4, -2, 2, 4].forEach(u => { mk('path', { d: `M${OX + u * U} ${OY}v8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(u).replace('-', '−'), { x: OX + u * U, y: OY + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+    [2, 4].forEach(v => { mk('path', { d: `M${OX - 8} ${OY - v * U}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); });
+    aTx(g, 'y (w · x)', OX + 5.3 * U, OY + 64, null, { size: 24, fill: COL.dim, anchor: 'end' });
+    T(g, 'mal clasificado', { x: OX - 2.2 * U, y: OY + 100, size: 22, fill: COL.bad, anchor: 'middle' });
+    T(g, 'bien clasificado', { x: OX + 2.4 * U, y: OY + 100, size: 22, fill: COL.good, anchor: 'middle' });
+    aRow(p, [['pérdida de un punto:    ', COL.dim, UI], ['max(0, −y (w · x))']], OX - 4.3 * U, 220, tl, { size: 26, weight: 600 });
+    draw(path(p, `M${OX - 4.2 * U} ${OY - 4.2 * U}L${OX} ${OY}H${OX + 5.2 * U}`, { stroke: COL.chalk, 'stroke-width': 4, 'stroke-linejoin': 'round' }, { d: 0 }), tl + .3, 1.4);
+    const at = u => ({ x: OX + u * U, y: OY - Math.max(0, -u) * U }), dot = put(mk('circle', { r: 12, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 3 }, p), { ...at(aS1.u0), o: 0 });
+    show(dot, tl + 2.2, .4); prog(q => put(dot, at(aS1.u0 + (aS1.u1 - aS1.u0) * q)), tst + 2.2, 2.4);
+    aHalo(aTx(p, f4(aS1.u0), at(aS1.u0).x + 22, at(aS1.u0).y + 2, tl + 2.6, { size: 24, fill: HUE.hyp, weight: 600 }));
+    aHalo(aTx(p, f4(aS1.u1), at(aS1.u1).x, OY - 26, tst + 4.6, { size: 24, fill: HUE.hyp, weight: 600, anchor: 'middle' }));
+    aTx(p, 'y_{t} (w_{t+1} · x_{t})   =   y_{t} (w_{t} · x_{t})  +  ‖x_{t}‖^{2}', OX - 4.3 * U, 740, tst + 2.2, { size: 26, weight: 600 });
+    aTx(p, `${f4(aS1.u1)}   =   ${f4(aS1.u0)}  +  ${f4(aS1.x2)}`, OX - 4.3 * U, 786, tst + 4.6, { size: 24, fill: COL.dim });
+    // derecha: F, su subgradiente y el paso
+    const f1 = aTx(p, 'F(w)  =  (1/T) ∑_{t} max(0, −y_{t} (w · x_{t}))', RX, 262, tf, { size: 28, weight: 600 });
+    text(p, '(8.21) · convexa', RX + f1.getComputedTextLength() + 20, 260, tf, { size: 22, fill: COL.dim });
+    aRow(p, [['subgradiente, punto mal clasificado:    ', COL.dim, UI], ['−y_{t} x_{t}', HUE.hyp]], RX, 338, ts, { size: 26, weight: 600 });
+    const f2 = aTx(p, 'w_{t+1}  =  w_{t} + η y_{t} x_{t}      si   y_{t} (w_{t} · x_{t}) ≤ 0', RX, 414, tst, { size: 28, weight: 600 });
+    text(p, '(8.23)', RX + f2.getComputedTextLength() + 20, 412, tst, { size: 22, fill: COL.dim });
+    aTx(p, 'con η = 1: la actualización del Perceptron', RX, 462, tst + 3, { size: 24, fill: COL.dim, font: UI });
+    const ch = aPlot(p, RX + 60, 780, 440, 170, { t0: tpl - .5, tmax: aMM, v1: .4, yt: [[0, '0'], [.2, '0.2'], [.4, '0.4']], xt: aFk.map((_, k) => k).slice(1), xlab: 'actualizaciones' });
+    aTx(ch.g, 'F(w) tras cada actualización', RX + 60, 576, null, { size: 22, fill: COL.dim, font: UI });
+    ch.line(aFk, HUE.hyp, tpl, 2.4, { from: 1, dots: true });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), pl = aOrig(p, 400, 420, 250, aVIEW, aP, 'aClipQ1', { t0: null }), RX = 800;
+    pl.setW(aQ1w);
+    T(p, 'Perceptron: ¿hay que actualizar?', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aRow(p, [['vector actual:    ', COL.dim, UI], [`w = ${aVec(aQ1w)}`, HUE.hyp]], RX, 270, null, { size: 28, weight: 600 });
+    aTx(p, 'la flecha w apunta al lado donde se predice +1', RX, 326, null, { size: 24, fill: COL.dim, font: UI });
+    aLeg(p, RX, 400, null);
+    aTx(p, 'Tres puntos llevan un número.', RX, 480, null, { size: 26, fill: COL.dim, font: UI });
+    S.q1 = aQ1.map((i, j) => { const [x] = aP[i], g = G(p, { x: pl.X(x[0]), y: pl.Y(x[1]) }); mk('circle', { r: 19, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, g); mk('circle', { cx: 30, cy: -27, r: 16, fill: COL.chalk }, g); T(g, String(j + 1), { x: 30, y: -19, size: 24, fill: COL.board, weight: 700, anchor: 'middle' }); return g; });
+    S.q1B = aQ1.map(i => { const [x] = aP[i]; return [pl.X(x[0]) - 26, pl.Y(x[1]) - 48, 78, 74]; });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-actualiza', prompt: ['¿Cuál de los tres puntos marcados obliga a actualizar w?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'punto marcado ' + (j + 1) })), aQ1r,
+      `Es de la clase ${aP[aQ1[aQ1r]][1] > 0 ? '+1' : '−1'} y cae del lado donde se predice +1: el Perceptron falla.`,
+      () => 'Cae del lado correcto de la recta: el Perceptron acierta y no cambia w.'),
+  }], done) }],
+
+  ['cota', 'La cota de errores', (m) => {
+    const p = panel(0), tr = m('r'), th = m('rho'), tt = m('thm'), tn = m('num'), tu = m('run'), td = m('dim'), ts = m('svm'), RX = 780, BW = 640, BY = 500, bs = BW / aBnd;
+    aNote(p, 'la misma muestra, recorrida en orden hasta una pasada completa sin fallos · r, ρ y la cota se calculan en la página');
+    aTitle(p, 'Caso separable: a lo sumo r²/ρ² actualizaciones');
+    const pl = aMain(p, 'aClipCota'); aLeg(p, 130, 766);
+    // el radio y el margen
+    const far = aP.reduce((a, q) => aNrm(q[0]) > aNrm(a[0]) ? q : a)[0], gr = G(p, { o: 0 }); show(pl.circle(aR), tr, .6); show(gr, tr, .6);
+    mk('path', { d: `M${pl.cx} ${pl.cy}L${pl.X(far[0])} ${pl.Y(far[1])}`, stroke: COL.dim, 'stroke-width': 2.5, fill: 'none' }, gr);
+    aHalo(aTx(gr, 'r', pl.X(far[0] * .5) + 4, pl.Y(far[1] * .5) + 30, null, { size: 28, fill: COL.dim, weight: 700 }));
+    const sp = pl.sep(aSep.v, aSep.rho); show(sp, th + 2.4, .6);
+    const gl = G(p, { o: 0 }); show(gl, th + 2.4, .6);
+    aHalo(aTx(gl, 'v', pl.X(aSep.v[0] * 1.5) - 26, pl.Y(aSep.v[1] * 1.5) + 4, null, { size: 28, weight: 700 }));
+    pl.va = aArrow(gl, COL.chalk, 4); pl.va._to(pl.cx, pl.cy, pl.X(aSep.v[0] * 1.5), pl.Y(aSep.v[1] * 1.5));
+    // la ejecución completa, con el contador
+    const cnt = aTx(p, '', RX, BY - 26, tn + .6, { size: 26, font: UI, weight: 600, fill: HUE.hyp }), rd = aTx(p, '', RX, BY + 66, tu, { size: 22, font: UI, fill: COL.dim });
+    const gb = G(p, { o: 0 }); show(gb, tn);
+    mk('rect', { x: RX, y: BY, width: BW, height: 30, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, gb);
+    for (let k = 5; k < aBnd; k += 5) mk('path', { d: `M${RX + k * bs} ${BY}v30`, stroke: COL.faint, 'stroke-width': 1.5 }, gb);
+    const fill = mk('rect', { x: RX, y: BY, width: 0, height: 30, fill: HUE.hyp }, gb);
+    aTx(gb, `cota:  ${aBnd.toFixed(1)}`, RX + BW, BY - 26, null, { size: 26, font: UI, weight: 600, anchor: 'end' });
+    const setR = r => { const s = pl.step(aRun, r), k = Math.min(aTT, Math.floor(r)); fill.setAttribute('width', (s.M * bs).toFixed(1)); cnt._set(`actualizaciones:  ${s.M}`); rd._set(`ronda ${Math.max(1, Math.min(aTT, k + 1))} de ${aTT}   ·   pasada ${Math.min(aRun.passes, Math.floor(Math.min(aTT - 1, k) / aP.length) + 1)} de ${aRun.passes}`); };
+    setR(0);
+    prog(q => setR(q * aTT), tu + .3, td - tu - 1.2, lin);
+    aRow(p, [['radio:    ', COL.dim, UI], ['‖x_{t}‖  ≤  r'], [`          r = ${aF2(aR)}`, COL.dim]], RX, 250, [tr + 1.6, tr + 1.6, tr + 4], { size: 28, weight: 600 });
+    aRow(p, [['margen:    ', COL.dim, UI], ['ρ  ≤  y_{t} (v · x_{t}) / ‖v‖'], [`          ρ = ${aF2(aSep.rho)}`, COL.dim]], RX, 310, [th, th + 2.4, th + 5.4], { size: 28, weight: 600 });
+    const f = aRow(p, [['Teorema 8.8:    ', HUE.hyp, UI], ['actualizaciones  ≤  r^{2}/ρ^{2}'], [`  =  ${aBnd.toFixed(1)}`, HUE.hyp]], RX, 392, [tt, tt + 2.6, tn], { size: 30, weight: 600 });
+    aTx(p, 'no depende de la dimensión N del espacio', RX, 640, td, { size: 26, font: UI, weight: 600 });
+    aRow(p, [['margen de la recta final:  ', COL.dim, UI], [aF2(aMfin), HUE.hyp], ['        margen máximo (SVM):  ', COL.dim, UI], [`ρ = ${aF2(aSep.rho)}`]], RX, 712, ts, { size: 24, weight: 600 });
+  }],
+
+  ['prueba', 'La idea de la prueba', (m) => {
+    const p = panel(0), tl = m('lin'), tr = m('root'), tc = m('cs'), tx = m('cross'), RX = 930, KM = Math.ceil(aBnd) + 2, VM = Math.ceil(aR * Math.sqrt(KM)) + 1, ks = aWk.map((_, k) => k);
+    aNote(p, 'puntos: la ejecución del ejemplo (7 actualizaciones) · líneas de trazos: los dos límites de la demostración del teorema 8.8');
+    aTitle(p, 'La idea de la prueba: una recta contra una raíz');
+    const ch = aPlot(p, 170, 690, 640, 470, { tmax: KM, v1: VM, yt: [0, 5, 10].map(v => [v, String(v)]), xt: [0, 5, 10, 15, 20], xlab: 'actualizaciones M' });
+    ch.fn(k => aSep.rho * k, COL.dim, tl + 5, 1);
+    aHalo(aTx(p, 'Mρ', ch.CX(15.5), ch.VY(aSep.rho * 15.5) + 40, tl + 5, { size: 26, fill: COL.dim, weight: 600, anchor: 'middle' }));
+    ch.line(aVw, HUE.hyp, tl + .6, 2.4, { dots: true });
+    aHalo(aTx(p, 'v · w', ch.CX(aMM) + 16, ch.VY(aVw[aMM]) + 26, tl + 1.4, { size: 26, fill: HUE.hyp, weight: 600 }));
+    ch.fn(k => aR * Math.sqrt(k), COL.dim, tr + 3.4, 1);
+    aHalo(aTx(p, 'r √M', ch.CX(13), ch.VY(aR * Math.sqrt(13)) - 22, tr + 3.4, { size: 26, fill: COL.dim, weight: 600, anchor: 'middle' }));
+    ch.line(aNw, HUE.w, tr + .4, 2.4, { dots: true });
+    aHalo(aTx(p, '‖w‖', ch.CX(aMM) + 4, ch.VY(aNw[aMM]) - 22, tr + 1.2, { size: 26, fill: HUE.w, weight: 600 }));
+    const gx = G(p, { o: 0 }); show(gx, tx + 3.4, .5);
+    mk('path', { d: `M${ch.CX(aBnd)} ${ch.VY(0)}V${ch.VY(aR * Math.sqrt(aBnd)) - 26}`, stroke: HUE.hyp, 'stroke-width': 3, 'stroke-dasharray': '6 7', fill: 'none' }, gx);
+    mk('circle', { cx: ch.CX(aBnd), cy: ch.VY(aSep.rho * aBnd), r: 8, fill: HUE.hyp }, gx);
+    aHalo(aTx(gx, `r^{2}/ρ^{2} = ${aBnd.toFixed(1)}`, ch.CX(aBnd), ch.VY(aR * Math.sqrt(aBnd)) - 42, null, { size: 26, fill: HUE.hyp, weight: 600, anchor: 'middle' }));
+    aTx(p, 'v: separador con margen ρ,  ‖v‖ = 1   ·   tras M actualizaciones:', RX, 250, tl, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['v · w', HUE.hyp], ['   ≥   Mρ'], ['          crece al menos ρ cada vez', COL.dim, UI]], RX, 322, [tl, tl + 5, tl + 5], { size: 30, weight: 600 }).slice(-1)[0].setAttribute('font-size', 22);
+    aRow(p, [['‖w‖', HUE.w], ['   ≤   r √M'], ['          ‖w‖^{2} crece a lo sumo r^{2}', COL.dim, UI]], RX, 398, [tr, tr + 3.4, tr + 3.4], { size: 30, weight: 600 }).slice(-1)[0].setAttribute('font-size', 22);
+    aRow(p, [['v · w', HUE.hyp], ['   ≤   '], ['‖w‖', HUE.w], ['          Cauchy-Schwarz', COL.dim, UI]], RX, 474, tc, { size: 30, weight: 600 }).slice(-1)[0].setAttribute('font-size', 22);
+    aTx(p, 'Mρ   ≤   r √M      ⟹      M   ≤   r^{2}/ρ^{2}', RX, 580, tx + 3.4, { size: 34, weight: 600 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), pl = aOrig(p, 400, 420, 250, 2.6, [], 'aClipQ2', { t0: null }), BX = [820, 1060, 1300], v = [Math.SQRT1_2, Math.SQRT1_2];
+    T(p, 'La cota del Perceptron', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    put(pl.circle(aQ2.r), { o: 1 }); put(pl.sep(v, aQ2.rho), { o: 1 });
+    mk('path', { d: `M${pl.cx} ${pl.cy}V${pl.Y(-aQ2.r)}`, stroke: COL.dim, 'stroke-width': 3, fill: 'none' }, pl.og);
+    aHalo(aTx(pl.og, `r = ${aNum(aQ2.r)}`, pl.cx + 14, pl.Y(-aQ2.r * .62), null, { size: 28, fill: COL.dim, weight: 700 }));
+    mk('path', { d: `M${pl.cx} ${pl.cy}L${pl.X(v[0] * aQ2.rho)} ${pl.Y(v[1] * aQ2.rho)}`, stroke: COL.chalk, 'stroke-width': 4, fill: 'none' }, pl.og);
+    aHalo(aTx(pl.og, `ρ = ${aNum(aQ2.rho)}`, pl.X(v[0] * aQ2.rho) + 14, pl.Y(v[1] * aQ2.rho) - 10, null, { size: 28, weight: 700 }));
+    aTx(p, 'radio de los datos y margen del separador:', BX[0], 250, null, { size: 26, fill: COL.dim, font: UI });
+    aTx(p, 'cota de actualizaciones:', BX[0], 310, null, { size: 26, fill: COL.dim, font: UI });
+    S.q2 = aQ2o.map((val, j) => { const g = G(p, { x: BX[j], y: 350 }); mk('rect', { x: 0, y: 0, width: 200, height: 170, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); T(g, aNum(val), { x: 100, y: 116, size: 88, fill: HUE.hyp, weight: 700, anchor: 'middle', font: MATH }); return g; });
+    S.q2B = BX.map(x => [x, 350, 200, 170]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-cota', prompt: ['¿Cuál es la cota de actualizaciones del Perceptron?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'cota ' + aNum(aQ2o[j]) })), aQ2r,
+      `Radio al cuadrado sobre margen al cuadrado: ${aNum(aQ2.r ** 2)} / ${aNum(aQ2.rho ** 2)} = ${aNum(aQ2o[2])}.`,
+      j => j === 0 ? 'Eso es el radio sobre el margen. En la cota, los dos van al cuadrado.' : `Falta elevar el margen al cuadrado: se divide por ${aNum(aQ2.rho ** 2)}, no por ${aNum(aQ2.rho)}.`),
+  }], done) }],
+
+  ['nosep', 'El caso no separable', (m) => {
+    const p = panel(0), tn = m('noise'), tu = m('run'), tt = m('thm'), tb = m('bound'), tm = m('num'), ts = m('sep'), RX = 780;
+    aNote(p, 'la muestra anterior más dos puntos (anillo rojo), 3 pasadas · la cota se evalúa con el v y el ρ del caso separable');
+    aTitle(p, 'Caso no separable: la cota paga la pérdida de bisagra');
+    const pl = aMain(p, 'aClipNosep', aP2); aLeg(p, 130, 766);
+    [aP.length, aP.length + 1].forEach(i => { const [x] = aP2[i]; put(pl.dots[i], { o: 0 }); show(pl.dots[i], tn, .4); show(put(mk('circle', { cx: pl.X(x[0]), cy: pl.Y(x[1]), r: 17, fill: 'none', stroke: COL.bad, 'stroke-width': 3, 'stroke-dasharray': '5 5' }, pl.dg), { o: 0 }), tn, .4); });
+    const sp = pl.sep(aSep.v, aSep.rho); show(sp, tt + 2, .6);
+    const info = aTx(p, '', RX, 322, tu, { size: 26, font: UI, weight: 600, fill: HUE.hyp });
+    const setR = r => { const s = pl.step(aRun2, r); info._set(`ronda ${Math.min(aT2, s.k + 1)} de ${aT2}        actualizaciones:  ${s.M}`); };
+    setR(0);
+    prog(q => setR(q * aT2), tu, tb - tu - .5, lin);
+    aTx(p, 'ninguna recta separa: el Perceptron no converge', RX, 262, tn, { size: 26, font: UI, weight: 600 });
+    aRow(p, [['Teorema 8.11', HUE.hyp, UI], ['        para todo ρ > 0 y todo v con ‖v‖ ≤ 1:', COL.dim, UI]], RX, 412, tt, { size: 24, weight: 600 });
+    aRow(p, [['l_{t}  =  max(0, 1 − y_{t} (v · x_{t})/ρ)'], ['        pérdida de bisagra', COL.dim, UI]], RX, 472, tt + 6, { size: 28, weight: 600 }).slice(-1)[0].setAttribute('font-size', 22);
+    aRow(p, [['M   ≤   ( r/ρ  +  √‖l_{ρ}‖_{1} )^{2}'], ['        l_{ρ}: las l_{t} de las rondas con actualización', COL.dim, UI]], RX, 548, tb, { size: 32, weight: 600 }).slice(-1)[0].setAttribute('font-size', 22);
+    aRow(p, [['aquí:   ', COL.dim, UI], [`M = ${aM2}`, HUE.hyp], [`        ‖l_{ρ}‖_{1} = ${aL2.toFixed(1)}        cota = ${aBnd2.toFixed(1)}`]], RX, 640, [tm, tm, tm + 3], { size: 26, weight: 600 });
+    aRow(p, [['sin pérdidas:    ', COL.dim, UI], ['M  ≤  r^{2}/ρ^{2}'], ['        (teorema 8.8)', COL.dim, UI]], RX, 712, ts, { size: 26, weight: 600 });
+  }],
+
+  ['dual', 'Forma dual y kernels', (m) => {
+    const p = panel(0), tsm = m('sum'), ta = m('alpha'), ti = m('inner'), tk = m('ker'), tc = m('circ'), tv = m('svm'), MX = 800;
+    aNote(p, 'anillo blanco: α > 0 · derecha: datos ilustrativos, kernel polinomial de grado 2, pasadas en orden hasta no fallar');
+    aTitle(p, 'Forma dual: basta el producto interno, o un kernel');
+    // izquierda: el ejemplo, con α por punto
+    const pa = aOrig(p, 330, 440, 230, aVIEW, aP, 'aClipDualA'); pa.setW(aWfin);
+    aTx(pa.g, 'el ejemplo separable', 100, 196, null, { size: 22, fill: COL.dim, font: UI });
+    aP.forEach(([x], i) => { if (!aAl[i]) return; const cx = pa.X(x[0]), cy = pa.Y(x[1]); show(put(mk('circle', { cx, cy, r: 17, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, pa.og), { o: 0 }), tsm + .3 * i / aP.length, .4); aHalo(aTx(pa.og, `α = ${aAl[i]}`, cx + (x[0] < -2 ? -26 : 26), cy + (x[0] < -2 ? 8 : -14), ta, { size: 24, weight: 700, font: UI, anchor: x[0] < -2 ? 'end' : 'start' })); });
+    aRow(p, [['w', HUE.hyp], ['  =  ∑_{s} α_{s} y_{s} x_{s}'], [`  =  ${aVec(aWfin)}`, HUE.hyp]], 100, 722, [tsm, tsm, tsm + 3], { size: 28, weight: 600 });
+    aTx(p, 'α_{s}: veces que x_{s} provocó una actualización', 100, 764, ta, { size: 22, fill: COL.dim, font: UI });
+    // centro: de la figura 8.8 a la 8.9
+    aTx(p, 'predicción (figura 8.8)', MX, 300, ti, { size: 22, fill: COL.dim, font: UI, anchor: 'middle' });
+    aTx(p, 'sgn( ∑_{s} α_{s} y_{s} (x_{s} · x_{t}) )', MX, 348, ti, { size: 28, weight: 600, anchor: 'middle' });
+    const ar = put(mk('path', { d: `M${MX} 386v50M${MX - 12} 424l12 14l12 -14`, stroke: COL.dim, 'stroke-width': 3, fill: 'none', 'stroke-linecap': 'round' }, p), { o: 0 }); show(ar, tk, .4);
+    aTx(p, 'con un kernel PDS K (figura 8.9)', MX, 486, tk, { size: 22, fill: COL.dim, font: UI, anchor: 'middle' });
+    aTx(p, 'sgn( ∑_{s} α_{s} y_{s} K(x_{s}, x_{t}) )', MX, 534, tk + .6, { size: 28, weight: 600, anchor: 'middle', fill: HUE.hyp });
+    // derecha: Perceptron con kernel sobre datos que ninguna recta separa
+    const pb = aOrig(p, 1270, 440, 230, 3.6, aPk, 'aClipDualB', { t0: tc - .6 });
+    aTx(pb.g, 'ninguna recta por el origen los separa', 1040, 196, null, { size: 22, fill: COL.dim, font: UI });
+    show(pb.cells(aKr.f), tc + 3.4, .8);
+    aPk.forEach(([x], i) => { if (aKr.al[i]) show(put(mk('circle', { cx: pb.X(x[0]), cy: pb.Y(x[1]), r: 17, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, pb.og), { o: 0 }), tc + 3.4, .4); });
+    aRow(p, [['K(x, x′)  =  (x · x′ + 1)^{2}'], [`        ${aKr.M} actualizaciones`, HUE.hyp, UI]], 1040, 722, [tc, tc + 5.6], { size: 26, weight: 600 });
+    aRow(p, [['E[R(h_{S})]   ≤   E[ min( M(S),  r_{S}^{2}/ρ_{S}^{2} ) / (m + 1) ]'], ['        teorema 8.9   ·   SVM sin b: igual, con N_{SV} en lugar de M(S) (teorema 8.10)', COL.dim, UI]], 100, 826, tv, { size: 26, weight: 600 }).slice(-1)[0].setAttribute('font-size', 22);
+  }],
+
+  ['winnow', 'El algoritmo Winnow', (m) => {
+    const p = panel(0), tw_ = m('w'), tp = m('pred'), tu = m('upd'), tr = m('run'), tc = m('cnt'), tt = m('thm'), tx = m('cmp'), BX = 150, CW = 26, BY = 500, HS = 800, RX = 1030, TY = 760;
+    aNote(p, `datos ilustrativos: ${aWT} rondas sorteadas con semilla fija; y = signo de la suma de las 3 relevantes · figura 8.10 con η = ρ_{∞}/r_{∞}^{2} = ${aF2(aEta)} · logaritmo natural`);
+    aTitle(p, 'Winnow: actualización multiplicativa');
+    const gb = G(p, { o: 0 }); show(gb, .4);
+    aTx(gb, 'pesos w_{t,i} (positivos, suman 1)', BX, 196, null, { size: 22, fill: COL.dim, font: UI });
+    mk('path', { d: `M${BX - 6} ${BY}H${BX + aWN * CW + 2}`, stroke: COL.faint, 'stroke-width': 2 }, gb);
+    const bars = aV.map((rel, i) => mk('rect', { x: BX + i * CW + 3, y: BY, width: CW - 6, height: 0, fill: HUE.w }, gb));
+    aRel.forEach(i => mk('path', { d: `M${BX + i * CW + CW / 2} ${BY + 62}l-9 15h18z`, fill: COL.chalk }, gb));
+    const gl = G(p, { o: 0 }); show(gl, tr, .5);
+    mk('path', { d: `M${BX + 9} ${BY + 100}l-9 15h18z`, fill: COL.chalk }, gl); aTx(gl, 'características relevantes', BX + 30, BY + 116, null, { size: 22, fill: COL.dim, font: UI });
+    const nums = aRel.map(i => aHalo(T(gl, '', { x: BX + i * CW + CW / 2, y: 0, size: 22, fill: HUE.w, font: MATH, weight: 700, anchor: 'middle' })));
+    // la fila de coordenadas de la ronda en curso: verde si coincide con la etiqueta (el peso crece), rojo si no
+    const gc = G(p, { o: 0 }); show(gc, tp, .4);
+    aTx(gc, 'x_{t,i}', BX - 14, BY + 38, null, { size: 22, fill: COL.dim, anchor: 'end' });
+    const cells = aV.map((_, i) => ({ bg: mk('rect', { x: BX + i * CW + 2, y: BY + 14, width: CW - 4, height: 32 }, gc), tx: T(gc, '', { x: BX + i * CW + CW / 2, y: BY + 38, size: 22, font: MATH, weight: 700, anchor: 'middle' }) }));
+    const info = aTx(p, '', BX, BY + 170, tp, { size: 24, font: UI, weight: 600 });
+    const setR = r => {
+      const rr = Math.max(0, Math.min(aWT, r)), k = Math.min(aWT - 1, Math.floor(rr)), f = rr >= aWT ? 1 : rr - k, q = aWin[k], [x, y] = aWseq[k], u = q.upd ? Math.max(0, Math.min(1, (f - .6) / .4)) : 0, seen = f > .4;
+      bars.forEach((b, i) => { const v = q.w[i] + (q.wn[i] - q.w[i]) * u, h = Math.min(300, v * HS); b.setAttribute('height', h.toFixed(1)); b.setAttribute('y', (BY - h).toFixed(1)); });
+      aRel.forEach((i, j) => { const v = q.w[i] + (q.wn[i] - q.w[i]) * u; nums[j].textContent = aF2(v); nums[j].setAttribute('y', (BY - Math.min(300, v * HS) - 10).toFixed(1)); });
+      cells.forEach((c, i) => { c.tx.textContent = x[i] > 0 ? '+' : '−'; c.bg.setAttribute('fill', x[i] * y > 0 ? COL.good : COL.bad); c.bg.setAttribute('fill-opacity', seen ? (x[i] * y > 0 ? .2 : .42) : 0); });
+      info._set(`ronda ${k + 1} de ${aWT}      y_{t} = ${y > 0 ? '+1' : '−1'}      ${seen ? (q.upd ? 'falla' : 'acierta') : '…'}      actualizaciones: ${rr >= aWT ? q.M : q.M - (q.upd && u < 1 ? 1 : 0)}`);
+    };
+    setR(0);
+    prog(q => setR(.5 * q), tp + .4, 2.4, lin);                    // ronda 1: llega x, falla
+    prog(q => setR(.5 + .5 * q), tu + 2.6, 3.4, lin);              // los pesos se multiplican
+    prog(q => setR(1 + 7 * q), tu + 7, tr - tu - 7.6, lin);
+    prog(q => setR(8 + (aWT - 8) * q), tr + 3.2, tc - tr - 3.6, lin);
+    const gA = G(p);
+    aRow(gA, [['w_{1,i}  =  1/N'], [`          N = ${aWN},   x_{t,i} = ±1`, COL.dim]], RX, 262, tw_, { size: 28, weight: 600 });
+    aTx(gA, 'ŷ_{t}  =  sgn(w_{t} · x_{t})', RX, 334, tp, { size: 28, weight: 600 });
+    aTx(gA, 'si falla, cada peso:', RX, 410, tu, { size: 24, fill: COL.dim, font: UI });
+    aTx(gA, 'w_{t+1,i}  =  w_{t,i} exp(η y_{t} x_{t,i}) / Z_{t}', RX, 462, tu + .6, { size: 28, weight: 600, fill: HUE.w });
+    aTx(gA, 'Z_{t}: normaliza, para que sumen 1', RX, 506, tu + 9, { size: 22, fill: COL.dim, font: UI });
+    hide(gA, tt - .5, .4);
+    text(p, 'Teorema 8.13', RX, 262, tt, { size: 26, fill: HUE.hyp, weight: 600 });
+    aTx(p, 'M   ≤   2 (r_{∞}^{2}/ρ_{∞}^{2}) log N', RX, 326, tt + .6, { size: 34, weight: 600 });
+    aTx(p, 'r_{∞}: radio en norma ∞   ·   ρ_{∞}: margen en norma 1', RX, 378, tt + 3, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'solución rala (pocas relevantes):  Winnow', RX, 470, tx + 4.4, { size: 26, font: UI, weight: 600 });
+    aTx(p, 'solución no rala:  Perceptron', RX, 520, tx + 9, { size: 26, font: UI, weight: 600 });
+    // la comparación sobre la misma secuencia
+    const C = [BX, BX + 330, BX + 560, BX + 700];
+    const gh = G(p, { o: 0 }); show(gh, tc, .4);
+    T(gh, `actualizaciones en ${aWT} rondas`, { x: C[1] + 30, y: TY - 46, size: 22, fill: COL.dim, anchor: 'middle' }); T(gh, 'cota', { x: C[2] + 30, y: TY - 46, size: 22, fill: COL.dim, anchor: 'middle' });
+    [['Winnow', aWinM, aBw, `2 (r_{∞}^{2}/ρ_{∞}^{2}) log N        r_{∞} = ${aNum(aRinf)},   ρ_{∞} = ${aF2(aRhoInf)}`, HUE.w, tc, tx], ['Perceptron', aPwM, aBp, `r^{2}/ρ^{2}        r^{2} = N = ${aNum(aRw2 * aRw2)},   ρ^{2} = ${aF2(aRhoW2 * aRhoW2)}        (teorema 8.8)`, HUE.hyp, tc + 2.6, tx + 1.6]].forEach(([nm, mm, bb, fm, col, ta, tb], j) => {
+      const y = TY + j * 48;
+      text(p, nm, C[0], y, ta, { size: 28, fill: col, weight: 600 });
+      aTx(p, String(mm), C[1] + 30, y, ta, { size: 30, weight: 700, anchor: 'middle', fill: col });
+      aTx(p, bb.toFixed(1), C[2] + 30, y, tb, { size: 30, weight: 700, anchor: 'middle' });
+      aTx(p, fm, C[3], y, tb, { size: 22, fill: COL.dim });
+    });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Perceptron:  ŷ = sgn(w · x);  solo si falla,  w ← w + y x.', 'w1'], ['Caso separable:  a lo sumo  r^{2}/ρ^{2}  actualizaciones, sin importar la dimensión.', 'w2'],
+      ['Forma dual: solo productos internos, así que admite kernels.', 'w3'], ['Winnow: pesos positivos y actualización multiplicativa; conviene con soluciones ralas.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['El Perceptron cambia el vector w en todas las rondas, acierte o falle.'], ans: ['f'], why: 'Solo cuando falla: si acierta, w queda igual.' },
+      { parts: ['La cota de actualizaciones del Perceptron no depende de la dimensión del espacio.'], ans: ['v'], why: 'Solo entran el radio de los datos y el margen.' },
+      { parts: ['Si el margen se reduce a la mitad, la cota del Perceptron se duplica.'], ans: ['f'], why: 'Se multiplica por cuatro: el margen entra al cuadrado.' },
+      { parts: ['El Perceptron dual solo usa productos internos entre puntos, así que admite un kernel.'], ans: ['v'], why: 'El vector w es una suma de los puntos que provocaron una actualización.' },
+      { parts: ['Winnow conviene cuando pocas características son relevantes entre muchas.'], ans: ['v'], why: 'Su cota crece con el logaritmo de N, el número de características.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

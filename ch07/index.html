@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estimación contra aproximación: ERM y SRM</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 7, title: 'Estimación contra aproximación: ERM y SRM', minutes: 6, language: 'es', next: '../ch08/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 6) ---------- */
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, est: COL.real, app: COL.rat };   // violeta: estimación y complejidad · rosa: aproximación
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'R_{D}(h_{S})'. Con t0 = null queda visible desde el inicio.
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    mk('tspan', { dy: dy - prev, ...(k ? { 'font-size': size * .68 } : {}) }, e).textContent = k ? s.slice(2, -1) : s;
+    prev = dy;
+  });
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx seguidas en una línea, cada una con su color: [[texto, color], …]. Devuelve los elementos y, en .xs, dónde empieza cada uno.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill]) => { xs.push(x); const e = aTx(p, str, x, y, t0, { ...opts, fill: fill || COL.chalk }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF3 = v => v.toFixed(3);
+const aNote = (p, str) => text(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end' });
+const aHue = v => v > 0 ? HUE.pos : HUE.neg;                                       // etiqueta +1 = salmón, etiqueta −1 = azul
+const aSq = (p, x, y, fill, t0, o = .85) => { const e = put(mk('rect', { x, y: y - 18, width: 20, height: 20, fill, 'fill-opacity': o }, p), { o: 0 }); show(e, t0); return e; };
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aSum = l => l.reduce((s, v) => s + v, 0);
+const aR6 = v => Math.round(v * 1e6) / 1e6;
+const aBinom = (n, q) => { const o = []; let lc = 0; for (let k = 0; k <= n; k++) { o.push(Math.exp(lc + k * Math.log(q) + (n - k) * Math.log(1 - q))); lc += Math.log(n - k) - Math.log(k + 1); } return o; };
+// El ejemplo: x uniforme en [0, 1); la etiqueta más probable es 1 en dos tramos (dados en celdas de 1/32) y se invierte con probabilidad aNu.
+const aC = 32, aPos = [[1, 8], [12, 22]], aNu = .1, aM = 100, aK = 8, aKs = Array.from({ length: aK }, (_, i) => i + 1);
+const aBay = Array.from({ length: aC }, (_, i) => aPos.some(([a, b]) => i >= a && i < b) ? 1 : 0);     // clasificador de Bayes, celda por celda
+const aBins = k => 2 ** (k - 1);                                                   // H_k: funciones constantes en 2^(k−1) tramos iguales (anidados)
+const aDraw = (seed, m) => { const r = aRng(seed); return Array.from({ length: m }, () => { const x = r(), y = aBay[Math.floor(x * aC)]; return [x, r() < aNu ? 1 - y : y]; }); };
+const aAt = (h, x) => h[Math.min(h.length - 1, Math.floor(x * h.length))];
+// Error de generalización exacto de una hipótesis h (lista de etiquetas, una por tramo): suma sobre 128 celdas.
+const aRisk = h => { let s = 0; for (let c = 0; c < 128; c++) { const x = (c + .5) / 128; s += (aAt(h, x) === aAt(aBay, x) ? aNu : 1 - aNu) / 128; } return s; };
+const aBest = k => { const N = aBins(k), w = Math.max(1, aC / N); return Array.from({ length: N }, (_, b) => N >= aC ? aAt(aBay, (b + .5) / N) : 2 * aSum(aBay.slice(b * w, b * w + w)) > w ? 1 : 0); };   // la mejor de H_k
+const aErm = (smp, k) => { const N = aBins(k), v = Array(N).fill(0); smp.forEach(([x, y]) => v[Math.floor(x * N)] += y ? 1 : -1); return v.map(t => t > 0 ? 1 : 0); };   // ERM en H_k: voto por mayoría en cada tramo (empate o tramo vacío: 0)
+const aEmp = (smp, h) => smp.filter(([x, y]) => aAt(h, x) !== y).length / smp.length;
+// Complejidad de Rademacher exacta de H_k con x uniforme: (N/m) · E[ E|σ_1 + … + σ_n| ], con n ~ Binomial(m, 1/N).
+const aRad = (m, k) => { const N = aBins(k), pmf = N > 1 ? aBinom(m, 1 / N) : null; let s = 0, g = 0; for (let n = 1; n <= m; n++) { g = n === 1 ? 1 : n % 2 ? g * n / (n - 1) : g; s += pmf ? pmf[n] * g : 0; } return (pmf ? N * s : g) / m; };
+const aLogT = (m, k) => Math.sqrt(Math.log(k) / m);                                // √(log k / m), objetivo de SRM (4.4)
+const aConf = (m, d) => Math.sqrt(2 * Math.log(3 / d) / m);                        // √(2 log(3/δ) / m), teorema 4.2
+const aAll = k => { const N = aBins(k); return Array.from({ length: 2 ** N }, (_, c) => Array.from({ length: N }, (_, b) => c >> b & 1)); };   // todas las hipótesis de H_k (k pequeño)
+// Una muestra y, para cada k: la solución de ERM, su error empírico y real, el mejor error de H_k, las dos partes del exceso y el objetivo de SRM.
+const aRun = (seed, m) => {
+  const smp = aDraw(seed, m), rows = aKs.map(k => { const h = aErm(smp, k), emp = aEmp(smp, h), R = aR6(aRisk(h)), inf = aR6(aRisk(aBest(k))), rad = aRad(m, k), lg = aLogT(m, k); return { k, h, emp, R, inf, est: aR6(R - inf), app: aR6(inf - aNu), exc: aR6(R - aNu), rad, lg, pen: rad + lg, F: emp + rad + lg }; });
+  const F = rows.map(o => o.F), E = rows.map(o => o.exc);
+  return { S: smp, rows, ks: F.indexOf(Math.min(...F)) + 1, ko: E.indexOf(Math.min(...E)) + 1 };
+};
+const aA = aRun(3, aM), aB = aRun(5, aM);                                           // la muestra del capítulo y la de la comprobación 2
+const aRw = k => aA.rows[k - 1];
+// Las 256 hipótesis de H_4 como puntos (R, R̂), la mayor brecha |R − R̂|, la que elige ERM y la mejor.
+const aSc = (() => { const k = 4, pts = aAll(k).map(h => [aR6(aRisk(h)), aEmp(aA.S, h)]), low = j => pts.reduce((b, q, i) => q[j] < pts[b][j] ? i : b, 0); return { k, pts, gap: aR6(Math.max(...pts.map(([r, e]) => Math.abs(r - e)))), erm: pts[low(1)], best: pts[low(0)] }; })();
+const aKh = aA.rows.find(o => o.app === 0).k, aDl = .05;                           // k(h*): el primer conjunto que contiene al clasificador de Bayes
+const aTh = [100, 1600, 25600].map(m => [m, 2 * aRad(m, aKh), aLogT(m, aKh), aConf(m, aDl)]);   // términos de (4.6) al crecer m
+const aQk = [1, 3, 8], aQF = aQk.map(k => aB.rows[k - 1].F), aQr = aQF.indexOf(Math.min(...aQF));   // comprobación 2
+const aP2 = [[2, .30, .10], [5, .12, .30]].map(([k, e, r]) => [k, e, r, e + r + aLogT(100, k)]);   // práctica 2: [k, error empírico, ℜ, F]
+/* aMATH:end */
+
+// Hipótesis constante por tramos como franja de celdas de color.
+const aStrip = (p, h, x, y, w, ht = 30) => { const g = G(p), cw = w / h.length; h.forEach((v, i) => mk('rect', { x: (x + i * cw).toFixed(2), y, width: (cw + .5).toFixed(2), height: ht, fill: aHue(v), 'fill-opacity': .82 }, g)); return g; };
+// Muestra sobre el eje: los +1 arriba de la línea, los −1 debajo.
+const aPts = (p, smp, x, y, w, t0) => smp.forEach(([u, v], j) => { const e = put(mk('circle', { cx: (x + u * w).toFixed(1), cy: y + (v ? -1 : 1) * (11 + (j % 3) * 11), r: 5, fill: aHue(v) }, p), { o: 0 }); show(e, t0 + j * .02, .25); });
+// Barra vertical que crece desde la base.
+const aUp = (p, x, base, w, h, t0, fill, o = .85) => { const e = mk('rect', { x, y: base, width: w, height: 0, fill, 'fill-opacity': o }, p); put(e, {}); tw(e, { a_y: base - h, a_height: h }, t0, .6, out); return e; };
+const aTr = k => aBins(k) === 1 ? '1 tramo' : aBins(k) + ' tramos';
+const aMs = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');                       // 25600 → «25 600»
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 1 · Capítulo 7', { x: 800, y: 330, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Estimación contra aproximación', { x: 800, y: 420, size: 68, weight: 600, anchor: 'middle' });
+    T(g, 'ERM y SRM', { x: 800, y: 500, size: 48, weight: 600, anchor: 'middle', fill: COL.task });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Selección de modelo: cómo elegir el conjunto de hipótesis H.', 800, 620, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['problema', 'El problema de selección de modelo', (m) => {
+    const p = panel(0), td = m('data'), tb = m('bay'), ts = [m('h1'), m('h4'), m('h8')], tt = m('trade'), X = 360, W = 880;
+    aNote(p, 'datos ilustrativos · muestra con semilla · errores calculados en la página');
+    text(p, 'Selección de modelo: ¿qué conjunto de hipótesis H conviene usar?', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    show(put(mk('path', { d: `M${X} 250H${X + W}`, stroke: COL.dim, 'stroke-width': 2 }, p), { o: 0 }), td, .3);
+    text(p, 'muestra S', 100, 244, td, { size: 26, weight: 600 }); text(p, `m = ${aM} puntos`, 100, 276, td + .4, { size: 22, fill: COL.dim });
+    text(p, '0', X - 14, 258, td, { size: 22, fill: COL.dim, anchor: 'end', font: MATH }); text(p, '1', X + W + 14, 258, td, { size: 22, fill: COL.dim, font: MATH });
+    aPts(p, aA.S, X, 250, W, td + .3);
+    [[1, 'etiqueta +1'], [0, 'etiqueta −1']].forEach(([v, s], i) => { show(put(mk('circle', { cx: 1300, cy: 232 + i * 34, r: 7, fill: aHue(v) }, p), { o: 0 }), td + .6); text(p, s, 1318, 240 + i * 34, td + .6, { size: 22, fill: COL.dim }); });
+    aTx(p, 'h_{Bayes}', 100, 352, tb, { size: 28, weight: 600 }); text(p, 'etiqueta más probable', 100, 382, tb + .4, { size: 22, fill: COL.dim });
+    show(put(aStrip(p, aBay, X, 330, W), { o: 0 }), tb, .6);
+    aTx(p, `R^{*} = ${aF3(aNu)}`, 1290, 352, tb + 7.4, { size: 28, weight: 600 }); text(p, 'error de Bayes', 1290, 382, tb + 7.8, { size: 22, fill: COL.dim });
+    text(p, 'en cada conjunto, la hipótesis con menor error en la muestra', X, 440, ts[0], { size: 22, fill: COL.dim });
+    aTx(p, 'R̂_{S}(h)', 1290, 440, ts[0], { size: 24, fill: COL.dim }); aTx(p, 'R(h)', 1440, 440, ts[0], { size: 24, fill: COL.dim });
+    [1, 4, 8].forEach((k, i) => {
+      const y = 490 + i * 90, o = aRw(k), t = ts[i];
+      aTx(p, `H_{${k}}`, 100, y + 10, t, { size: 30, fill: HUE.hyp, weight: 600 }); text(p, aTr(k), 160, y + 9, t + .3, { size: 22, fill: COL.dim });
+      show(put(aStrip(p, o.h, X, y - 15, W), { o: 0 }), t + .4, .6);
+      text(p, aF3(o.emp), 1290, y + 10, t + 1.2, { size: 28 }); text(p, aF3(o.R), 1440, y + 10, t + 1.8, { size: 28, weight: 700 });
+    });
+    text(p, 'H pobre: ninguna hipótesis se acerca a Bayes.   H rico: aprender con él es más difícil.', 800, 800, tt, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['descomp', 'Dos partes del error', (m) => {
+    const p = panel(0), tx = m('exc'), tb = m('best'), te = m('est'), ta = m('app'), tn = m('num'), th = m('hid'), tc = m('bound'), o = aRw(4);
+    const CX = 330, CY = 400, RX = 220, RY = 140, B = [640, 220], Hh = [250, 450], k = 1 / Math.hypot((B[0] - CX) / RX, (B[1] - CY) / RY), Hs = [CX + (B[0] - CX) * k, CY + (B[1] - CY) * k];
+    aNote(p, 'arriba, esquema de la figura 4.1 · abajo, valores exactos del ejemplo');
+    text(p, 'El error de una hipótesis h elegida en H, en dos partes', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    show(put(mk('ellipse', { cx: CX, cy: CY, rx: RX, ry: RY, fill: COL.faint, 'fill-opacity': .25, stroke: COL.chalk, 'stroke-width': 3 }, p), { o: 0 }), .3);
+    text(p, 'H', 170, 350, .4, { size: 36, font: MATH, weight: 600 });
+    const seg = (a, b, c) => path(p, `M${a[0]} ${a[1]}L${b[0].toFixed(1)} ${b[1].toFixed(1)}`, { stroke: c, 'stroke-width': 7, 'stroke-linecap': 'round' }, { d: 0 });
+    show(put(mk('path', { d: `M${Hh[0]} ${Hh[1]}L${B[0]} ${B[1]}`, stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '8 8' }, p), { o: 0 }), tx + .6);
+    draw(seg(Hh, Hs, HUE.est), te, 1); draw(seg(Hs, B, HUE.app), ta, 1);
+    const dot = (q, c, t, lab, dx, dy) => { show(put(mk('circle', { cx: q[0], cy: q[1], r: 12, fill: c }, p), { o: 0 }), t, .4); aTx(p, lab, q[0] + dx, q[1] + dy, t, { size: 28, fill: c, weight: 600 }); };
+    dot(Hh, HUE.hyp, .5, 'h', -34, 34); dot(B, COL.chalk, tx, 'h_{Bayes}', 20, -14); dot(Hs, COL.chalk, tb, 'h^{*}', -6, -22);
+    text(p, 'estimación', 386, 440, te + .6, { size: 24, fill: HUE.est, weight: 600 }); text(p, 'aproximación', 596, 312, ta + .6, { size: 24, fill: HUE.app, weight: 600 });
+    aTx(p, 'h^{*}: la mejor hipótesis de H', 100, 590, tb + .4, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'R(h) − R^{*}', 820, 210, tx, { size: 38, weight: 600 }); text(p, 'exceso de error', 1060, 208, tx + .5, { size: 24, fill: COL.dim });
+    aTx(p, '=   R(h) − inf_{h∈H} R(h)', 820, 284, te, { size: 34, fill: HUE.est, weight: 600 }); text(p, 'estimación', 1280, 282, te + .5, { size: 24, fill: HUE.est, weight: 600 });
+    aTx(p, '+   inf_{h∈H} R(h) − R^{*}', 820, 358, ta, { size: 34, fill: HUE.app, weight: 600 }); text(p, 'aproximación', 1280, 356, ta + .5, { size: 24, fill: HUE.app, weight: 600 });
+    text(p, '(4.1)', 1480, 356, ta + .5, { size: 22, fill: COL.dim });
+    text(p, 'aproximación: no se puede medir, depende de D', 820, 450, th, { size: 26 });
+    text(p, 'estimación: a veces se puede acotar', 820, 494, tc, { size: 26 });
+    // el ejemplo, sobre un eje de error
+    const EX = e => 200 + e * 4400, Y = 740;
+    aTx(p, `en el ejemplo, con H_{4} (${aTr(4)}) y la hipótesis h con menor error en la muestra`, 200, 640, tn, { size: 22, fill: COL.dim, font: UI });
+    show(put(mk('path', { d: `M${EX(0)} ${Y}H${EX(.26)}M${EX(0)} ${Y - 8}v16`, stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, p), { o: 0 }), tn);
+    text(p, '0', EX(0), Y + 38, tn, { size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); text(p, 'error', EX(.26) + 14, Y + 8, tn, { size: 22, fill: COL.dim });
+    [[aNu, o.inf, HUE.app, 'aproximación', o.app], [o.inf, o.R, HUE.est, 'estimación', o.est]].forEach(([a, b, c, s, v], i) => {
+      show(put(mk('rect', { x: EX(a), y: Y - 7, width: EX(b) - EX(a), height: 14, fill: c }, p), { o: 0 }), tn + .8 + i * 2.6);
+      text(p, `${s} ${aF3(v)}`, (EX(a) + EX(b)) / 2, Y + 44, tn + .8 + i * 2.6, { size: 24, fill: c, anchor: 'middle', weight: 600 });
+    });
+    [[aNu, `R^{*} = ${aF3(aNu)}`], [o.inf, `mejor de H_{4}: ${aF3(o.inf)}`], [o.R, `R(h) = ${aF3(o.R)}`]].forEach(([e, s], i) => {
+      show(put(mk('path', { d: `M${EX(e)} ${Y - 16}v32`, stroke: COL.chalk, 'stroke-width': 3 }, p), { o: 0 }), tn + .3 + i * .2);
+      aTx(p, s, EX(e), Y - 30, tn + .3 + i * .2, { size: 24, anchor: 'middle', font: UI });
+    });
+  }],
+
+  ['crece', 'Agrandar H', (m) => {
+    const p = panel(0), tn = m('nest'), ta = m('app'), te = m('est'), ts = m('sum'), tm = m('min'), th = m('how');
+    const LX = 80, CY = 440, rx = k => 40 + 30 * k, ry = k => rx(k) * .6, B = [490, 410], edge = k => LX + rx(k) + rx(k) * Math.sqrt(1 - ((B[1] - CY) / ry(k)) ** 2);
+    const KX = k => 780 + (k - 1) * 98, base = 660, sc = 800, R = aA.rows;
+    aNote(p, 'a la izquierda, esquema de la figura 4.2 · a la derecha, errores exactos del ejemplo');
+    text(p, 'Agrandar H: lo que se gana y lo que se pierde', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    aTx(p, `H_{1} ⊂ H_{2} ⊂ … ⊂ H_{${aK}}`, LX, 200, tn, { size: 32, weight: 600 }); text(p, 'conjuntos anidados', LX, 236, tn + .5, { size: 22, fill: COL.dim });
+    const el = aKs.map(k => { const e = put(mk('ellipse', { cx: LX + rx(k), cy: CY, rx: rx(k), ry: ry(k), fill: COL.faint, 'fill-opacity': .1, stroke: COL.chalk, 'stroke-width': 2 }, p), { o: 0 }); show(e, k === 1 ? .3 : tn + .4 + k * .45, .4); return e; });
+    aTx(p, 'H_{1}', LX + 34, CY + 8, .4, { size: 24 }); aTx(p, `H_{${aK}}`, LX + rx(aK), CY + ry(aK) + 32, tn + .4 + aK * .45, { size: 24, anchor: 'middle' });
+    // el tramo rosa: lo que le falta al conjunto actual para llegar a h_Bayes
+    const gap = put(mk('path', { d: `M${B[0]} ${B[1]}H${B[0]}`, stroke: HUE.app, 'stroke-width': 7, 'stroke-linecap': 'round' }, p), { o: 0 }); show(gap, ta, .2);
+    prog(q => { const k = Math.min(aK, 1 + Math.floor(q * aK)); gap.setAttribute('d', `M${B[0]} ${B[1]}H${Math.min(B[0], edge(k)).toFixed(1)}`); el.forEach((e, i) => e.setAttribute('stroke-width', i + 1 === k && q < 1 ? 5 : 2)); }, ta, aK * .8, lin);
+    show(put(mk('circle', { cx: B[0], cy: B[1], r: 11, fill: COL.chalk }, p), { o: 0 }), .5); aTx(p, 'h_{Bayes}', B[0] + 8, B[1] - 20, .5, { size: 26, weight: 600 });
+    // el gráfico: una pareja de barras por conjunto y la suma como línea
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${KX(1) - 50} ${base - .42 * sc}V${base}H${KX(aK) + 50}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    [0, .1, .2, .3, .4].forEach(v => { T(ax, v ? v.toFixed(1) : '0', { x: KX(1) - 62, y: base - v * sc + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); mk('path', { d: `M${KX(1) - 56} ${base - v * sc}h6`, stroke: COL.dim, 'stroke-width': 2 }, ax); });
+    aKs.forEach(k => { T(ax, String(k), { x: KX(k), y: base + 32, size: 24, anchor: 'middle', font: MATH }); T(ax, String(aBins(k)), { x: KX(k), y: base + 62, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+    T(ax, 'k', { x: KX(1) - 62, y: base + 32, size: 24, anchor: 'end', font: MATH }); T(ax, 'tramos', { x: KX(1) - 62, y: base + 62, size: 22, fill: COL.dim, anchor: 'end' });
+    show(ax, .3);
+    R.forEach(o => { aUp(p, KX(o.k) - 28, base, 26, o.app * sc, ta + (o.k - 1) * .8, HUE.app); aUp(p, KX(o.k) + 2, base, 26, o.est * sc, te + (o.k - 1) * .45, HUE.est); });
+    aSq(p, 760, 200, HUE.app, ta); text(p, 'error de aproximación: baja', 792, 200, ta, { size: 24, fill: HUE.app, weight: 600 });
+    aSq(p, 760, 236, HUE.est, te); text(p, 'error de estimación: sube', 792, 236, te, { size: 24, fill: HUE.est, weight: 600 });
+    show(put(mk('path', { d: 'M756 262h28', stroke: COL.chalk, 'stroke-width': 4 }, p), { o: 0 }), ts); aTx(p, 'suma: exceso de error R(h) − R^{*}', 792, 272, ts, { size: 24, weight: 600, font: UI });
+    draw(path(p, 'M' + R.map(o => `${KX(o.k)} ${(base - o.exc * sc).toFixed(1)}`).join('L'), { stroke: COL.chalk, 'stroke-width': 4, 'stroke-linejoin': 'round' }, { d: 0 }), ts, 2.2);
+    R.forEach(o => { const y = base - o.exc * sc, t = ts + .3 + (o.k - 1) * .25; show(put(mk('circle', { cx: KX(o.k), cy: y, r: 7, fill: COL.chalk }, p), { o: 0 }), t, .3); const d = Math.sign(o.k - aA.ko); text(p, aF3(o.exc), KX(o.k) - (d ? d * 10 : -4), y - (d ? 14 : 26), t, { size: 22, anchor: d < 0 ? 'start' : 'end' }); });
+    const km = aA.ko, ym = base - aRw(km).exc * sc;
+    show(put(mk('circle', { cx: KX(km), cy: ym, r: 16, fill: 'none', stroke: COL.task, 'stroke-width': 4 }, p), { o: 0 }), tm, .4);
+    tw(el[km - 1], { c_stroke: COL.task, 'a_stroke-opacity': 1 }, tm, .4); prog(() => el[km - 1].setAttribute('stroke-width', 5), tm, .1);
+    text(p, `mínimo: k = ${km} · ${aTr(km)}`, KX(km), base + 104, tm, { size: 24, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'Ninguna de estas curvas se ve desde la muestra: dependen de la distribución D.', 800, 838, th, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), X = 360, W = 760, ks = [1, 4, 8];
+    T(p, 'El mismo ejemplo: la hipótesis con menor error en la muestra, en tres conjuntos', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'h_{Bayes}', 150, 222, null, { size: 28, weight: 600 }); aStrip(p, aBay, X, 198, W);
+    aTx(p, `R^{*} = ${aF3(aNu)}`, 1160, 222, null, { size: 24, font: UI });
+    S.q1 = ks.map((k, i) => {
+      const y = 330 + i * 110, g = G(p), o = aRw(k);
+      T(g, 'ABC'[i], { x: 100, y: y + 12, size: 34, weight: 700, fill: HUE.hyp });
+      aTx(g, `H_{${k}}`, 150, y + 4, null, { size: 30, weight: 600 }); T(g, aTr(k), { x: 150, y: y + 34, size: 22, fill: COL.dim });
+      aStrip(g, o.h, X, y - 15, W);
+      T(g, `R(h) = ${aF3(o.R)}`, { x: 1160, y: y - 2, size: 24 }); T(g, `mejor del conjunto: ${aF3(o.inf)}`, { x: 1160, y: y + 30, size: 24, fill: COL.dim });
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-estim', prompt: ['¿En cuál de los tres conjuntos es mayor el error de estimación?'],
+    build: pickEls(S.q1.map((el, i) => ({ el, box: [90, 280 + i * 110, 1440, 96], label: 'conjunto ' + 'ABC'[i] })), 2,
+      `Estimación = R(h) − mejor del conjunto = ${aF3(aRw(8).est)}: con 128 tramos se ajusta el ruido.`,
+      i => i ? `Ahí la estimación es ${aF3(aRw(4).est)}: hay un conjunto donde es mayor.` : 'Ahí h ya es la mejor del conjunto: estimación 0. Lo grande es la aproximación.'),
+  }], done) }],
+
+  ['erm', 'Minimización del riesgo empírico', (m) => {
+    const p = panel(0), td = m('def'), ta = m('all'), te = m('erm'), tb = m('best'), tg = m('band'), tp = m('prop'), tc = m('cota'), tx = m('bad'), tn = m('np');
+    const sc = 550, PX = r => 130 + (r - .1) * sc, PY = e => 790 - (e - .1) * sc, g = aSc.gap, RX = 660;
+    aNote(p, `el mismo ejemplo · errores exactos de las ${aSc.pts.length} hipótesis, calculados en la página`);
+    text(p, 'Minimización del riesgo empírico (ERM)', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'h^{ERM}_{S}  =  argmin_{h∈H} R̂_{S}(h)', 100, 204, td, { size: 36, weight: 600 }); text(p, '(4.2)', 560, 202, td, { size: 22, fill: COL.dim });
+    text(p, 'la hipótesis de H con menor error en la muestra', RX, 202, td + .6, { size: 24, fill: COL.dim });
+    // las 256 hipótesis de H_4: a la derecha, más error de generalización; arriba, más error empírico
+    const ax = G(p, { o: 0 });
+    mk('path', { d: `M${PX(.1)} ${PY(.9)}V${PY(.1)}H${PX(.9)}`, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, ax);
+    mk('path', { d: `M${PX(.1)} ${PY(.1)}L${PX(.9)} ${PY(.9)}`, stroke: COL.dim, 'stroke-width': 2, 'stroke-dasharray': '8 8' }, ax);
+    [.5, .9].forEach(v => { T(ax, v.toFixed(1), { x: PX(v), y: PY(.1) + 30, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); T(ax, v.toFixed(1), { x: PX(.1) - 12, y: PY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+    aTx(ax, 'R(h)', PX(.9) + 14, PY(.1) + 8, null, { size: 24, fill: COL.dim }); aTx(ax, 'R̂_{S}(h)', PX(.1) - 12, PY(.9) - 22, null, { size: 24, fill: COL.dim, anchor: 'middle' });
+    show(ax, ta - .4);
+    aTx(p, `las ${aSc.pts.length} hipótesis de H_{${aSc.k}} (${aTr(aSc.k)})`, PX(.1), 270, ta, { size: 22, fill: COL.dim, font: UI });
+    const band = put(mk('path', { d: `M${PX(.1)} ${PY(.1 + g)}L${PX(.9 - g)} ${PY(.9)}H${PX(.9)}V${PY(.9 - g)}L${PX(.1 + g)} ${PY(.1)}H${PX(.1)}Z`, fill: HUE.est, 'fill-opacity': .22 }, p), { o: 0 }); show(band, tg, .6);
+    aSc.pts.forEach(([r, e], i) => { const d = put(mk('circle', { cx: PX(r).toFixed(1), cy: PY(e).toFixed(1), r: 4, fill: COL.chalk }, p), { o: 0 }); tw(d, { o: .6 }, ta + .2 + (i % 64) * .03, .3); });
+    const mark = (q, t, ring) => { const e = put(mk('circle', { r: ring ? 13 : 9, ...(ring ? { fill: 'none', stroke: COL.chalk, 'stroke-width': 4 } : { fill: HUE.hyp }) }, p), { x: PX(q[0]), y: PY(q[1]), o: 0 }); show(e, t, .3); pulse(e, t + .3, 1.8); return e; };
+    mark(aSc.erm, te); aSc.pts.filter(q => q[0] === aSc.best[0]).forEach(q => mark(q, tb, true));
+    show(put(mk('rect', { x: PX(aSc.best[0]), y: PY(.1) - 6, width: PX(aSc.erm[0]) - PX(aSc.best[0]), height: 12, fill: HUE.est }, p), { o: 0 }), tb + 1.6);
+    text(p, `estimación ${aF3(aSc.erm[0] - aSc.best[0])}`, PX(.1) + 12, PY(.1) + 62, tb + 1.6, { size: 22, fill: HUE.est, weight: 600 });
+    show(put(mk('circle', { cx: RX + 10, cy: 282, r: 9, fill: HUE.hyp }, p), { o: 0 }), te); text(p, 'la que elige ERM: la más baja', RX + 34, 290, te, { size: 24 });
+    show(put(mk('circle', { cx: RX + 10, cy: 322, r: 10, fill: 'none', stroke: COL.chalk, 'stroke-width': 4 }, p), { o: 0 }), tb); text(p, 'la mejor de H: más a la izquierda (aquí empatan dos)', RX + 34, 330, tb, { size: 24 });
+    aSq(p, RX, 372, HUE.est, tg, .5); aTx(p, `brecha: ninguna se aleja de la diagonal más de ${aF3(g)}`, RX + 34, 370, tg, { size: 24, font: UI });
+    text(p, 'Proposición 4.1', RX, 446, tp, { size: 28, fill: COL.task, weight: 600 }); text(p, 'para toda muestra S', RX + 230, 446, tp + .4, { size: 22, fill: COL.dim });
+    aTx(p, 'P[ R(h^{ERM}_{S}) − inf_{h∈H} R(h) > ε ]  ≤  P[ sup_{h∈H} | R(h) − R̂_{S}(h) | > ε/2 ]', RX, 496, tp + .8, { size: 25 });
+    text(p, `(4.3) · estimación ≤ 2 × brecha · aquí: ${aF3(aSc.erm[0] - aSc.best[0])} ≤ 2 · ${aF3(g)}`, RX, 536, tp + 2.6, { size: 22, fill: COL.dim });
+    aTx(p, 'y el lado derecho  ≤  2 exp( −2m [ ε − ℜ_{m}(H) ]^{2} )', RX, 606, tc, { size: 26 });
+    text(p, 'ERM ignora la complejidad de H', RX, 690, tx, { size: 28, fill: COL.task, weight: 600 });
+    text(p, 'H pobre: error de aproximación grande', RX, 734, tx + 3.6, { size: 24 }); text(p, 'H rico: la cota de estimación se afloja', RX, 770, tx + 7.4, { size: 24 });
+    text(p, 'hallar su solución suele ser intratable: NP-difícil para hipótesis lineales', RX, 826, tn, { size: 22, fill: COL.dim });
+  }],
+
+  ['srm', 'Minimización del riesgo estructural', (m) => {
+    const p = panel(0), tu = m('union'), tb = m('bound'), to = m('obj'), te = m('emp'), tp = m('pen'), tk = m('kstar'), tc = m('cmp');
+    const BX = k => 150 + (k - 1) * 104, base = 800, sc = 400, R = aA.rows, ks = aA.ks, RX = 1040;
+    aNote(p, 'el mismo ejemplo · complejidad de Rademacher exacta para x uniforme, calculada en la página');
+    text(p, 'Minimización del riesgo estructural (SRM)', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'H = ⋃_{k≥1} H_{k} ,    H_{k} ⊂ H_{k+1}', 100, 192, tu, { size: 30, weight: 600 }); text(p, 'conjuntos anidados, de complejidad creciente', 560, 190, tu + 2.4, { size: 22, fill: COL.dim });
+    aTx(p, 'R(h)  ≤  R̂_{S}(h) + ℜ_{m}(H_{k(h)}) + √[ log k / m ] + √[ log(2/δ) / 2m ]', 100, 252, tb, { size: 28 });
+    aTx(p, 'con probabilidad ≥ 1 − δ, para todo k ≥ 1 y toda h ∈ H_{k}', 1010, 250, tb + 1.4, { size: 22, fill: COL.dim, font: UI });
+    const f = aRow(p, [['F_{k}(h)  =  R̂_{S}(h)  +  ', COL.chalk], ['ℜ_{m}(H_{k}) + √[ log k / m ]', HUE.est]], 100, 330, to, { size: 34, weight: 600 });
+    text(p, 'penalización', f.xs[1], 366, to + .6, { size: 22, fill: HUE.est, weight: 600 });
+    aTx(p, 'h^{SRM}_{S}  =  argmin F_{k}(h),   k ≥ 1,  h ∈ H_{k}', Math.max(f.end + 70, 860), 330, to + 1.2, { size: 28 }); text(p, '(4.4)', 1500, 328, to + 1.2, { size: 22, fill: COL.dim });
+    show(put(mk('path', { d: `M${BX(1) - 54} ${base}H${BX(aK) + 54}`, stroke: COL.dim, 'stroke-width': 2 }, p), { o: 0 }), te - .3);
+    text(p, 'k', BX(1) - 62, base + 34, te - .3, { size: 24, anchor: 'end', font: MATH });
+    const lab = R.map(o => {
+      const x = BX(o.k) - 30, a = o.emp * sc, b = o.rad * sc, c = o.lg * sc, t = tp + (o.k - 1) * .15;
+      aUp(p, x, base, 60, a, te + (o.k - 1) * .4, COL.chalk, .8); aUp(p, x, base - a, 60, b, t, HUE.est, .9); aUp(p, x, base - a - b, 60, c, t + .3, HUE.est, .45);
+      text(p, aF3(o.F), BX(o.k), base - a - b - c - 12, tp + 1.3, { size: 22, anchor: 'middle', weight: 600 });
+      return text(p, String(o.k), BX(o.k), base + 34, te - .3, { size: 24, anchor: 'middle', font: MATH });
+    });
+    const top = base - aRw(ks).F * sc;
+    show(put(mk('rect', { x: BX(ks) - 42, y: top - 44, width: 84, height: base - top + 52, fill: 'none', stroke: COL.task, 'stroke-width': 4 }, p), { o: 0 }), tk + 2.4, .4);
+    tw(lab[ks - 1], { c_fill: COL.task }, tk + 2.4, .3);
+    aSq(p, RX, 440, COL.chalk, te, .8); aTx(p, 'error empírico de la solución de ERM en H_{k}', RX + 32, 438, te, { size: 22, font: UI });
+    aSq(p, RX, 476, HUE.est, tp, .9); aTx(p, 'ℜ_{m}(H_{k})', RX + 32, 474, tp, { size: 22 });
+    aSq(p, RX + 190, 476, HUE.est, tp, .45); aTx(p, '√[ log k / m ]', RX + 222, 474, tp, { size: 22 });
+    text(p, 'sobre cada barra: la suma', RX, 510, tp + 1.3, { size: 22, fill: COL.dim });
+    aTx(p, `SRM elige k^{*} = ${ks} · ${aTr(ks)} · F = ${aF3(aRw(ks).F)}`, RX, 592, tk + 2.4, { size: 28, fill: COL.task, weight: 600, font: UI });
+    aTx(p, `R(h^{SRM}_{S}) = ${aF3(aRw(ks).R)}`, RX, 660, tc, { size: 30, weight: 600 });
+    aTx(p, `ERM en H_{1}: ${aF3(aRw(1).R)}  ·  ERM en H_{${aK}}: ${aF3(aRw(aK).R)}`, RX, 706, tc + 1.2, { size: 24, font: UI });
+    aTx(p, `mínimo real, en k = ${aA.ko}: ${aF3(aRw(aA.ko).R)}`, RX, 746, tc + 4.4, { size: 24, fill: COL.dim, font: UI });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0);
+    T(p, `Otra muestra de ${aM} puntos del mismo ejemplo`, { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'Tres conjuntos, con el error empírico de su solución de ERM y su penalización.', { x: 100, y: 184, size: 26 });
+    S.q2r = G(p, { o: 0 });
+    S.q2 = aQk.map((k, i) => {
+      const x = 100 + i * 480, g = G(p), o = aB.rows[k - 1];
+      mk('rect', { x, y: 240, width: 420, height: 380, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+      T(g, 'ABC'[i], { x: x + 24, y: 286, size: 32, weight: 700, fill: HUE.hyp });
+      aTx(g, `H_{${k}}`, x + 210, 330, null, { size: 60, anchor: 'middle', weight: 600 }); T(g, aTr(k), { x: x + 210, y: 376, size: 24, anchor: 'middle', fill: COL.dim });
+      T(g, 'error empírico', { x: x + 40, y: 450, size: 26 }); T(g, aF3(o.emp), { x: x + 380, y: 450, size: 28, anchor: 'end', weight: 600 });
+      T(g, 'penalización', { x: x + 40, y: 500, size: 26, fill: HUE.est }); T(g, aF3(o.pen), { x: x + 380, y: 500, size: 28, anchor: 'end', weight: 600, fill: HUE.est });
+      mk('path', { d: `M${x + 40} 528H${x + 380}`, stroke: COL.faint, 'stroke-width': 2 }, S.q2r);
+      T(S.q2r, 'suma', { x: x + 40, y: 574, size: 26, fill: i === aQr ? COL.good : COL.chalk }); T(S.q2r, aF3(o.F), { x: x + 380, y: 574, size: 28, anchor: 'end', weight: 700, fill: i === aQr ? COL.good : COL.chalk });
+      return g;
+    });
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-srm', prompt: ['¿Qué conjunto elige SRM entre estos tres? Elegir la tarjeta.'],
+    build: pickEls(S.q2.map((el, i) => ({ el, box: [100 + i * 480, 240, 420, 380], label: 'tarjeta ' + 'ABC'[i] })), aQr,
+      `SRM minimiza la suma: ${aF3(aB.rows[aQk[aQr] - 1].emp)} + ${aF3(aB.rows[aQk[aQr] - 1].pen)} = ${aF3(aQF[aQr])}, la menor de las tres.`,
+      i => i < aQr ? `Tiene la menor penalización, pero su suma es ${aF3(aQF[i])}: hay una menor.` : `Tiene el menor error empírico, pero su suma es ${aF3(aQF[i])}: hay una menor.`,
+      () => fx(S.q2r, { o: 1 }, 0, .4)),
+  }], done) }],
+
+  ['garantia', 'La garantía de SRM', (m) => {
+    const p = panel(0), tt = m('thm'), ts = m('star'), to = m('oracle'), tp = m('price'), tb = m('bars'), tu = m('but'), tc = m('cost'), sc = 520, X0 = 300;
+    text(p, 'Teorema 4.2 · garantía de aprendizaje de SRM', 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+    text(p, 'para todo δ > 0, con probabilidad ≥ 1 − δ sobre una muestra S de tamaño m', 100, 172, .5, { size: 22, fill: COL.dim });
+    aTx(p, 'R(h^{SRM}_{S})  ≤  inf_{h∈H} ( R(h) + 2ℜ_{m}(H_{k(h)}) + √[ log k(h) / m ] )  +  √[ 2 log(3/δ) / m ]', 100, 240, tt, { size: 32, fill: COL.task, weight: 600 });
+    aTx(p, 'H_{k(h)}: el conjunto menos complejo de la familia que contiene a h', 100, 284, tt + 5, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'con la mejor hipótesis h^{*} de H', 100, 352, ts, { size: 24, font: UI }); text(p, '(4.6)', 480, 352, ts, { size: 22, fill: COL.dim });
+    const f = aRow(p, [['R(h^{SRM}_{S})  ≤  R(h^{*}) + 2ℜ_{m}(H_{k(h*)}) +  ', COL.chalk], ['√[ log k(h^{*}) / m ]', COL.chalk], ['  + √[ 2 log(3/δ) / m ]', COL.chalk]], 100, 408, ts + .6, { size: 30 });
+    tw(f[1], { c_fill: COL.task }, tp, .4);
+    text(p, 'el precio de no conocer k', f.xs[1], 444, tp + 3.6, { size: 22, fill: COL.task, weight: 600 });
+    aTx(p, 'con un oráculo que diera k(h^{*}): ERM en ese conjunto, con una cota de la misma forma, sin ese término', 100, 496, to, { size: 24, font: UI });
+    // los tres términos en el ejemplo, al crecer m
+    aTx(p, `en el ejemplo: h^{*} = h_{Bayes} está en H_{${aKh}} · δ = ${aDl}`, 100, 568, tb, { size: 22, fill: COL.dim, font: UI });
+    [[HUE.est, .9, `2ℜ_{m}(H_{${aKh}})`], [COL.task, .9, `√[ log ${aKh} / m ]`], [COL.dim, .7, '√[ 2 log(3/δ) / m ]']].forEach(([c, o, s], i) => { aSq(p, 760 + i * 230, 570, c, tb, o); aTx(p, s, 790 + i * 230, 568, tb, { size: 22 }); });
+    aTh.forEach(([n, a, b, c], i) => {
+      const y = 620 + i * 44, t = tb + .4 + i * .6; let x = X0;
+      text(p, `m = ${aMs(n)}`, 100, y, t, { size: 26, weight: 600 });
+      [[a, HUE.est, .9], [b, COL.task, .9], [c, COL.dim, .7]].forEach(([v, col, o], j) => { const e = put(mk('rect', { x, y: y - 22, width: 0, height: 26, fill: col, 'fill-opacity': o }, p), {}); tw(e, { a_width: v * sc }, t + j * .2, .6, out); x += v * sc; });
+      text(p, [a, b, c].map(aF3).join(' + '), x + 18, y, t + .8, { size: 22 });
+    });
+    text(p, 'Dos límites de SRM', 100, 790, tu, { size: 26, fill: COL.task, weight: 600 });
+    text(p, 'descomponer H en conjuntos de complejidad controlada es una hipótesis fuerte', 380, 790, tu + 1.8, { size: 24 });
+    text(p, 'hay que resolver ERM para muchos índices k: suele ser intratable', 380, 832, tc, { size: 24 });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Exceso de error = error de estimación + error de aproximación.', 'w1'], ['Al agrandar H, la aproximación baja y la estimación sube.', 'w2'],
+      ['ERM minimiza el error empírico, pero ignora la complejidad de H.', 'w3'], ['SRM suma una penalización que crece con k y elige el mínimo.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 220, size: 31, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre la selección de modelo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['El error de aproximación depende de la muestra que se extrajo.'], ans: ['f'], why: 'Es una propiedad de H: lo que le falta a su mejor hipótesis para llegar al error de Bayes. La muestra no interviene.' },
+      { parts: ['Agrandar H nunca aumenta el error de aproximación.'], ans: ['v'], why: 'El ínfimo del error sobre un conjunto más grande solo puede bajar o quedar igual.' },
+      { parts: ['ERM sobre un conjunto muy rico garantiza un exceso de error pequeño.'], ans: ['f'], why: 'La aproximación es pequeña, pero la cota de estimación se afloja: en el ejemplo, con 128 tramos se ajustó el ruido.' },
+      { parts: ['SRM elige k y h minimizando el error empírico más una penalización que crece con k.'], ans: ['v'], why: 'Es el objetivo (4.4): error empírico, más la complejidad de Rademacher del conjunto, más √(log k / m).' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-srm', prompt: [`Con m = 100. En H₂, la solución de ERM tiene error empírico ${aP2[0][1].toFixed(2)} y la complejidad de Rademacher es ${aP2[0][2].toFixed(2)}. En H₅: error empírico ${aP2[1][1].toFixed(2)} y complejidad ${aP2[1][2].toFixed(2)}. ¿Cuál elige SRM entre los dos?`],
+    build: choice([['H₂'], ['H₅'], ['cualquiera: las dos sumas coinciden']], 0,
+      `F₂ = ${aP2[0][1].toFixed(2)} + ${aP2[0][2].toFixed(2)} + √(log 2 / 100) ≈ ${aF3(aP2[0][3])};  F₅ = ${aP2[1][1].toFixed(2)} + ${aP2[1][2].toFixed(2)} + √(log 5 / 100) ≈ ${aF3(aP2[1][3])}. Gana la suma menor.`,
+      [null, `Su error empírico es menor, pero la penalización pesa más: F₅ ≈ ${aF3(aP2[1][3])} contra F₂ ≈ ${aF3(aP2[0][3])}.`, `No coinciden: F₂ ≈ ${aF3(aP2[0][3])} y F₅ ≈ ${aF3(aP2[1][3])}.`]),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

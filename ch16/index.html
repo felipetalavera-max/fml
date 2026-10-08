@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Predicción con consejo de expertos</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 16, title: 'Predicción con consejo de expertos', minutes: 7, language: 'es', next: '../ch17/' };
+
+/* ---------- helpers de dibujo del capítulo (copiados del cap. 15) ---------- */
+// salmón = etiqueta 1, azul = etiqueta 0 · ámbar = el algoritmo (lo elegido: su predicción, su pérdida, el experto sorteado) ·
+// verde = acierto, rojo = fallo · violeta = complejidad (dimensión VC) · blanco = el mejor experto · rosa (local) = pesos y probabilidades
+const HUE = { pos: COL.nat, neg: COL.whole, hyp: COL.task, un: COL.dim, cx: COL.real, w: COL.rat };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'w_{t,i}', 'm_{T}^{*}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηφρσλμ‖ℜ√∑∏⟹⟺≈∼∞ŷ])/;                                            // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aF2 = v => { const s = v.toFixed(2); return /^-0\.00$/.test(s) ? '0.00' : s.replace('-', '−'); };
+const aWt = v => v === 0 ? '0' : String(+v.toFixed(3));                              // peso: 1, 0.5, 0.125
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };   // borde del color de la pizarra: el texto se lee sobre líneas
+const aSq = (p, x, y, col, lab, { line = false, dash = null } = {}) => { mk(line ? 'path' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none', ...(dash ? { 'stroke-dasharray': dash } : {}) } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };   // entrada de leyenda
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aRng = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const aN = 8, aTT = 100, aShow = 10, aBeta = .5;                                     // expertos · rondas · rondas que caben en el tablero · β de la mayoría ponderada
+const aSum = v => v.reduce((s, u) => s + u, 0);
+// --- Secuencia principal (ilustrativa, con semilla): etiqueta al azar; el experto i dice lo contrario con probabilidad aPe[i].
+const aPe = [.42, .3, .48, .15, .38, .5, .33, .45];
+const aGen = (seed, pe, n) => { const r = aRng(seed), y = [], adv = []; for (let t = 0; t < n; t++) { const yt = r() < .5 ? 1 : 0; y.push(yt); adv.push(pe.map(q => r() < q ? 1 - yt : yt)); } return { y, adv }; };
+// Errores acumulados por experto: c[t][i] tras t rondas.
+const aCum = (adv, y) => { const c = [adv[0].map(() => 0)]; adv.forEach((a, t) => c.push(a.map((v, i) => c[t][i] + (v !== y[t] ? 1 : 0)))); return c; };
+// --- Mayoría ponderada (figura 8.3): voto ponderado, empate a favor de 1; solo si el algoritmo falla, peso × β para los expertos que fallaron.
+// Con β = 0 es Halving (figura 8.2). y puede ser una lista o una función (predicción, ronda) → etiqueta: el adversario.
+// Por ronda: w (antes), s0 y s1 (peso por 0 y por 1), pred, y, err, wn (después), m (errores acumulados), W y Wn (suma de pesos antes y después).
+const aWM = (adv, y, beta) => { let w = adv[0].map(() => 1), m = 0; const yf = Array.isArray(y) ? (q, t) => y[t] : y; return adv.map((a, t) => { const s1 = aSum(w.filter((v, i) => a[i] === 1)), s0 = aSum(w.filter((v, i) => a[i] === 0)), pred = s1 >= s0 ? 1 : 0, yt = yf(pred, t), err = pred !== yt, wn = err ? w.map((v, i) => a[i] !== yt ? v * beta : v) : w; m += err ? 1 : 0; const row = { w, s0, s1, pred, y: yt, err, wn, m, W: aSum(w), Wn: aSum(wn) }; w = wn; return row; }); };
+// --- Mayoría ponderada aleatorizada (figura 8.4): p = w / W, pérdida esperada L = ∑ p_i l_i, peso × β para todo experto que falla.
+// pick = experto sorteado con semilla; cumL = pérdida esperada acumulada; cumS = errores del sorteo.
+const aRWM = (adv, y, beta, seed) => { let w = adv[0].map(() => 1), cumL = 0, cumS = 0; const r = aRng(seed); return adv.map((a, t) => { const W = aSum(w), p = w.map(v => v / W), l = a.map(v => v !== y[t] ? 1 : 0), L = aSum(p.map((v, i) => v * l[i])); let u = r(), pick = 0; while (pick < p.length - 1 && u >= p[pick]) { u -= p[pick]; pick++; } const wn = w.map((v, i) => l[i] ? v * beta : v); cumL += L; cumS += l[pick]; const row = { w, p, L, pick, pred: a[pick], err: !!l[pick], wn, cumL, cumS }; w = wn; return row; }); };
+// --- Promedio con pesos exponenciales (figura 8.5), con la pérdida |ŷ − y|: ŷ = ∑ w_i y_i / ∑ w_i (8.13), w_i ← w_i e^{−η |y_i − y|} (8.14).
+const aEWA = (adv, y, eta) => { let w = adv[0].map(() => 1), cumL = 0; return adv.map((a, t) => { const W = aSum(w), yh = aSum(w.map((v, i) => v * a[i])) / W, loss = Math.abs(yh - y[t]), wn = w.map((v, i) => v * Math.exp(-eta * Math.abs(a[i] - y[t]))); cumL += loss; const row = { w, p: w.map(v => v / W), yh, loss, wn, cumL }; w = wn; return row; }); };
+// --- Cotas del libro (logaritmo natural).
+const aB86 = (n, ms, beta) => (Math.log(n) + ms * Math.log(1 / beta)) / Math.log(2 / (1 + beta));   // (8.6)
+const aBetaOpt = (n, tt) => Math.max(.5, 1 - Math.sqrt(Math.log(n) / tt));                          // β del teorema 8.4
+const aB89 = (n, lmin, beta) => Math.log(n) / (1 - beta) + (2 - beta) * lmin;                       // (8.9), cota de L_T
+const aB812 = (n, tt) => 2 * Math.sqrt(tt * Math.log(n));                                           // (8.12)
+const aEtaOpt = (n, tt) => Math.sqrt(8 * Math.log(n) / tt);                                         // η del teorema 8.6
+const aB815 = (n, tt, eta) => Math.log(n) / eta + eta * tt / 8;                                     // (8.15)
+const aB816 = (n, tt) => Math.sqrt(tt / 2 * Math.log(n));                                           // (8.16)
+// --- Las ejecuciones del capítulo.
+const aSeq = aGen(112, aPe, aTT), aCumM = aCum(aSeq.adv, aSeq.y), aWm = aWM(aSeq.adv, aSeq.y, aBeta);
+const aArgmin = v => v.indexOf(Math.min(...v));
+const aBest = aArgmin(aCumM[aTT]), aBest10 = aArgmin(aCumM[aShow]);                  // mejor experto en retrospectiva, a 100 y a 10 rondas
+const aMs = aCumM[aTT][aBest], aMT = aWm[aTT - 1].m, aBnd = aB86(aN, aMs, aBeta), aK86 = Math.log(1 / aBeta) / Math.log(2 / (1 + aBeta));
+const aWtot = [...aWm.map(r => r.W), aWm[aTT - 1].Wn], aWbest = [...aWm.map(r => r.w[aBest]), aWm[aTT - 1].wn[aBest]];   // W_t y el peso del mejor experto, t = 1 … T + 1
+// Halving: ocho expertos con consejos al azar (semilla), uno de ellos copia la etiqueta (caso realizable).
+const aHal = (() => { const seed = 141, c = seed % aN, r = aRng(seed), y = [], adv = []; for (let t = 0; t < aShow; t++) { const yt = r() < .5 ? 1 : 0; y.push(yt); adv.push(Array.from({ length: aN }, (_, i) => i === c ? yt : (r() < .5 ? 1 : 0))); } return { y, adv, c }; })();
+const aHv = aWM(aHal.adv, aHal.y, 0), aHw = [...aHv.map(r => r.w), aHv[aShow - 1].wn];
+const aHerr = aHv.map((r, t) => r.err ? t : -1).filter(t => t >= 0), aHact = aHerr.map(t => aHv[t].Wn);   // rondas con error (desde 0) y activos que quedan tras cada una
+// El adversario (§8.2.3): dos expertos constantes y la etiqueta contraria a la predicción de la mayoría ponderada.
+const aA2 = Array.from({ length: aTT }, () => [0, 1]), aAd = aWM(aA2, q => 1 - q, aBeta), aY2 = aAd.map(r => r.y), aCum2 = aCum(aA2, aY2);
+const aMs2 = Math.min(...aCum2[aTT]), aB2 = aBetaOpt(2, aTT), aRw = aRWM(aA2, aY2, aB2, 5);   // la aleatorizada, sobre esa misma secuencia
+// Promedio con pesos exponenciales, sobre la secuencia principal.
+const aEta = aEtaOpt(aN, aTT), aEw = aEWA(aSeq.adv, aSeq.y, aEta);
+// Comprobación 1: en la ronda del primer error de Halving, el experto perfecto y dos que fallaron.
+const aQ1t = aHerr[0], aQ1 = (() => { const bad = aHal.adv[aQ1t].map((v, i) => v !== aHal.y[aQ1t] ? i : -1).filter(i => i >= 0); return [bad[0], aHal.c, bad[bad.length - 1]].sort((a, b) => a - b); })(), aQ1r = aQ1.indexOf(aHal.c);
+// Comprobación 2: cinco expertos con peso y consejo escritos a mano.
+const aQ2 = [[1, 0], [.5, 1], [.5, 0], [.25, 1], [.25, 1]], aQ2s = [0, 1].map(v => aSum(aQ2.filter(q => q[1] === v).map(q => q[0]))), aQ2r = aQ2s[1] >= aQ2s[0] ? 1 : 0;
+/* aMATH:end */
+
+const aNames = Array.from({ length: aN }, (_, i) => 'experto ' + (i + 1));
+// Tablero de rondas: una fila por experto, una columna por ronda, y debajo la etiqueta y la predicción del algoritmo.
+// side = { head, vals[k][i], fmt, bar, vmax }: columna lateral por experto (errores, peso, probabilidad) con el valor tras k rondas.
+// pick[k] = experto sorteado en la ronda k (recuadro ámbar). dimZero: la fila se apaga cuando su valor lateral llega a 0.
+// bd.upTo(r): estado tras r rondas, con r real: en la ronda en curso entran los consejos, la predicción, la etiqueta y, al final, aciertos, fallos y pesos.
+const aBoard = (p, { adv, y, pred, names, n = aShow, side = null, pick = null, ox = 250, oy = 244, t0 = .4, dimZero = false }) => {
+  const N = adv[0].length, cw = 54, rh = 42, CX = k => ox + k * cw + cw / 2, RY = i => oy + i * rh, LY = RY(N) + 10, AY = LY + rh, SX = ox + n * cw + 24, BW = 120;
+  const g = G(p, { o: t0 == null ? 1 : 0 }), gE = G(g), bd = { g, gE, CX, RY, LY, AY, SX, N, n, cw, rh, ox };
+  T(g, 'ronda', { x: ox - 14, y: oy - rh + 8, size: 22, fill: COL.dim, anchor: 'end' });
+  for (let k = 0; k < n; k++) T(g, String(k + 1), { x: CX(k), y: oy - rh + 8, size: 22, fill: COL.dim, anchor: 'middle', font: MATH });
+  mk('path', { d: `M${ox - 150} ${LY - rh / 2 - 5}H${ox + n * cw}`, stroke: COL.faint, 'stroke-width': 2 }, g);
+  const cell = (par, k, yy, str, fill, ok, weight = 500) => {
+    const bg = ok == null ? null : put(mk('rect', { x: CX(k) - cw / 2 + 3, y: yy - rh / 2 + 3, width: cw - 6, height: rh - 6, fill: ok ? COL.good : COL.bad, 'fill-opacity': ok ? .16 : .42 }, par), { o: 0 });
+    return { bg, tx: T(par, str, { x: CX(k), y: yy + 8, size: 24, fill, anchor: 'middle', weight, font: MATH, o: 0 }) };
+  };
+  bd.sg = G(gE);
+  if (side) aTx(bd.sg, side.head, SX, oy - rh + 8, null, { size: 22, fill: COL.dim, font: UI });
+  bd.rows = names.map((nm, i) => {
+    const rg = G(gE), rw = { rg };
+    rw.lab = T(rg, nm, { x: ox - 14, y: RY(i) + 8, size: 22, fill: COL.chalk, anchor: 'end' });
+    rw.cells = Array.from({ length: n }, (_, k) => cell(rg, k, RY(i), String(adv[k][i]), COL.chalk, adv[k][i] === y[k]));
+    if (side) {
+      const sr = G(bd.sg);
+      if (side.bar) rw.bar = mk('rect', { x: SX, y: RY(i) - 9, width: BW, height: 18, fill: HUE.w }, sr);
+      rw.num = T(sr, '', { x: SX + (side.bar ? BW + 12 : 30), y: RY(i) + 8, size: 22, fill: side.bar ? HUE.w : COL.chalk, font: MATH, weight: 600, anchor: side.bar ? 'start' : 'middle' });
+      rw.sr = sr;
+    }
+    return rw;
+  });
+  T(g, 'etiqueta', { x: ox - 14, y: LY + 8, size: 22, fill: COL.dim, anchor: 'end' });
+  bd.lab = Array.from({ length: n }, (_, k) => cell(g, k, LY, String(y[k]), y[k] ? HUE.pos : HUE.neg, null, 700));
+  T(g, 'algoritmo', { x: ox - 14, y: AY + 8, size: 22, fill: HUE.hyp, anchor: 'end', weight: 600 });
+  bd.alg = Array.from({ length: n }, (_, k) => cell(g, k, AY, String(pred[k]), HUE.hyp, pred[k] === y[k], 700));
+  bd.pk = pick ? Array.from({ length: n }, (_, k) => put(mk('rect', { x: CX(k) - cw / 2 + 3, y: RY(pick[k]) - rh / 2 + 3, width: cw - 6, height: rh - 6, fill: 'none', stroke: HUE.hyp, 'stroke-width': 3 }, g), { o: 0 })) : null;
+  bd.cur = put(mk('rect', { x: -cw / 2 + 1, y: oy - rh / 2 - 3, width: cw - 2, height: AY - oy + rh + 6, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g), { x: CX(0), o: 0 });
+  bd.upTo = r => {
+    const rr = Math.max(0, Math.min(n, r)), kk = Math.min(n - 1, Math.floor(rr));
+    for (let k = 0; k < n; k++) {
+      const f = Math.max(0, Math.min(1, rr - k)), on = v => ({ o: f > v ? 1 : 0 });
+      bd.rows.forEach(rw => { put(rw.cells[k].tx, on(.05)); put(rw.cells[k].bg, on(.74)); });
+      if (bd.pk) put(bd.pk[k], on(.18));
+      put(bd.alg[k].tx, on(.3)); put(bd.alg[k].bg, on(.74));
+      put(bd.lab[k].tx, on(.52));
+    }
+    put(bd.cur, { x: CX(kk), o: rr < n && rr - kk > .001 ? 1 : 0 });
+    if (side) {
+      const u = Math.max(0, Math.min(1, (rr - kk - .74) / .26)), a = side.vals[kk], b = side.vals[kk + 1];
+      bd.rows.forEach((rw, i) => {
+        const v = a[i] + (b[i] - a[i]) * u;
+        if (rw.bar) rw.bar.setAttribute('width', Math.max(0, v / (side.vmax || 1) * BW).toFixed(1));
+        rw.num.textContent = side.fmt(u > .5 ? b[i] : a[i]);
+        if (dimZero) put(rw.rg, { o: .25 + .75 * Math.min(1, v) }), put(rw.sr, { o: .25 + .75 * Math.min(1, v) });
+      });
+    }
+  };
+  bd.upTo(0);
+  if (t0 != null) show(g, t0);
+  return bd;
+};
+// Gráfica por rondas (0 … tmax). f transforma el eje vertical (identidad o log2); yt = [[valor, rótulo]].
+// ch.line(vals, col, t, dur, { dash, step }) traza vals[0 … tmax]; ch.live(vals, col) devuelve r => dibuja hasta la ronda r; ch.gap marca una brecha en la última ronda.
+const aPlot = (p, x0, y0, w, h, { t0 = .4, tmax = aTT, v0 = 0, v1 = 1, yt = [], xt = [0, 25, 50, 75, 100], f = v => v } = {}) => {
+  const CX = t => x0 + t / tmax * w, VY = v => y0 - (f(v) - v0) / (v1 - v0) * h, g = G(p, { o: t0 == null ? 1 : 0 }), ch = { CX, VY, g };
+  mk('path', { d: `M${x0} ${y0 - h - 12}V${y0}H${x0 + w + 10}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+  yt.forEach(([v, s]) => { mk('path', { d: `M${x0 - 8} ${VY(v)}h8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, s, { x: x0 - 16, y: VY(v) + 8, size: 22, fill: COL.dim, anchor: 'end', font: MATH }); });
+  xt.forEach(t => { mk('path', { d: `M${CX(t)} ${y0}v8`, stroke: COL.faint, 'stroke-width': 2 }, g); T(g, String(t), { x: CX(t), y: y0 + 32, size: 22, fill: COL.dim, anchor: 'middle', font: MATH }); });
+  T(g, 'ronda', { x: x0 + w + 34, y: y0 + 32, size: 22, fill: COL.dim });
+  const dOf = (vals, upto, step) => { let d = ''; const n = Math.min(vals.length - 1, Math.floor(upto + 1e-9)); for (let t = 0; t <= n; t++) d += (t ? (step ? `H${CX(t).toFixed(1)}V${VY(vals[t]).toFixed(1)}` : `L${CX(t).toFixed(1)} ${VY(vals[t]).toFixed(1)}`) : `M${CX(0).toFixed(1)} ${VY(vals[0]).toFixed(1)}`); return d; };
+  ch.line = (vals, col, tt, dur, { dash = null, step = false, sw = 4 } = {}) => {
+    const d = dOf(vals, vals.length - 1, step);
+    if (dash) { const e = put(mk('path', { d, fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-dasharray': dash }, p), { o: 0 }); show(e, tt, dur); return e; }
+    const e = path(p, d, { stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round' }, { d: 0 }); draw(e, tt, dur); return e;
+  };
+  ch.live = (vals, col, { sw = 4 } = {}) => { const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-linejoin': 'round' }, g); return r => e.setAttribute('d', dOf(vals, r, false)); };
+  ch.gap = (va, vb, str, col, tt, { dx = 16 } = {}) => { const gg = G(p, { o: 0 }), x = CX(tmax) + dx, ya = VY(va), yb = VY(vb); mk('path', { d: `M${x - 6} ${ya}h12M${x} ${ya}V${yb}M${x - 6} ${yb}h12`, stroke: col, 'stroke-width': 3, fill: 'none' }, gg); aHalo(aTx(gg, str, x + 16, (ya + yb) / 2 + 8, null, { size: 24, fill: col, weight: 600, font: UI })); show(gg, tt); return gg; };
+  if (t0 != null) show(g, t0);
+  return ch;
+};
+const aAcc = (rows, key) => [0, ...rows.map(r => r[key])];                             // acumulado por ronda, con el 0 inicial
+const aCumOf = (cum, i) => cum.map(c => c[i]);
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 2 · Capítulo 16', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'Predicción con consejo de expertos', { x: 800, y: 450, size: 72, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Aprender ronda a ronda, sin suponer nada sobre los datos, y quedar cerca del mejor experto.', 800, 580, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['escenario', 'El escenario on-line', (m) => {
+    const p = panel(0), tr = m('ronda'), ta = m('adv'), te = m('exp'), tc = m('cnt'), tg = m('reg'), RX = 1040, c10 = aCumM[aShow], m10 = aWm[aShow - 1].m;
+    aNote(p, 'datos ilustrativos: secuencia sorteada con semilla fija · el algoritmo es la mayoría ponderada, que se explica más adelante');
+    aTitle(p, 'El escenario on-line (en línea): se juega por rondas');
+    const bd = aBoard(p, { adv: aSeq.adv, y: aSeq.y, pred: aWm.map(r => r.pred), names: aNames, side: { head: 'errores', vals: aCumM, fmt: String } });
+    put(bd.gE, { o: 0 }); show(bd.gE, te, .8);
+    put(bd.sg, { o: 0 }); show(bd.sg, tc, .6);
+    prog(q => bd.upTo(q * 3), tr + 4.2, ta - tr - 4.6, lin);
+    prog(q => bd.upTo(3 + q * (aShow - 3)), te + 3.4, tc - te - 3.8, lin);
+    // los cuatro pasos de una ronda
+    const gs = G(p);
+    [['llega un punto   x_{t}', 5], ['el algoritmo predice   ŷ_{t}', 6.3], ['se revela la etiqueta   y_{t}', 7.8], ['se paga la pérdida   L(ŷ_{t}, y_{t})', 9.5]].forEach(([s, dt], k) => {
+      aRow(gs, [[`${k + 1}     `, COL.dim, UI], [s, COL.chalk, UI]], RX, 250 + k * 52, tr + dt, { size: 26, weight: 600 });
+    });
+    hide(gs, tc - .5, .4);
+    aTx(p, 'sin supuesto de distribución:', RX, 500, ta, { size: 24, fill: COL.dim, font: UI });
+    aTx(p, 'la secuencia puede elegirla un adversario', RX, 540, ta + 2.4, { size: 24, weight: 600, font: UI });
+    // el mejor experto en retrospectiva y el regret
+    const ring = put(mk('rect', { x: bd.ox - 122, y: bd.RY(aBest10) - 19, width: 116, height: 38, fill: 'none', stroke: COL.chalk, 'stroke-width': 3 }, p), { o: 0 }); show(ring, tc + 4.6, .4);
+    aRow(p, [['mejor experto:   ', COL.dim, UI], [`${c10[aBest10]} ${c10[aBest10] === 1 ? 'error' : 'errores'}`, COL.chalk, UI]], RX, 270, tc + 4.6, { size: 28, weight: 600 });
+    aRow(p, [['algoritmo:   ', COL.dim, UI], [`${m10} errores`, HUE.hyp, UI]], RX, 322, tg, { size: 28, weight: 600 });
+    aRow(p, [['regret:   ', COL.dim, UI], [`R_{${aShow}}  =  ${m10} − ${c10[aBest10]}  =  ${m10 - c10[aBest10]}`, HUE.hyp]], RX, 392, tg + 2.6, { size: 32, weight: 600 });
+    const f = aTx(p, 'R_{T}   =   ∑_{t ≤ T} L(ŷ_{t}, y_{t})   −   min_{i} ∑_{t ≤ T} L(y_{t,i}, y_{t})', 250, 760, tg + 6, { size: 32, weight: 600 });
+    aRow(p, [['(8.1)', COL.dim, UI], ['        y_{t,i}', COL.dim], [':  consejo del experto i en la ronda t', COL.dim, UI]], 250 + f.getComputedTextLength() + 28, 758, tg + 6, { size: 22 });
+  }],
+
+  ['halving', 'Halving', (m) => {
+    const p = panel(0), tv = m('vote'), t1 = m('e1'), t2 = m('e2'), tt = m('thm'), tc = m('vc'), RX = 1040, e1 = aHerr[0], e2 = aHerr[1];
+    aNote(p, 'datos ilustrativos: consejos sorteados con semilla fija; un experto copia la etiqueta · algoritmo de la figura 8.2');
+    aTitle(p, 'Halving: el caso realizable, con la pérdida 0-1');
+    const bd = aBoard(p, { adv: aHal.adv, y: aHal.y, pred: aHv.map(r => r.pred), names: aNames, side: { head: 'activo', vals: aHw, fmt: v => v ? 'sí' : 'no' }, dimZero: true });
+    prog(q => bd.upTo(q * e1), tv + .4, 3.6, lin);
+    prog(q => bd.upTo(e1 + q), t1 - 2.2, 3.8, lin);
+    prog(q => bd.upTo(e1 + 1 + q * (e2 - e1 - 1)), t1 + 6, t2 - t1 - 8.4, lin);
+    prog(q => bd.upTo(e2 + q), t2 - 2.2, 3.4, lin);
+    prog(q => bd.upTo(e2 + 1 + q * (aShow - e2 - 1)), t2 + 1.8, tt - t2 - 2.2, lin);
+    const gA = G(p);
+    aTx(gA, 'caso realizable:', RX, 250, .5, { size: 26, fill: COL.dim, font: UI });
+    aTx(gA, 'algún experto no falla nunca', RX, 290, .5, { size: 26, weight: 600, font: UI });
+    aTx(gA, 'predice: voto de mayoría de los activos', RX, 362, tv, { size: 26, weight: 600, font: UI });
+    aTx(gA, 'si falla: apaga a los que fallaron', RX, 414, t1, { size: 26, weight: 600, font: UI });
+    hide(gA, tt - .5, .4);
+    aRow(p, [['activos:   ', COL.dim, UI], [String(aN)], [`   →   ${aHact[0]}`], [`   →   ${aHact[1]}`]], RX, 510, [t1 + 1.4, t1 + 1.4, t1 + 7.6, t2 + 1.6], { size: 36, weight: 600 });
+    text(p, 'Teorema 8.1', RX, 262, tt, { size: 26, fill: HUE.hyp, weight: 600 });
+    const f1 = aTx(p, 'M_{Halving}(H)  ≤  log_{2}|H|', RX, 322, tt + .4, { size: 34, weight: 600 });
+    text(p, '(8.4)', RX + f1.getComputedTextLength() + 22, 320, tt + .4, { size: 22, fill: COL.dim });
+    aRow(p, [[`log_{2} ${aN}  =  ${Math.log2(aN)}`], [`          aquí:  ${aHv[aShow - 1].m} errores`, HUE.hyp, UI]], RX, 400, [tt + 5, tt + 6.6], { size: 28, weight: 600 });
+    const f2 = aRow(p, [['VCdim(H)', HUE.cx], ['   ≤   opt(H)   ≤   M_{Halving}(H)   ≤   log_{2}|H|']], 250, 756, tc + 1.6, { size: 32, weight: 600 });
+    text(p, '(8.5),  teorema 8.2', f2.end + 28, 754, tc + 1.6, { size: 22, fill: COL.dim });
+    aTx(p, 'cada experto es una hipótesis de H,  N = |H|   ·   opt(H): la menor cota de errores que logra algún algoritmo', 250, 808, tc + 4, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), bd = aBoard(p, { adv: aHal.adv, y: aHal.y, pred: aHv.map(r => r.pred), names: aNames, t0: null }), RX = 1040, k = aQ1t;
+    bd.upTo(k + .7);
+    T(p, 'Halving: después de un error', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, `Ronda ${k + 1}:`, RX, 270, null, { size: 28, fill: COL.dim, font: UI });
+    aRow(p, [['Halving predijo   ', COL.chalk, UI], [String(aHv[k].pred), HUE.hyp]], RX, 330, null, { size: 28, weight: 600 });
+    aRow(p, [['la etiqueta fue   ', COL.chalk, UI], [String(aHal.y[k]), aHal.y[k] ? HUE.pos : HUE.neg]], RX, 382, null, { size: 28, weight: 600 });
+    aTx(p, 'Tres expertos llevan un número.', RX, 470, null, { size: 26, fill: COL.dim, font: UI });
+    S.q1 = aQ1.map((i, j) => { const g = G(p, { x: 112, y: bd.RY(i) }); mk('circle', { r: 17, fill: COL.chalk }, g); T(g, String(j + 1), { x: 0, y: 8, size: 24, fill: COL.board, weight: 700, anchor: 'middle' }); return g; });
+    S.q1B = aQ1.map(i => [90, bd.RY(i) - 20, bd.CX(k) + 30 - 90, 40]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-halving', prompt: ['¿Cuál de los tres expertos marcados sigue activo?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'experto marcado ' + (j + 1) })), aQ1r,
+      `Dijo ${aHal.y[aQ1t]}, igual que la etiqueta: no dio el consejo equivocado, y sigue activo.`,
+      () => `Dijo ${1 - aHal.y[aQ1t]} y la etiqueta fue ${aHal.y[aQ1t]}: dio el consejo equivocado, y Halving lo apaga.`),
+  }], done) }],
+
+  ['wm', 'Mayoría ponderada', (m) => {
+    const p = panel(0), tw_ = m('w'), tv = m('vote'), tb = m('beta'), tr = m('run'), te = m('end'), RX = 1040;
+    aNote(p, 'la misma secuencia ilustrativa · algoritmo de la figura 8.3 · barra rosa = peso del experto');
+    aTitle(p, 'Mayoría ponderada: pesos en lugar de apagar');
+    const bd = aBoard(p, { adv: aSeq.adv, y: aSeq.y, pred: aWm.map(r => r.pred), names: aNames, side: { head: 'peso', vals: aWm.slice(0, aShow + 1).map(r => r.w), fmt: aWt, bar: true } });
+    put(bd.sg, { o: 0 }); show(bd.sg, tw_ + 1);
+    const vt = aTx(p, '', RX, 384, tv + 1.4, { size: 24, fill: HUE.w, font: UI, weight: 600 });
+    const setR = r => { bd.upTo(r); const k = Math.min(aShow - 1, Math.floor(Math.max(0, r))); vt._set(`ronda ${k + 1}:    por 0:  ${aWt(aWm[k].s0)}        por 1:  ${aWt(aWm[k].s1)}`); };
+    setR(0);
+    prog(q => setR(q), tv + .6, 4, lin);
+    prog(q => setR(1 + q), tb + 1.2, 4, lin);
+    prog(q => setR(2 + q), tb + 5.6, 3.4, lin);
+    prog(q => setR(3 + q * (aShow - 3)), tr + 1.6, te - tr - 1.6, lin);
+    aRow(p, [['peso inicial:   ', COL.dim, UI], ['w_{1,i}  =  1']], RX, 262, tw_ + 1, { size: 28, weight: 600 });
+    aTx(p, 'ŷ_{t} = 1   si   ∑_{i dice 1} w_{t,i}  ≥  ∑_{i dice 0} w_{t,i}', RX, 336, tv, { size: 27, weight: 600 });
+    aTx(p, 'si el algoritmo falla, a cada experto que falló:', RX, 470, tb, { size: 23, fill: COL.dim, font: UI });
+    aRow(p, [['w_{t+1,i}  =  β w_{t,i}'], ['            β = 1/2', HUE.w]], RX, 522, [tb + 3, tb + 7.4], { size: 30, weight: 600 });
+    aTx(p, 'con β = 0:  Halving', RX, 610, te + 2.6, { size: 26, fill: COL.dim, font: UI, weight: 600 });
+  }],
+
+  ['cota', 'La cota de errores', (m) => {
+    const p = panel(0), tp = m('pot'), tl = m('low'), tt = m('thm'), tn = m('num'), ta = m('any'), LX = 190, RX = 930, Y0 = 560, CW = 500, CH = 280;
+    aNote(p, `la misma secuencia, seguida hasta ${aTT} rondas · todo se calcula en la página · logaritmo natural`);
+    aTitle(p, 'La cota de errores: seguir la suma de los pesos');
+    // izquierda: la suma de pesos y el peso del mejor experto, en escala logarítmica
+    const ca = aPlot(p, LX, Y0, CW, CH, { v0: -10, v1: 3.4, f: Math.log2, yt: [[8, '8'], [1, '1'], [1 / 32, '1/32'], [1 / 1024, '1/1024']] });
+    aTx(ca.g, 'pesos (escala logarítmica)', LX, 204, null, { size: 22, fill: COL.dim, font: UI });
+    const la = G(p, { o: 0 }); show(la, tp); aSq(la, LX, 244, HUE.w, 'W_{t} = suma de los pesos', { line: true });
+    ca.line(aWtot, HUE.w, tp + 1, 5, { step: true });
+    const lb = G(p, { o: 0 }); show(lb, tl); aSq(lb, LX + 290, 244, COL.chalk, 'peso del mejor experto', { line: true });
+    ca.line(aWbest, COL.chalk, tl + .4, 2.6, { step: true });
+    aRow(p, [['si falla:   ', COL.dim, UI], ['W_{t+1}  ≤  ((1 + β)/2) W_{t}'], ['     (8.7)', COL.dim, UI]], LX - 60, 664, tp + 5, { size: 26, weight: 600 });
+    aRow(p, [['siempre:   ', COL.dim, UI], ['W_{t}  ≥  peso del mejor experto']], LX - 60, 708, tl + 1, { size: 26, weight: 600 });
+    // derecha: errores acumulados
+    const cb = aPlot(p, RX, Y0, CW, CH, { v0: 0, v1: 26, yt: [[0, '0'], [10, '10'], [20, '20']], t0: tn - .6 });
+    aTx(cb.g, 'errores acumulados', RX, 204, null, { size: 22, fill: COL.dim, font: UI });
+    aSq(cb.g, RX, 244, HUE.hyp, 'algoritmo', { line: true }); aSq(cb.g, RX + 180, 244, COL.chalk, 'mejor experto', { line: true });
+    cb.line(aCumOf(aCumM, aBest), COL.chalk, tn, 2.4);
+    cb.line(aAcc(aWm, 'm'), HUE.hyp, tn + 2.6, 2.4);
+    aRow(p, [[`m_{T}^{*}  =  ${aMs}`], [`          m_{T}  =  ${aMT}`, HUE.hyp]], RX, 664, [tn + 2.2, tn + 4.8], { size: 28, weight: 600 });
+    aRow(p, [['cota (8.6):   ', COL.dim, UI], [aBnd.toFixed(1)], ['          para cualquier secuencia', COL.chalk, UI]], RX, 708, [tn + 7, tn + 7, ta], { size: 26, weight: 600 });
+    // el teorema
+    const f = aRow(p, [['Teorema 8.3:     ', HUE.hyp, UI], ['m_{T}   ≤   ( log N  +  m_{T}^{*} log(1/β) )  /  log( 2/(1 + β) )']], 130, 782, tt, { size: 30, weight: 600 });
+    text(p, '(8.6)', f.end + 24, 780, tt, { size: 22, fill: COL.dim });
+    aTx(p, `m_{T}: errores del algoritmo  ·  m_{T}^{*}: errores del mejor experto  ·  con β = 1/2:  m_{T} ≤ ${aF2(Math.log(aN) / Math.log(2 / (1 + aBeta)))} + ${aF2(aK86)} m_{T}^{*}`, 130, 828, tt + 4, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), RY = i => 262 + i * 62, BX = [1010, 1270];
+    T(p, 'Mayoría ponderada: una ronda', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    T(p, 'peso', { x: 330, y: 204, size: 22, fill: COL.dim });
+    T(p, 'dice', { x: 700, y: 204, size: 22, fill: COL.dim, anchor: 'middle' });
+    aQ2.forEach(([w, a], i) => {
+      T(p, 'experto ' + (i + 1), { x: 300, y: RY(i) + 8, size: 24, anchor: 'end' });
+      mk('rect', { x: 330, y: RY(i) - 12, width: w * 220, height: 24, fill: HUE.w }, p);
+      T(p, aWt(w), { x: 330 + w * 220 + 14, y: RY(i) + 8, size: 24, fill: HUE.w, font: MATH, weight: 600 });
+      T(p, String(a), { x: 700, y: RY(i) + 10, size: 32, font: MATH, weight: 700, anchor: 'middle' });
+    });
+    T(p, 'predicción del algoritmo:', { x: BX[0], y: 300, size: 26, fill: COL.dim });
+    S.q2 = [0, 1].map(v => { const g = G(p, { x: BX[v], y: 340 }); mk('rect', { x: 0, y: 0, width: 200, height: 170, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); T(g, String(v), { x: 100, y: 118, size: 96, fill: HUE.hyp, weight: 700, anchor: 'middle', font: MATH }); return g; });
+    S.q2B = BX.map(x => [x, 340, 200, 170]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-voto', prompt: ['¿Qué predice la mayoría ponderada en esta ronda?'],
+    build: pickEls(S.q2.map((el, v) => ({ el, box: S.q2B[v], label: 'predice ' + v })), aQ2r,
+      `Cuenta el peso, no la cantidad: por ${aQ2r} hay ${aWt(aQ2s[aQ2r])} y por ${1 - aQ2r} hay ${aWt(aQ2s[1 - aQ2r])}.`,
+      () => `Son más expertos, pero pesan menos: ${aWt(aQ2s[1 - aQ2r])} por ${1 - aQ2r} contra ${aWt(aQ2s[aQ2r])} por ${aQ2r}.`),
+  }], done) }],
+
+  ['det', 'El límite determinista', (m) => {
+    const p = panel(0), ta = m('adv'), t2 = m('two'), tr = m('run'), th = m('half'), tg = m('reg'), RX = 880;
+    aNote(p, `§8.2.3: dos expertos constantes y un adversario contra la mayoría ponderada · ${aTT} rondas calculadas en la página`);
+    aTitle(p, 'Un límite: el adversario contra un algoritmo determinista');
+    const bd = aBoard(p, { adv: aA2, y: aY2, pred: aAd.map(r => r.pred), names: ['siempre 0', 'siempre 1'] });
+    put(bd.gE, { o: 0 }); show(bd.gE, t2, .6);
+    prog(q => bd.upTo(q * aShow), t2 + 3.2, th - t2 - 3.4, lin);
+    aRow(p, [['el adversario elige lo contrario:   ', COL.chalk, UI], ['y_{t}  =  1 − ŷ_{t}', HUE.hyp]], RX, 262, ta + 2, { size: 26, weight: 600 });
+    // abajo: errores acumulados en 100 rondas
+    const ch = aPlot(p, 190, 790, 520, 270, { v0: 0, v1: 104, yt: [[0, '0'], [50, '50'], [100, '100']], t0: tg - .4 });
+    aTx(ch.g, 'errores acumulados', 190, 492, null, { size: 22, fill: COL.dim, font: UI });
+    ch.line(aAcc(aAd, 'm'), HUE.hyp, tg, 1.6);
+    ch.line(aCumOf(aCum2, 0), COL.chalk, tg + 1.6, 1.6);
+    ch.gap(aAd[aTT - 1].m, aMs2, 'regret', COL.bad, tg + 5.6);
+    aRow(p, [['algoritmo:   ', COL.dim, UI], ['m_{T}  =  T', HUE.hyp], [`  =  ${aAd[aTT - 1].m}`, HUE.hyp]], RX, 520, [tr + 1.2, tr + 1.2, tg], { size: 28, weight: 600 });
+    aRow(p, [['mejor experto:   ', COL.dim, UI], ['m_{T}^{*}  ≤  T/2'], [`  =  ${aMs2}`]], RX, 578, [th, th, tg + 1.8], { size: 28, weight: 600 });
+    aTx(p, 'R_{T}  =  m_{T} − m_{T}^{*}  ≥  T/2', RX, 668, tg + 5, { size: 36, weight: 600, fill: COL.bad });
+    aTx(p, 'regret lineal en T', RX, 722, tg + 7.6, { size: 26, weight: 600, font: UI });
+    aTx(p, 'pérdida 0-1: ningún algoritmo determinista lo evita', RX, 790, tg + 10.6, { size: 24, fill: COL.dim, font: UI });
+  }],
+
+  ['rwm', 'Mayoría ponderada aleatorizada', (m) => {
+    const p = panel(0), tp = m('p'), tu = m('upd'), ta = m('adv'), ts = m('same'), tg = m('gap'), tt = m('thm'), tb = m('sub'), RX = 1040, LT = aRw[aTT - 1].cumL;
+    aNote(p, `sorteo con semilla fija (recuadro ámbar; ${aRw[aTT - 1].cumS} errores en ${aTT} rondas) · la curva ámbar es la pérdida esperada · figura 8.4`);
+    aTitle(p, 'Mayoría ponderada aleatorizada: sortear al experto');
+    const bd = aBoard(p, { adv: aA2, y: aY2, pred: aRw.map(r => r.pred), pick: aRw.map(r => r.pick), names: ['siempre 0', 'siempre 1'], side: { head: 'probabilidad', vals: aRw.slice(0, aShow + 1).map(r => r.p), fmt: aF2, bar: true } });
+    prog(q => bd.upTo(q), tp + 3, tu + 2.6 - tp - 3, lin);
+    prog(q => bd.upTo(1 + q * (aShow - 1)), ta, ts - ta - .5, lin);
+    const gA = G(p);
+    aTx(gA, 'sortear un experto con probabilidad', RX, 250, tp + 1, { size: 24, fill: COL.dim, font: UI });
+    aTx(gA, 'p_{t,i}  =  w_{t,i} / W_{t}', RX, 300, tp + 1, { size: 30, weight: 600, fill: HUE.w });
+    aTx(gA, 'cada experto que falla:', RX, 362, tu, { size: 24, fill: COL.dim, font: UI });
+    aTx(gA, 'w_{t+1,i}  =  β w_{t,i}', RX, 412, tu, { size: 30, weight: 600 });
+    hide(gA, tt - .5, .4);
+    // abajo: pérdida acumulada sobre la secuencia del adversario
+    const ch = aPlot(p, 190, 790, 520, 270, { v0: 0, v1: 104, yt: [[0, '0'], [50, '50'], [100, '100']], t0: ts - .4 });
+    aTx(ch.g, 'pérdida acumulada, misma secuencia', 190, 492, null, { size: 22, fill: COL.dim, font: UI });
+    ch.line(aAcc(aAd, 'm'), COL.faint, ts, 1.2);
+    aHalo(aTx(p, 'determinista', ch.CX(52), ch.VY(72), ts + .6, { size: 22, fill: COL.dim, font: UI, anchor: 'end' }));
+    ch.line(aCumOf(aCum2, 0), COL.chalk, ts + .6, 1.4);
+    ch.line(aAcc(aRw, 'cumL'), HUE.hyp, ts + 1.8, 1.8);
+    aRow(p, [['pérdida esperada:   ', COL.dim, UI], [`L_{T}  =  ${aF2(LT)}`, HUE.hyp]], 850, 540, ts + 2.4, { size: 28, weight: 600 });
+    aRow(p, [['mejor experto:   ', COL.dim, UI], [`L_{T}^{min}  =  ${aMs2}`]], 850, 592, tg - 1, { size: 28, weight: 600 });
+    aRow(p, [['regret:   ', COL.dim, UI], [`R_{T}  =  ${aF2(LT - aMs2)}`, HUE.hyp]], 850, 644, tg + .8, { size: 28, weight: 600 });
+    aRow(p, [['Teorema 8.4', HUE.hyp, UI], ['      β = max{ 1/2,  1 − √( (log N)/T ) }', COL.dim]], RX, 262, tt + .6, { size: 24, weight: 600 });
+    const f = aTx(p, 'R_{T}   ≤   2 √( T log N )', RX, 330, tt + 3, { size: 36, weight: 600, fill: HUE.hyp });
+    text(p, '(8.12)', RX + f.getComputedTextLength() + 22, 328, tt + 3, { size: 22, fill: COL.dim });
+    aTx(p, `aquí:   β = ${aF2(aB2)},    2 √( ${aTT} log 2 )  =  ${aF2(aB812(2, aTT))}`, RX, 388, tt + 6, { size: 24, fill: COL.dim });
+    aRow(p, [['R_{T} / T  →  0'], ['        orden óptimo  (teorema 8.5)', COL.dim, UI]], 850, 760, [tb + 2.6, tb + 6], { size: 28, weight: 600 });
+  }],
+
+  ['ewa', 'Pesos exponenciales', (m) => {
+    const p = panel(0), ta = m('avg'), tu = m('upd'), tr = m('run'), tn = m('num'), tt = m('thm'), to = m('opt'), RY = i => 402 + i * 38, BX = 230, BW = 260, CX0 = 700, Y0 = 668, LT = aEw[aTT - 1].cumL;
+    aNote(p, `la secuencia de ocho expertos, ${aTT} rondas, con la pérdida |ŷ − y| · η = √( 8 (log N)/T ) · figura 8.5`);
+    aTitle(p, 'Pérdidas convexas: promedio con pesos exponenciales');
+    aTx(p, 'pérdida L convexa en su primer argumento, con valores en [0, 1]', 100, 196, .5, { size: 24, fill: COL.dim, font: UI });
+    const f1 = aTx(p, 'ŷ_{t}   =   ∑_{i} w_{t,i} y_{t,i}  /  ∑_{i} w_{t,i}', 100, 252, ta, { size: 30, weight: 600 });
+    text(p, '(8.13)', 100 + f1.getComputedTextLength() + 22, 250, ta, { size: 22, fill: COL.dim });
+    const f2 = aTx(p, 'w_{t+1,i}   =   w_{t,i} · exp( −η L(y_{t,i}, y_{t}) )', 100, 310, tu, { size: 30, weight: 600 });
+    text(p, '(8.14)', 100 + f2.getComputedTextLength() + 22, 308, tu, { size: 22, fill: COL.dim });
+    aTx(p, 'aquí:   L(ŷ, y)  =  |ŷ − y|', 1000, 252, tr, { size: 28, weight: 600 });
+    // izquierda: pesos normalizados de los ocho expertos
+    const gb = G(p, { o: 0 }); show(gb, tr);
+    const ro = aTx(gb, '', 100, 362, null, { size: 24, fill: COL.dim, font: UI });
+    const bars = aNames.map((nm, i) => { T(gb, nm, { x: BX - 14, y: RY(i) + 8, size: 22, anchor: 'end' }); const b = mk('rect', { x: BX, y: RY(i) - 9, width: 0, height: 18, fill: HUE.w }, gb), n = T(gb, '', { x: BX, y: RY(i) + 8, size: 22, fill: HUE.w, font: MATH, weight: 600 }); return { b, n }; });
+    // derecha: pérdida acumulada
+    const ch = aPlot(p, CX0, Y0, 460, 250, { v0: 0, v1: 20, yt: [[0, '0'], [10, '10'], [20, '20']], t0: tr });
+    aTx(ch.g, 'pérdida acumulada', CX0, 376, null, { size: 22, fill: COL.dim, font: UI });
+    aSq(ch.g, CX0 + 210, 376, HUE.hyp, 'algoritmo', { line: true }); aSq(ch.g, CX0 + 380, 376, COL.chalk, 'mejor experto', { line: true });
+    const lb = ch.live(aCumOf(aCumM, aBest), COL.chalk), la = ch.live(aAcc(aEw, 'cumL'), HUE.hyp);
+    const setR = r => {
+      const k = Math.min(aTT - 1, Math.floor(r)), pp = r >= aTT ? aEw[aTT - 1].wn.map(v => v / aSum(aEw[aTT - 1].wn)) : aEw[k].p;
+      bars.forEach((e, i) => { e.b.setAttribute('width', (pp[i] * BW).toFixed(1)); put(e.n, { x: BX + pp[i] * BW + 12 }); e.n.textContent = aF2(pp[i]); });
+      ro._set(`pesos normalizados tras ${Math.min(aTT, Math.floor(r))} rondas`);
+      la(r); lb(r);
+    };
+    setR(0);
+    prog(q => setR(q * aTT), tr + .8, tn + 3 - tr - .8, lin);
+    aHalo(aTx(p, aF2(LT), ch.CX(aTT) + 14, ch.VY(LT) + 2, tn + 3, { size: 24, fill: HUE.hyp, weight: 600 }));
+    aHalo(aTx(p, String(aMs), ch.CX(aTT) + 14, ch.VY(aMs) + 14, tn + 4.6, { size: 24, weight: 600 }));
+    aRow(p, [['regret:   ', COL.dim, UI], [`R_{T}  =  ${aF2(LT - aMs)}`, HUE.hyp]], 1290, 470, tn + 5.6, { size: 26, weight: 600 });
+    const g1 = aRow(p, [['Teorema 8.6:     ', HUE.hyp, UI], ['R_{T}   ≤   (log N)/η  +  ηT/8']], 100, 772, tt, { size: 30, weight: 600 });
+    text(p, '(8.15)', g1.end + 22, 770, tt, { size: 22, fill: COL.dim });
+    const g2 = aRow(p, [[`con  η = √( 8 (log N)/T ) = ${aF2(aEta)}:     `, COL.dim], ['R_{T}   ≤   √( (T/2) log N )'], [`   =   ${aF2(aB816(aN, aTT))}`, HUE.hyp]], 100, 830, [to, to + 1, to + 5], { size: 28, weight: 600 });
+    text(p, '(8.16)', g2.end + 22, 828, to + 1, { size: 22, fill: COL.dim });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['On-line: por rondas y sin distribución; se mide el regret frente al mejor experto.', 'w1'], ['Halving (caso realizable):  a lo sumo  log_{2} N  errores.', 'w2'],
+      ['Mayoría ponderada: peso × β al fallar;  errores ≤ O(log N) + constante × los del mejor.', 'w3'], ['Pérdida 0-1: sortear.  Pérdidas convexas: promediar.  Regret del orden de √(T log N).', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 30, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['En el escenario on-line se supone que los puntos salen de una distribución fija.'], ans: ['f'], why: 'No se supone ninguna distribución: la secuencia puede elegirla un adversario.' },
+      { parts: ['En el caso realizable, con 8 expertos, Halving comete a lo sumo 3 errores.'], ans: ['v'], why: 'La cota es logaritmo en base 2 de 8: cada error apaga al menos a la mitad de los activos.' },
+      { parts: ['En la mayoría ponderada, un experto que falla queda apagado para siempre.'], ans: ['f'], why: 'Su peso se multiplica por beta y sigue votando. Apagarlo es lo que hace Halving.' },
+      { parts: ['Con la pérdida 0-1, un algoritmo determinista puede sufrir un regret lineal en T.'], ans: ['v'], why: 'El adversario elige siempre la etiqueta contraria a la predicción.' },
+      { parts: ['El regret de la mayoría ponderada aleatorizada crece linealmente con T.'], ans: ['f'], why: 'Es, a lo sumo, dos por la raíz de T por logaritmo de N: crece como la raíz de T.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 1') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>

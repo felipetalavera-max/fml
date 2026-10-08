@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCA y kernel PCA</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- retiene el primer cuadro hasta que exista el reproductor -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/es/timings.js"></script>
+<script>
+'use strict';
+const CHAPTER = { number: 29, title: 'PCA y kernel PCA', minutes: 5, language: 'es', next: '../ch30/' };
+
+/* ---------- helpers de dibujo del capítulo (los genéricos, copiados del cap. 28) ---------- */
+// Tiza = los datos (sin etiqueta) · ámbar = la dirección o el subespacio elegido y lo proyectado · rosa (local) = el error de reconstrucción ·
+// salmón y azul = solo para seguir los dos anillos del último beat (el algoritmo no usa etiquetas).
+const HUE = { pt: COL.chalk, hyp: COL.task, err: COL.rat, pos: COL.nat, neg: COL.whole };
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+// Texto con subíndices y superíndices: 'u_{1}', 'X^{⊤}'. Con t0 = null queda visible desde el inicio. e._set(str) lo reescribe. No anida llaves.
+const aSYM = /([αβεγδηθφρσλμξΦΨΓΠΛΩΣΔ‖ℜℝ√∑∏⟹⟺⟷≈∼∞⊤†∈∃∀→←↦′″⌊⌋½∇∝≫≪⟨⟩⋯])/;                          // símbolos que van siempre en la fuente matemática
+const aFill = (e, str, size, font) => {
+  e.replaceChildren();
+  let prev = 0;
+  str.split(/([_^]\{[^}]*\})/).forEach(s => {
+    if (!s) return;
+    const k = /^[_^]\{/.test(s) ? (s[0] === '_' ? 1 : -1) : 0, dy = k > 0 ? size * .22 : k < 0 ? -size * .38 : 0;
+    (k ? s.slice(2, -1) : s).split(aSYM).filter(q => q).forEach((q, n) => { mk('tspan', { dy: n ? 0 : dy - prev, ...(k ? { 'font-size': size * .68 } : {}), ...(aSYM.test(q) && font !== MATH ? { 'font-family': MATH } : {}) }, e).textContent = q; });
+    prev = dy;
+  });
+};
+const aTx = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = MATH } = {}) => {
+  const e = T(p, '', { x, y, size, fill, anchor, weight, font, o: t0 == null ? 1 : 0 });
+  aFill(e, str, size, font); e._set = s => aFill(e, s, size, font);
+  if (t0 != null) show(e, t0);
+  return e;
+};
+// Varias piezas de aTx en una línea: [texto, color, fuente, tamaño]; t0 puede ser una lista con un instante por pieza.
+const aRow = (p, parts, x, y, t0, opts = {}) => { const xs = [], els = parts.map(([str, fill, font, size], k) => { xs.push(x); const e = aTx(p, str, x, y, Array.isArray(t0) ? t0[k] : t0, { ...opts, fill: fill || COL.chalk, ...(font ? { font } : {}), ...(size ? { size } : {}) }); x += e.getComputedTextLength(); return e; }); els.xs = xs; els.end = x; return els; };
+const aNote = (p, str) => aTx(p, str, 1570, 884, .4, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+const aTitle = (p, str) => text(p, str, 100, 130, .3, { size: 30, fill: COL.task, weight: 600 });
+// Entrada de leyenda: cuadrado, línea (line) o punto (dot).
+const aSq = (p, x, y, col, lab, { line = false, dot = false } = {}) => { mk(line ? 'path' : dot ? 'circle' : 'rect', line ? { d: `M${x} ${y - 8}h30`, stroke: col, 'stroke-width': 4, fill: 'none' } : dot ? { cx: x + 15, cy: y - 8, r: 9, fill: col } : { x: x + 6, y: y - 17, width: 18, height: 18, fill: col }, p); return aTx(p, lab, x + 42, y, null, { size: 22, fill: COL.dim, font: UI }); };
+
+/* aMATH:begin — cuentas del capítulo, sin dibujo (se prueban aparte con Node) */
+const aSum = v => v.reduce((s, u) => s + u, 0);
+const aDot2 = (p, q) => p[0] * q[0] + p[1] * q[1];
+const aDeg = d => d * Math.PI / 180, aToDeg = r => r * 180 / Math.PI;
+const aDir = th => [Math.cos(th), Math.sin(th)];
+const aRng = seed => () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+// Valores y vectores propios de una matriz simétrica por el método de Jacobi (el del cap. 11), de mayor a menor.
+const aEig = A => {
+  const n = A.length, a = A.map(r => r.slice()), V = a.map((r, i) => r.map((_, j) => +(i === j)));
+  for (let sw = 0; sw < 100; sw++) {
+    let off = 0; for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+    if (off < 1e-22) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      if (Math.abs(a[p][q]) < 1e-300) continue;
+      const th = (a[q][q] - a[p][p]) / (2 * a[p][q]), t = (th < 0 ? -1 : 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < n; k++) { const x = a[k][p], y = a[k][q]; a[k][p] = c * x - s * y; a[k][q] = s * x + c * y; }
+      for (let k = 0; k < n; k++) { const x = a[p][k], y = a[q][k]; a[p][k] = c * x - s * y; a[q][k] = s * x + c * y; }
+      for (let k = 0; k < n; k++) { const x = V[k][p], y = V[k][q]; V[k][p] = c * x - s * y; V[k][q] = s * x + c * y; }
+    }
+  }
+  const ord = a.map((r, i) => i).sort((i, j) => a[j][j] - a[i][i]);
+  return { val: ord.map(i => a[i][i]), vec: ord.map(i => V.map(v => v[i])) };
+};
+// --- Nube alargada ilustrativa: n puntos; a lo largo de la dirección `deg` (en grados) la coordenada es (suma de dos uniformes − 1) · a, y a lo ancho, · b. mu: su centro.
+const aCloud = (seed, n, a, b, deg, mu = [0, 0]) => { const r = aRng(seed), c = Math.cos(aDeg(deg)), s = Math.sin(aDeg(deg)); return Array.from({ length: n }, () => { const u = (r() + r() - 1) * a, v = (r() + r() - 1) * b; return [mu[0] + u * c - v * s, mu[1] + u * s + v * c]; }); };
+// --- PCA en el plano (§15.1). Media, datos centrados X (una fila por punto), C = (1/m) X X⊤, sus valores y vectores propios; u1 se orienta con primera coordenada positiva.
+const aMean = P => [0, 1].map(j => aSum(P.map(p => p[j])) / P.length);
+const aCen = P => { const mu = aMean(P); return P.map(p => [p[0] - mu[0], p[1] - mu[1], ...p.slice(2)]); };
+const aCov = X => [0, 1].map(i => [0, 1].map(j => aSum(X.map(x => x[i] * x[j])) / X.length));
+const aOri = u => (u[0] < 0 || (Math.abs(u[0]) < 1e-12 && u[1] < 0)) ? u.map(v => -v) : u;
+const aPca = P => { const mu = aMean(P), X = aCen(P), C = aCov(X), e = aEig(C), u1 = aOri(e.vec[0]), u2 = [-u1[1], u1[0]]; return { mu, X, C, val: e.val, u1, u2, th: Math.atan2(u1[1], u1[0]), Y: X.map(x => [aDot2(x, u1), aDot2(x, u2)]) }; };
+// Para la recta por el origen de ángulo th (P = u u⊤): error medio ‖PX − X‖²_F / m y varianza proyectada Tr[X⊤PX] / m. Suman Tr[X⊤X] / m.
+const aErr = (X, th) => { const u = aDir(th); return aSum(X.map(x => aDot2(x, x) - aDot2(x, u) ** 2)) / X.length; };
+const aVar = (X, th) => { const u = aDir(th); return aSum(X.map(x => aDot2(x, u) ** 2)) / X.length; };
+// La muestra del capítulo: 24 puntos, ordenados por su primera componente principal (así la matriz de kernel del beat «kpca» se lee mejor).
+const aSeed = 292, aM = 24, aRaw0 = aCloud(aSeed, aM, 3.6, 1.2, 30, [.9, .6]);
+const aRaw = (() => { const q = aPca(aRaw0); return aRaw0.map((p, i) => [q.Y[i][0], p]).sort((a, b) => a[0] - b[0]).map(a => a[1]); })();
+const aP = aPca(aRaw), aTot = aP.C[0][0] + aP.C[1][1], aTh1 = aP.th, aTh1d = aToDeg(aTh1);
+const aA0 = -60, aA1 = 120;                                                         // barrido del ángulo de la recta, en grados (−60° y 120° son la misma recta)
+// --- Kernel PCA (§15.2). Matriz de kernel, su centrado (K menos sus medias por fila y por columna, más la media total) y sus vectores propios;
+// y(k): las coordenadas √λ_k · v_k,i de los puntos de la muestra (15.5).
+const aLin = aDot2, aGs = s => (p, q) => Math.exp(-((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) / (2 * s * s));
+const aGramOf = (P, K) => P.map(p => P.map(q => K(p, q)));
+const aCenK = A => { const n = A.length, rm = A.map(r => aSum(r) / n), tm = aSum(rm) / n; return A.map((r, i) => r.map((v, j) => v - rm[i] - rm[j] + tm)); };
+const aKpca = (P, K) => { const Kc = aCenK(aGramOf(P, K)), e = aEig(Kc); return { Kc, val: e.val, vec: e.vec, y: k => e.vec[k].map(v => Math.sqrt(e.val[k]) * v) }; };
+// Con el kernel lineal sobre la nube: v se orienta para que u = X v / √λ apunte como u1.
+const aKL = aKpca(aP.X, aLin), aLam1 = aKL.val[0];
+const aUof = v => [0, 1].map(j => aSum(aP.X.map((x, i) => x[j] * v[i])) / Math.sqrt(aLam1));
+const aV1 = (() => { const v = aKL.vec[0]; return aDot2(aUof(v), aP.u1) < 0 ? v.map(t => -t) : v; })(), aUk = aUof(aV1), aYk = aV1.map(v => Math.sqrt(aLam1) * v);
+// --- Dos anillos concéntricos (ilustrativos): n1 puntos en el de radio r1 y n2 en el de radio r2, con ruido en el ángulo y en el radio. La tercera coordenada
+// (+1 anillo interior, −1 exterior) solo sirve para pintarlos: ninguna cuenta la usa.
+const aRings = (seed, n1, n2, r1, r2, nz) => { const r = aRng(seed), o = []; for (let i = 0; i < n1 + n2; i++) { const inn = i < n1, k = inn ? i : i - n1, nn = inn ? n1 : n2, a = 2 * Math.PI * (k + .6 * (r() - .5)) / nn, rr = (inn ? r1 : r2) + nz * (2 * r() - 1); o.push([rr * Math.cos(a), rr * Math.sin(a), inn ? 1 : -1]); } return o; };
+const aKw = .8, aRg = aCen(aRings(31, 12, 20, .6, 2.2, .15)), aRgP = aPca(aRg), aRgK = aKpca(aRg, aGs(aKw));
+// Separación entre los dos grupos en una coordenada: positiva si los intervalos de sus valores no se tocan.
+const aSep = y => { const a = y.filter((v, i) => aRg[i][2] > 0), b = y.filter((v, i) => aRg[i][2] < 0); return Math.max(Math.min(...a) - Math.max(...b), Math.min(...b) - Math.max(...a)); };
+const aFlip = (y, on) => on ? y.map(v => -v) : y;
+const aRgY = [0, 1].map(k => { const y = aRgK.y(k); return aFlip(y, k === 0 ? aSum(y.filter((v, i) => aRg[i][2] > 0)) < 0 : y[y.map(Math.abs).indexOf(Math.max(...y.map(Math.abs)))] < 0); });
+const aRgSepL = aSep(aRgP.Y.map(y => y[0])), aRgSepK = aSep(aRgY[0]);
+// --- Rollo («Swiss roll», figura 15.1), ilustrativo: la hoja (t cos t, h, t sin t) con t entre 1.5π y 4.5π; s es la longitud de arco normalizada (la coordenada «desenrollada»).
+const aRT0 = 1.5 * Math.PI, aRT1 = 4.5 * Math.PI, aRollH = 10;
+const aArc = (() => { const n = 400, ts = [], ss = [0]; for (let k = 0; k <= n; k++) ts.push(aRT0 + (aRT1 - aRT0) * k / n); for (let k = 1; k <= n; k++) { const tm = (ts[k] + ts[k - 1]) / 2; ss.push(ss[k - 1] + Math.sqrt(1 + tm * tm) * (ts[k] - ts[k - 1])); } return { ts, ss: ss.map(v => v / ss[n]) }; })();
+const aTofS = s => { let k = 1; while (k < aArc.ss.length - 1 && aArc.ss[k] < s) k++; const f = (s - aArc.ss[k - 1]) / (aArc.ss[k] - aArc.ss[k - 1]); return aArc.ts[k - 1] + f * (aArc.ts[k] - aArc.ts[k - 1]); };
+const aRl = (() => { const r = aRng(15); return Array.from({ length: 150 }, () => { const s = r(), h = r(); return { s, h, t: aTofS(s) }; }); })();
+// --- Comprobaciones y práctica.
+const aArgMin = v => v.reduce((b, u, i) => u < v[b] ? i : b, 0);
+const aQ1 = [aTh1 + aDeg(55), aTh1, aTh1 - aDeg(40)], aQ1e = aQ1.map(th => aErr(aP.X, th)), aQ1r = aArgMin(aQ1e);            // comprobación 1: tres rectas
+const aQ2 = [[3.2, 1.5, 60, 41], [3.4, .7, 20, 42], [2.6, 2, -35, 43]].map(([a, b, d, sd]) => aPca(aCloud(sd, aM, a, b, d))), aQ2v = aQ2.map(q => q.val[1]), aQ2r = aArgMin(aQ2v);   // comprobación 2: tres nubes
+const aQ3 = { lam: 16, vi: .5 }, aQ3o = [Math.sqrt(aQ3.lam) * aQ3.vi, aQ3.lam * aQ3.vi, aQ3.vi / Math.sqrt(aQ3.lam), Math.sqrt(aQ3.lam)];   // práctica: (15.5)
+const aF2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2).replace('-', '−');
+const aDec = v => String(Math.round(v * 1000) / 1000);
+/* aMATH:end */
+
+let aClipN = 0;
+// Plano centrado en el origen: marco cuadrado de lado 2 · half que cubre de −view a view, con los ejes de trazos. Capas: pl.gc (recortada al marco) y pl.gp (puntos).
+const aPl = (p, cx, cy, half, view, { t0 = .4, axes = true } = {}) => {
+  const sc = half / view, id = 'aclip' + (aClipN++), g = G(p, { o: t0 == null ? 1 : 0 }), pl = { g, cx, cy, half, view, sc, X: v => cx + v * sc, Y: v => cy - v * sc };
+  if (t0 != null) show(g, t0);
+  mk('rect', { x: cx - half, y: cy - half, width: 2 * half, height: 2 * half }, mk('clipPath', { id }, g));
+  mk('rect', { x: cx - half, y: cy - half, width: 2 * half, height: 2 * half, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  pl.gc = G(g); pl.gc.setAttribute('clip-path', `url(#${id})`);
+  if (axes) mk('path', { d: `M${cx - half} ${cy}h${2 * half}M${cx} ${cy - half}v${2 * half}`, stroke: COL.faint, 'stroke-width': 1.5, 'stroke-dasharray': '4 8', fill: 'none' }, pl.gc);
+  pl.gp = G(g);
+  return pl;
+};
+// Nube con una recta por el origen sobre un plano aPl: la recta ámbar (pj.lg), un segmento rosa de cada punto a su proyección (pj.sg) y las proyecciones como
+// puntos ámbar chicos (pj.pg); los tres grupos nacen ocultos. pj.set(th, sq, rot, off): ángulo de la recta; sq de 0 a 1 lleva cada punto a su proyección
+// («aplasta» la nube); rot de 0 a 1 gira todo hasta dejar la recta horizontal; off desplaza la nube (para mostrarla antes de centrar). col: color o función del punto.
+const aProj = (pl, X, { r = 8, col = HUE.pt, sw = 3 } = {}) => {
+  const pj = { th: 0, sq: 0, rot: 0, off: [0, 0] }, L = pl.view * 1.6, f = v => v.toFixed(1);
+  pj.lg = G(pl.gc, { o: 0 }); pj.ln = mk('path', { stroke: HUE.hyp, 'stroke-width': sw + 1, fill: 'none' }, pj.lg);
+  pj.sg = G(pl.gc, { o: 0 }); pj.seg = mk('path', { stroke: HUE.err, 'stroke-width': sw, fill: 'none', 'stroke-linecap': 'round' }, pj.sg);
+  pj.dots = X.map(x => mk('circle', { r, fill: typeof col === 'function' ? col(x) : col, stroke: COL.board, 'stroke-width': 1.5 }, pl.gp));
+  pj.pg = G(pl.gp, { o: 0 }); pj.pd = X.map(() => mk('circle', { r: r * .5, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 1 }, pj.pg));
+  pj.set = (th = pj.th, sq = pj.sq, rot = pj.rot, off = pj.off) => {
+    Object.assign(pj, { th, sq, rot, off });
+    const u = aDir(th), n = [-u[1], u[0]], a = -th * rot, ca = Math.cos(a), sa = Math.sin(a), R = v => [pl.X(v[0] * ca - v[1] * sa), pl.Y(v[0] * sa + v[1] * ca)];
+    const e0 = R([-u[0] * L, -u[1] * L]), e1 = R([u[0] * L, u[1] * L]); pj.ln.setAttribute('d', `M${f(e0[0])} ${f(e0[1])}L${f(e1[0])} ${f(e1[1])}`);
+    let d = '';
+    X.forEach((x, i) => {
+      const t = aDot2(x, u), w = aDot2(x, n) * (1 - sq), a1 = R([t * u[0] + w * n[0] + off[0], t * u[1] + w * n[1] + off[1]]), b1 = R([t * u[0], t * u[1]]);
+      pj.dots[i].setAttribute('cx', f(a1[0])); pj.dots[i].setAttribute('cy', f(a1[1])); pj.pd[i].setAttribute('cx', f(b1[0])); pj.pd[i].setAttribute('cy', f(b1[1]));
+      if (sq < .999) d += `M${f(a1[0])} ${f(a1[1])}L${f(b1[0])} ${f(b1[1])}`;
+    });
+    pj.seg.setAttribute('d', d);
+  };
+  pj.all = () => [pj.lg, pj.sg, pj.pg].forEach(e => put(e, { o: 1 }));
+  pj.set();
+  return pj;
+};
+// Flecha que se redibuja (la del cap. 17): e._to(x0, y0, x1, y1).
+const aArrow = (g, col, sw = 5) => {
+  const e = mk('path', { fill: 'none', stroke: col, 'stroke-width': sw, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, g);
+  e._to = (x0, y0, x1, y1) => {
+    const L = Math.hypot(x1 - x0, y1 - y0), ux = (x1 - x0) / L, uy = (y1 - y0) / L, h = Math.min(18, L * .45), bx = x1 - ux * h, by = y1 - uy * h, f = v => v.toFixed(1);
+    e.setAttribute('d', `M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}M${f(bx - uy * h * .55)} ${f(by + ux * h * .55)}L${f(x1)} ${f(y1)}L${f(bx + uy * h * .55)} ${f(by - ux * h * .55)}`);
+  };
+  return e;
+};
+const aHalo = e => { [['stroke', COL.board], ['stroke-width', 7], ['paint-order', 'stroke'], ['stroke-linejoin', 'round']].forEach(([k, v]) => e.setAttribute(k, v)); return e; };
+// Gráfica con ejes lineales (la del cap. 28, reducida): marco con esquina superior izquierda en (x0, y0). gp.d(f, q): el trazo de v ↦ f(v) hasta la fracción q del eje · gp.gl: capa recortada.
+const aGPl = (p, x0, y0, W, HH, a0, a1, b0, b1, t0, { xt = [], yt = [], xl = '', yl = '' } = {}) => {
+  const g = G(p, { o: 0 }), id = 'aclip' + (aClipN++), WX = v => x0 + (v - a0) / (a1 - a0) * W, VY = v => y0 + HH - (v - b0) / (b1 - b0) * HH;
+  show(g, t0);
+  mk('rect', { x: x0, y: y0, width: W, height: HH, fill: 'none', stroke: COL.faint, 'stroke-width': 2 }, g);
+  xt.forEach(([v, s]) => { mk('path', { d: `M${WX(v).toFixed(1)} ${y0 + HH}v8`, stroke: COL.dim, 'stroke-width': 2 }, g); aTx(g, s, WX(v), y0 + HH + 36, null, { size: 22, fill: COL.dim, anchor: 'middle' }); });
+  yt.forEach(([v, s]) => { mk('path', { d: `M${x0} ${VY(v).toFixed(1)}h-8`, stroke: COL.dim, 'stroke-width': 2 }, g); aTx(g, s, x0 - 14, VY(v) + 8, null, { size: 22, fill: COL.dim, anchor: 'end' }); });
+  if (xl) aTx(g, xl, x0 + W, y0 + HH + 70, null, { size: 22, fill: COL.dim, anchor: 'end', font: UI });
+  if (yl) aTx(g, yl, x0, y0 - 16, null, { size: 22, fill: COL.dim, font: UI });
+  mk('rect', { x: x0, y: y0, width: W, height: HH }, mk('clipPath', { id }, g));
+  const gl = G(g); gl.setAttribute('clip-path', `url(#${id})`);
+  const d = (f, q = 1) => { let s = ''; const n = Math.max(1, Math.round(200 * q)); for (let k = 0; k <= n; k++) { const v = a0 + (a1 - a0) * q * k / n; s += (k ? 'L' : 'M') + WX(v).toFixed(1) + ' ' + VY(f(v)).toFixed(1); } return s; };
+  return { g, gl, WX, VY, d };
+};
+// Recuadro numerado de una comprobación (los tres mosaicos de pickEls).
+const aCard = (p, x, y, w, hh, n) => { const g = G(p, { x, y }); mk('rect', { x: 0, y: 0, width: w, height: hh, fill: COL.board, stroke: COL.faint, 'stroke-width': 3 }, g); mk('circle', { cx: w - 40, cy: 40, r: 22, fill: COL.chalk }, g); T(g, String(n), { x: w - 40, y: 49, size: 26, fill: COL.board, weight: 700, anchor: 'middle' }); return g; };
+// El rollo en perspectiva paralela (psi gira alrededor del eje vertical) que se desenrolla a un rectángulo: rl.set(psi, f), con f de 0 (enrollado) a 1 (plano).
+const aRollV = (p, cx, cy, { sc = 15, W = 560, Hh = 240, t0 = .4 } = {}) => {
+  const g = G(p, { o: 0 }), ph = aDeg(64), cph = Math.cos(ph), sph = Math.sin(ph), ne = 70; show(g, t0);
+  const at = (psi, f, t, s, h) => { const x = t * Math.cos(t), z = t * Math.sin(t), y = (h - .5) * aRollH, c = Math.cos(psi), sn = Math.sin(psi), ax = cx + sc * (x * c - y * sn), ay = cy - sc * ((x * sn + y * c) * cph + z * sph), bx = cx - W / 2 + s * W, by = cy + Hh / 2 - h * Hh; return [ax + (bx - ax) * f, ay + (by - ay) * f]; };
+  const edge = mk('path', { stroke: COL.faint, 'stroke-width': 2, fill: 'none', 'stroke-linejoin': 'round' }, g), dots = aRl.map(q => mk('circle', { r: 6, fill: HUE.pt, 'fill-opacity': (.28 + .72 * q.s).toFixed(2) }, g));
+  const ring = Array.from({ length: 2 * ne + 2 }, (_, k) => { const s = k <= ne ? k / ne : (2 * ne + 1 - k) / ne; return [s, k <= ne ? 0 : 1, aTofS(s)]; });
+  return { g, set: (psi, f) => {
+    edge.setAttribute('d', ring.map(([s, h, t], k) => { const q = at(psi, f, t, s, h); return (k ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1); }).join('') + 'Z');
+    dots.forEach((e, i) => { const q = at(psi, f, aRl[i].t, aRl[i].s, aRl[i].h); e.setAttribute('cx', q[0].toFixed(1)); e.setAttribute('cy', q[1].toFixed(1)); });
+  } };
+};
+// Matriz como mosaico de celdas sin número: más clara = valor mayor (escala lineal entre el mínimo y el máximo).
+const aCells = (p, x, y, cw, A, t0, ch = cw) => { const g = G(p, { o: 0 }), fl = A.flat(), lo = Math.min(...fl), hi = Math.max(...fl); show(g, t0); A.forEach((row, i) => row.forEach((v, j) => mk('rect', { x: x + j * cw, y: y + i * ch, width: cw - 1, height: ch - 1, fill: COL.chalk, 'fill-opacity': (.04 + .92 * (v - lo) / (hi - lo || 1)).toFixed(3) }, g))); return g; };
+// Puntos que viajan de una lista de posiciones a otra: aparecen en t0 y llegan tras dur segundos.
+const aFly = (p, from, to, cols, t0, dur, r = 7) => { const g = G(p, { o: 0 }), es = from.map((q, i) => mk('circle', { cx: q[0].toFixed(1), cy: q[1].toFixed(1), r, fill: cols[i], 'fill-opacity': .9, stroke: COL.board, 'stroke-width': 1.2 }, g)); show(g, t0, .3); prog(q => es.forEach((e, i) => { e.setAttribute('cx', (from[i][0] + (to[i][0] - from[i][0]) * q).toFixed(1)); e.setAttribute('cy', (from[i][1] + (to[i][1] - from[i][1]) * q).toFixed(1)); }), t0 + .3, dur); return g; };
+
+/* ---------- beats: [id, título, run(m, D), { ask }?] ---------- */
+const RX = 800, aPX = 420, aPY = 470, aPH = 300, aPV = 3.9, aTh0 = aDeg(aA1);
+const aErrRow = (p, y, t0) => aRow(p, [['con esta recta:    ', COL.chalk, UI, 24], ['‖PX − X‖_{F}^{2} / m   =   ', HUE.err], ['', HUE.err]], RX, y, t0, { size: 30, weight: 700 });
+const aQ3why = [null, 'Se multiplica por la raíz de lambda, no por lambda. Da 2.', 'La raíz de lambda multiplica, no divide. Da 2.', 'Falta multiplicar por la componente, 0.5. Da 2.'];
+const BEATS = [
+  ['intro', 'Inicio', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'Unidad 4 · Capítulo 29', { x: 800, y: 350, size: 28, fill: COL.dim, anchor: 'middle' });
+    T(g, 'PCA y kernel PCA', { x: 800, y: 450, size: 60, weight: 600, anchor: 'middle' });
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Menos coordenadas, con la misma estructura.', 800, 580, m('sub'), { size: 30, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['motiv', 'Por qué reducir', (m) => {
+    const p = panel(0), tr = [m('r1'), m('r2'), m('r3')], tfl = m('flat'), tfo = m('form');
+    aNote(p, `rollo ilustrativo (${aRl.length} puntos con semilla), calculado en la página · el brillo sigue la posición a lo largo de la hoja`);
+    aTitle(p, 'Reducir la dimensión: menos coordenadas, la misma estructura');
+    const rl = aRollV(p, 420, 440); rl.set(aDeg(8), 0);
+    prog(q => rl.set(aDeg(8 + 26 * q), 0), .5, tfl - .5, lin); prog(q => rl.set(aDeg(34), q), tfl, 3.2);
+    const ca = aTx(p, '(a)  tres dimensiones', 420, 740, .6, { size: 26, anchor: 'middle', font: UI, weight: 600 }); hide(ca, tfl, .4);
+    aTx(p, '(b)  dos dimensiones', 420, 740, tfl + 2.6, { size: 26, anchor: 'middle', font: UI, weight: 600 });
+    aTx(p, 'el «Swiss roll» de la figura 15.1', 420, 778, .8, { size: 22, fill: COL.dim, anchor: 'middle', font: UI });
+    [['cómputo', ':   comprimir los datos antes de procesarlos'], ['visualización', ':   llevarlos a dos o tres dimensiones'], ['extracción de características', ':   menos, y más útiles']].forEach(([a, b], k) =>
+      aRow(p, [[a, COL.chalk, UI], [b, COL.dim, UI, 24]], RX, 260 + k * 72, tr[k], { size: 28, weight: 600 }));
+    aRow(p, [['X ∈ ℝ^{N×m}'], ['        →        '], ['Y ∈ ℝ^{k×m}', HUE.hyp], [',        k ≪ N']], RX, 560, tfo, { size: 34, weight: 700 });
+    aTx(p, 'X:  una columna por punto, de dimensión N', RX, 612, tfo + 2, { size: 22, fill: COL.dim, font: UI });
+    aTx(p, 'Y:  una representación de dimensión k, fiel a X', RX, 646, tfo + 6, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['pca', 'Componentes principales', (m) => {
+    const p = panel(0), tc = m('center'), tl = m('line'), tp = m('proj'), te = m('err'), tmv = m('move');
+    aNote(p, `muestra ilustrativa con semilla (m = ${aM}) · tiza: los datos · ámbar: la recta y las proyecciones · rosa: el error de reconstrucción`);
+    aTitle(p, 'PCA: proyectar con el menor error de reconstrucción');
+    const pl = aPl(p, aPX, aPY, aPH, aPV), pj = aProj(pl, aP.X), mg = G(pl.gp);
+    mk('path', { d: 'M-13 0h26M0 -13v26', stroke: HUE.pt, 'stroke-width': 3, fill: 'none' }, mg); aHalo(aTx(mg, 'media', 18, -14, null, { size: 22, font: UI, weight: 600 }));
+    const setOff = q => { const off = aP.mu.map(v => v * (1 - q)); pj.set(aTh0, 0, 0, off); put(mg, { x: pl.X(off[0]), y: pl.Y(off[1]) }); };
+    setOff(0); prog(setOff, tc + .3, 1.8); hide(mg, tl - .6, .4);
+    show(pj.lg, tl + .6); show(pj.pg, tp); show(pj.sg, te);
+    const rd = aErrRow(p, 660, te + 3.2), setTh = th => { pj.set(th); rd[2]._set(aF2(aErr(aP.X, th))); };
+    rd[2]._set(aF2(aErr(aP.X, aTh0)));
+    prog(q => setTh(aTh0 - aDeg(38) * Math.sin(q * Math.PI)), tmv + .2, 4.2, lin);
+    aTx(p, 'análisis de componentes principales (principal component analysis, PCA)', RX, 196, 1.6, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['X', COL.chalk, MATH, 32], [':    datos centrados,     ', COL.chalk, UI, 26], ['x_{1} + ⋯ + x_{m} = 0']], RX, 260, tc, { size: 28, weight: 700 });
+    aRow(p, [['P', HUE.hyp, MATH, 32], [':    una proyección ortogonal de rango k', COL.chalk, UI, 26]], RX, 350, tl, { size: 28, weight: 700 });
+    aTx(p, 'aquí N = 2 y k = 1:  una recta por el origen', RX, 390, tl + 2.6, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['mín_{P}      '], ['‖PX − X‖_{F}^{2}', HUE.err], ['        (15.1)', COL.dim, UI, 22]], RX, 500, te, { size: 36, weight: 700 });
+    aTx(p, 'error de reconstrucción:  la suma de los cuadrados de los segmentos rosa', RX, 546, te + 1.6, { size: 22, fill: COL.dim, font: UI });
+  }],
+
+  ['spin', 'La mejor recta', (m) => {
+    const p = panel(0), tt = m('turn'), ts = m('sum'), tq = m('equiv'), tb = m('best'), GX0 = 880, GY0 = 270, GW = 600, GH = 250, BY = 660, top = aTot * 1.12;
+    aNote(p, 'error medio = ‖PX − X‖_{F}^{2} / m · varianza proyectada = Tr[X^{⊤}PX] / m · ángulo de la recta medido desde el eje horizontal');
+    aTitle(p, 'Girar la recta: error mínimo, varianza máxima');
+    const pl = aPl(p, aPX, aPY, aPH, aPV), pj = aProj(pl, aP.X); pj.all();
+    const al = aTx(p, '', aPX, 808, .4, { size: 26, anchor: 'middle', font: UI, weight: 600 });
+    const gp = aGPl(p, GX0, GY0, GW, GH, aA0, aA1, 0, top, .5, { xt: [-60, -30, 0, 30, 60, 90, 120].map(v => [v, `${v}°`.replace('-', '−')]), yt: [0, 1, 2].map(v => [v, String(v)]), xl: 'ángulo de la recta', yl: 'por punto (dividido por m)' });
+    const fe = d => aErr(aP.X, aDeg(d)), fv = d => aVar(aP.X, aDeg(d));
+    const mkr = mk('path', { stroke: COL.dim, 'stroke-width': 2, fill: 'none' }, gp.gl), cv = mk('path', { stroke: HUE.hyp, 'stroke-width': 5, fill: 'none', 'stroke-linejoin': 'round' }, gp.gl), ce = mk('path', { stroke: HUE.err, 'stroke-width': 5, fill: 'none', 'stroke-linejoin': 'round' }, gp.gl);
+    const de = mk('circle', { r: 8, fill: HUE.err, stroke: COL.board, 'stroke-width': 2 }, gp.gl), dv = mk('circle', { r: 8, fill: HUE.hyp, stroke: COL.board, 'stroke-width': 2 }, gp.gl);
+    const gb = G(p, { o: 0 }); show(gb, tt + 1.2);
+    const bv = mk('rect', { x: GX0, y: BY, height: 34, fill: HUE.hyp }, gb), be = mk('rect', { y: BY, height: 34, fill: HUE.err }, gb);
+    const lv = aTx(gb, '', GX0, BY - 16, null, { size: 24, fill: HUE.hyp, font: UI, weight: 700 }), le = aTx(gb, '', GX0 + GW, BY - 16, null, { size: 24, fill: HUE.err, font: UI, weight: 700, anchor: 'end' });
+    const setA = (d, q) => {
+      const e = fe(d), v = fv(d), wv = v / aTot * GW;
+      pj.set(aDeg(d)); al._set(`ángulo de la recta:  ${Math.round(d)}°`.replace('-', '−'));
+      mkr.setAttribute('d', `M${gp.WX(d).toFixed(1)} ${GY0}v${GH}`); de.setAttribute('cx', gp.WX(d).toFixed(1)); de.setAttribute('cy', gp.VY(e).toFixed(1)); dv.setAttribute('cx', gp.WX(d).toFixed(1)); dv.setAttribute('cy', gp.VY(v).toFixed(1));
+      bv.setAttribute('width', wv.toFixed(1)); be.setAttribute('x', (GX0 + wv).toFixed(1)); be.setAttribute('width', (GW - wv).toFixed(1));
+      lv._set(`varianza proyectada   ${aF2(v)}`); le._set(`error medio   ${aF2(e)}`);
+      if (q != null) { ce.setAttribute('d', gp.d(fe, q)); cv.setAttribute('d', gp.d(fv, q)); }
+    };
+    setA(aA0, 0);
+    prog(q => setA(aA0 + (aA1 - aA0) * q, q), tt + .3, Math.max(8, ts - tt + 2.6), lin);
+    prog(q => setA(aA1 + (aTh1d - aA1) * q, null), tb, 1.8);
+    aTx(p, `suma constante:   Tr[X^{⊤}X] / m  =  ${aF2(aTot)}`, GX0, BY + 70, ts, { size: 22, fill: COL.dim });
+    aRow(p, [['‖PX − X‖_{F}^{2}', HUE.err], ['   =   Tr[X^{⊤}X]   −   '], ['Tr[X^{⊤}PX]', HUE.hyp]], GX0, 204, ts + 2, { size: 28, weight: 700 });
+    aRow(p, [['mín  ', COL.chalk, UI, 26], ['‖PX − X‖_{F}^{2}', HUE.err], ['      ⟺      '], ['máx  ', COL.chalk, UI, 26], ['Tr[X^{⊤}PX]', HUE.hyp], ['        (15.2)', COL.dim, UI, 22]], GX0, 800, tq, { size: 30, weight: 700 });
+    const gm = G(p, { o: 0 }); show(gm, tb + 1.8);
+    mk('path', { d: `M${gp.WX(aTh1d).toFixed(1)} ${GY0}v${GH}`, stroke: HUE.hyp, 'stroke-width': 2.5, 'stroke-dasharray': '7 6', fill: 'none' }, gm);
+    aHalo(aTx(gm, `${Math.round(aTh1d)}°:  la dirección principal`, gp.WX(aTh1d) + 14, GY0 + GH / 2 + 8, null, { size: 22, fill: HUE.hyp, font: UI, weight: 700 }));
+  }],
+
+  ['q1', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], WW = 420, HH = 390, Y0q = 252;
+    T(p, 'La misma nube centrada y tres rectas por el origen', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aSq(p, 100, 204, HUE.pt, 'los datos', { dot: true }); aSq(p, 270, 204, HUE.hyp, 'la recta y las proyecciones', { line: true }); aSq(p, 620, 204, HUE.err, 'lo que se pierde en cada punto', { line: true });
+    S.q1 = aQ1.map((th, j) => { const g = aCard(p, BX[j], Y0q, WW, HH, j + 1), pl = aPl(g, 210, 200, 172, 4.3, { t0: null }), pj = aProj(pl, aP.X, { r: 5.5, sw: 2.5 }); pj.all(); pj.set(th); return g; });
+    S.q1B = BX.map(bx => [bx, Y0q, WW, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-recta', prompt: ['¿Con cuál de las tres rectas es menor el error de reconstrucción?'],
+    build: pickEls(S.q1.map((el, j) => ({ el, box: S.q1B[j], label: 'recta ' + (j + 1) })), aQ1r,
+      `Ahí los segmentos rosa son los más cortos: el error medio es ${aF2(aQ1e[aQ1r])}.`,
+      j => `Ahí el error medio es ${aF2(aQ1e[j])}: con otra recta los segmentos son más cortos.`),
+  }], done) }],
+
+  ['thm', 'La solución', (m) => {
+    const p = panel(0), tcv = m('cov'), te = m('eig'), tth = m('thm'), tck = m('check'), tr = m('rep'), tsq = tr + 5.4;
+    aNote(p, 'sin la demostración · C y sus valores y vectores propios (método de Jacobi), calculados en la página · largo de cada flecha: 2 √(valor propio)');
+    aTitle(p, 'Teorema 15.1: la solución está en la matriz de covarianza');
+    const pl = aPl(p, aPX, aPY, aPH, aPV), pj = aProj(pl, aP.X); pj.all(); pj.set(aTh1);
+    const ga = G(pl.g, { o: 0 }), O = [pl.X(0), pl.Y(0)]; show(ga, te); hide(ga, tsq - .5, .4);
+    [[aP.u2, aP.val[1], COL.chalk, 'u_{2}', 30, 0], [aP.u1, aP.val[0], HUE.hyp, 'u_{1}', -6, 36]].forEach(([u, v, col, lab, la, lp]) => {
+      const L = 2 * Math.sqrt(v), a = aArrow(ga, COL.board, 11), b = aArrow(ga, col, 6), ex = pl.X(u[0] * L), ey = pl.Y(u[1] * L);
+      a._to(O[0], O[1], ex, ey); b._to(O[0], O[1], ex, ey);
+      aHalo(aTx(ga, lab, ex + u[0] * la - u[1] * lp, ey - u[1] * la - u[0] * lp + 10, null, { size: 30, fill: col, weight: 700, anchor: 'middle' }));
+    });
+    prog(q => pj.set(aTh1, q, 0), tsq, 1.5); prog(q => pj.set(aTh1, 1, q), tsq + 1.9, 1.6);
+    aRow(pl.g, [['y_{i}  =  u_{1}^{⊤} x_{i}', HUE.hyp], ['        una coordenada por punto', COL.dim, UI, 22]], aPX - 250, aPY + 76, tsq + 3.4, { size: 28, weight: 700 });
+    const c0 = aTx(p, 'C   =   (1/m) X X^{⊤}   =', RX, 248, tcv, { size: 32, weight: 700 }), gm = G(p, { o: 0 }), mx = RX + 390; show(gm, tcv + 2);
+    mk('path', { d: `M${mx + 12} 196h-12v86h12M${mx + 248} 196h12v86h-12`, stroke: COL.chalk, 'stroke-width': 3, fill: 'none' }, gm);
+    aP.C.forEach((row, i) => row.forEach((v, j) => aTx(gm, aF2(v), mx + 72 + j * 116, 230 + i * 42, null, { size: 28, anchor: 'middle', weight: 600 })));
+    aTx(p, 'matriz de covarianza de la muestra', RX, 292, tcv + 2, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['valores propios de C:      ', COL.chalk, UI, 26], [aF2(aP.val[0]), HUE.hyp], ['      y      ', COL.chalk, UI, 26], [aF2(aP.val[1]), HUE.err]], RX, 376, te, { size: 34, weight: 700 });
+    aRow(p, [['P^{*}   =   U_{k} U_{k}^{⊤}', HUE.hyp], ['        teorema 15.1', COL.dim, UI, 22]], RX, 462, tth, { size: 36, weight: 700 });
+    aTx(p, 'U_{k}:  los k vectores singulares (aquí, propios) principales de C', RX, 506, tth + 3, { size: 22, fill: COL.dim, font: UI });
+    aRow(p, [['varianza máxima    ', COL.chalk, UI, 24], [aF2(aVar(aP.X, aTh1)), HUE.hyp], ['    =    el valor propio mayor', COL.chalk, UI, 24]], RX, 596, tck + .6, { size: 30, weight: 700 });
+    aRow(p, [['error medio mínimo    ', COL.chalk, UI, 24], [aF2(aErr(aP.X, aTh1)), HUE.err], ['    =    el valor propio que se descarta', COL.chalk, UI, 24]], RX, 644, tck + 4, { size: 30, weight: 700 });
+    aRow(p, [['Y   =   U_{k}^{⊤} X', HUE.hyp], ['        la representación de dimensión k', COL.dim, UI, 22]], RX, 746, tr, { size: 36, weight: 700 });
+  }],
+
+  ['q2', 'Comprobación', () => {
+    const p = panel(0), BX = [130, 590, 1050], WW = 420, HH = 390, Y0q = 252;
+    T(p, 'Tres nubes centradas: se conserva una sola dimensión (k = 1)', { x: 100, y: 130, size: 30, fill: COL.task, weight: 600 });
+    aTx(p, 'muestras ilustrativas con semilla (m = 24 cada una) · el mismo recuadro y la misma escala en las tres', 100, 204, null, { size: 22, fill: COL.dim, font: UI });
+    S.q2 = aQ2.map((q, j) => { const g = aCard(p, BX[j], Y0q, WW, HH, j + 1), pl = aPl(g, 210, 200, 172, 4.3, { t0: null }); aProj(pl, q.X, { r: 6 }); return g; });
+    S.q2B = BX.map(bx => [bx, Y0q, WW, HH]);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-descarte', prompt: ['¿En cuál de las tres nubes es menor el valor propio que se descarta?'],
+    build: pickEls(S.q2.map((el, j) => ({ el, box: S.q2B[j], label: 'nube ' + (j + 1) })), aQ2r,
+      `Es la más angosta: su segundo valor propio es ${aF2(aQ2v[aQ2r])}, el menor de los tres.`,
+      j => `Esa nube es más ancha: su segundo valor propio es ${aF2(aQ2v[j])}.`),
+  }], done) }],
+
+  ['kpca', 'Kernel PCA', (m) => {
+    const p = panel(0), tk = m('k'), tsv = m('svd'), tu = m('u'), tp = m('proj'), tpt = m('pt'), tsm = m('same'), GX = 130, GY = 196, CW = 14, SX0 = 130, SX1 = 730, SV = 3.7, SY1 = 640, SY2 = 752;
+    aNote(p, 'la misma nube, ordenada por su primera componente · celda más clara = valor mayor · X ya está centrada: K = X^{⊤}X queda centrada');
+    aTitle(p, 'Kernel PCA: la misma cuenta, solo con la matriz de kernel');
+    aCells(p, GX, GY, CW, aKL.Kc, tk);
+    aRow(p, [['K = X^{⊤}X'], [`:   kernel lineal, m = ${aM}`, COL.dim, UI, 22]], GX, GY - 16, tk, { size: 26, weight: 700 });
+    const vx = GX + aM * CW + 44; aCells(p, vx, GY, CW + 6, aV1.map(v => [v]), tu, CW); aTx(p, 'v', vx + 10, GY - 16, tu, { size: 26, weight: 700, anchor: 'middle' });
+    aTx(p, `λ  =  ${aF2(aLam1)}`, vx + 56, GY + 110, tu + 1.5, { size: 28, weight: 700 });
+    aTx(p, `λ/m  =  ${aF2(aLam1 / aM)}`, vx + 56, GY + 170, tu + 5, { size: 28, weight: 700, fill: HUE.hyp });
+    aTx(p, 'el mayor valor', vx + 56, GY + 206, tu + 5, { size: 22, fill: COL.dim, font: UI }); aTx(p, 'propio de C', vx + 56, GY + 234, tu + 5, { size: 22, fill: COL.dim, font: UI });
+    const SX = v => (SX0 + SX1) / 2 + v / SV * (SX1 - SX0) / 2, g1 = G(p, { o: 0 }), g2 = G(p, { o: 0 }), gr = G(g2); show(g1, tp + 2); show(g2, tpt + 1.5);
+    const ax2 = [[g1, SY1], [g2, SY2]].map(([g, y]) => put(mk('path', { d: `M${SX0} ${y}H${SX1}M${SX(0)} ${y - 12}v24`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g), { o: 1 }))[1]; hide(ax2, tsm + .2, .3);
+    aRow(g1, [['u_{1}^{⊤} x_{i}', HUE.hyp], ['        las coordenadas de PCA', COL.dim, UI, 22]], SX0, SY1 - 30, null, { size: 26, weight: 700 });
+    const l2 = aRow(g2, [['√λ v_{i}'], ['        solo con K', COL.dim, UI, 22]], SX0, SY2 - 30, null, { size: 26, weight: 700 });
+    aP.Y.forEach(y => mk('circle', { cx: SX(y[0]).toFixed(1), cy: SY1, r: 6, fill: HUE.hyp }, g1));
+    aYk.forEach(v => mk('circle', { cx: SX(v).toFixed(1), cy: SY2, r: 12, fill: 'none', stroke: HUE.pt, 'stroke-width': 3 }, gr));
+    tw(gr, { y: SY1 - SY2 }, tsm + .4, 1.4); l2.forEach(e => hide(e, tsm + .2, .3));
+    const gA = G(p); hide(gA, tp - .6, .4);
+    aRow(gA, [['X = (Φ(x_{1}), …, Φ(x_{m}))'], ['        en el espacio de características', COL.dim, UI, 22]], RX, 240, .5, { size: 30, weight: 700 });
+    aRow(gA, [['K = X^{⊤}X'], [':    la matriz de kernel,    ', COL.chalk, UI, 26], ['K_{ij} = K(x_{i}, x_{j})']], RX, 312, tk, { size: 30, weight: 700 });
+    aRow(gA, [['C = (1/m) U Λ U^{⊤}            K = V Λ V^{⊤}'], ['        (15.3)', COL.dim, UI, 22]], RX, 408, tsv, { size: 30, weight: 700 });
+    aRow(p, [['x^{⊤}u   =   k_{x}^{⊤} v / √λ'], ['        (15.4)', COL.dim, UI, 22]], RX, 240, tp, { size: 34, weight: 700 });
+    aTx(p, 'k_{x} = (K(x_{1}, x), …, K(x_{m}, x))^{⊤}:   solo valores del kernel', RX, 286, tp + 2.5, { size: 22, fill: COL.dim });
+    aRow(p, [['x_{i}^{⊤}u   =   √λ v_{i}'], ['        (15.5) · si x es el punto i de la muestra', COL.dim, UI, 22]], RX, 388, tpt, { size: 34, weight: 700 });
+    aRow(p, [['u   =   X v / √λ', HUE.hyp], ['        v:  vector propio de K, de valor λ', COL.dim, MATH, 22]], RX, 520, tu, { size: 36, weight: 700 });
+    aTx(p, 'u:  vector singular de C, de valor λ/m', RX, 564, tu + 4, { size: 22, fill: COL.dim });
+    aTx(p, 'con el kernel lineal:  las mismas coordenadas que PCA', RX, 680, tsm, { size: 26, fill: HUE.hyp, font: UI, weight: 600 });
+    aTx(p, 'con otro kernel PDS:  la misma cuenta, con su matriz de kernel', RX, 740, tsm + 2.6, { size: 26, font: UI, weight: 600 });
+  }],
+
+  ['rings', 'Dos anillos', (m) => {
+    const p = panel(0), tl = m('lin'), tl1 = m('lin1'), tk = m('ker'), tk1 = m('ker1'), CXs = [290, 800, 1310], CY = 400, HF = 180, SY = 700;
+    aNote(p, `m = ${aRg.length}, con semilla · color: solo para seguir los anillos (no hay etiquetas) · gaussiano de ancho ${aKw} · K centrada: (I − 11^{⊤}/m) K (I − 11^{⊤}/m)`);
+    aTitle(p, 'Kernel PCA con kernel gaussiano: dos anillos');
+    const cols = aRg.map(x => x[2] > 0 ? HUE.pos : HUE.neg), vK = 1.18 * Math.max(...aRgY.flat().map(Math.abs)), ts = [.4, tl - .3, tk - .3];
+    const pls = [3, 3, vK].map((v, k) => aPl(p, CXs[k], CY, HF, v, { t0: ts[k] }));
+    ['los datos:  N = 2', 'PCA lineal:  dos componentes', 'kernel PCA:  dos componentes'].forEach((s, k) => aTx(p, s, CXs[k], 200, ts[k], { size: 26, anchor: 'middle', font: UI, weight: 600 }));
+    [['x_{1}', 'x_{2}'], ['componente 1', 'componente 2'], ['componente 1', 'componente 2']].forEach(([a, b], k) => { aTx(pls[k].g, a, CXs[k] + HF, CY + HF + 30, null, { size: 22, fill: COL.dim, anchor: 'end', font: k ? UI : MATH }); aTx(pls[k].g, b, CXs[k] + 10, CY - HF + 28, null, { size: 22, fill: COL.dim, font: k ? UI : MATH }); });
+    const A = aRg.map(x => [pls[0].X(x[0]), pls[0].Y(x[1])]), B = aRgP.Y.map(y => [pls[1].X(y[0]), pls[1].Y(y[1])]), Cc = aRg.map((x, i) => [pls[2].X(aRgY[0][i]), pls[2].Y(aRgY[1][i])]);
+    aRg.forEach((x, i) => mk('circle', { cx: A[i][0].toFixed(1), cy: A[i][1].toFixed(1), r: 7, fill: cols[i], stroke: COL.board, 'stroke-width': 1.2 }, pls[0].gp));
+    aFly(p, A, B, cols, tl, 1.8); aFly(p, A, Cc, cols, tk, 2.2);
+    [[1, B, tl1, 'los dos grupos quedan mezclados'], [2, Cc, tk1, 'los dos grupos quedan separados']].forEach(([k, pos, t0, msg]) => {
+      const g = G(p, { o: 0 }); show(g, t0 - .2, .3);
+      mk('path', { d: `M${CXs[k] - HF} ${SY}h${2 * HF}`, stroke: COL.faint, 'stroke-width': 2, fill: 'none' }, g);
+      aTx(g, 'solo la componente 1', CXs[k], SY - 36, null, { size: 22, fill: COL.dim, anchor: 'middle', font: UI });
+      aFly(p, pos, pos.map(q => [q[0], SY]), cols, t0, 1.2);
+      aTx(p, msg, CXs[k], SY + 64, t0 + 1.8, { size: 26, anchor: 'middle', font: UI, weight: 600, fill: k === 2 ? HUE.hyp : COL.chalk });
+    });
+  }],
+
+  ['wrap', 'Resumen', (m) => {
+    const p = panel(0);
+    [['Reducir la dimensión:  una representación Y con k ≪ N coordenadas, fiel a X.', 'w1'], ['PCA:  proyección de rango k con el menor error de reconstrucción  =  la de mayor varianza.', 'w2'],
+      ['Teorema 15.1:  P^{*} = U_{k} U_{k}^{⊤},  con los k vectores singulares principales de C.', 'w3'], ['Kernel PCA:  los vectores propios de K dan la proyección,  x_{i}^{⊤}u = √λ v_{i}.', 'w4']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 240 + i * 130, o: 0 });
+      mk('circle', { cx: 160, cy: -12, r: 26, fill: COL.task }, g);
+      T(g, String(i + 1), { x: 160, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      aTx(g, str, 220, 0, null, { size: 28, weight: 600, font: UI });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['final1', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-vf', prompt: ['Sobre este capítulo: ¿verdadero o falso?'],
+    build: grid([
+      { parts: ['PCA proyecta los datos centrados sobre el subespacio que minimiza el error de reconstrucción.'], ans: ['v'], why: 'Es el problema (15.1), con los datos centrados.' },
+      { parts: ['Minimizar el error de reconstrucción equivale a minimizar la varianza proyectada.'], ans: ['f'], why: 'Equivale a maximizarla: las dos suman una constante.' },
+      { parts: ['La solución de PCA usa los k vectores singulares principales de la matriz de covarianza.'], ans: ['v'], why: 'Es el teorema 15.1.' },
+      { parts: ['Para proyectar un punto, kernel PCA necesita las coordenadas del punto en el espacio de características.'], ans: ['f'], why: 'Solo usa valores del kernel entre el punto y la muestra.' },
+      { parts: ['Los vectores propios de la matriz de kernel permiten obtener los vectores singulares de la covarianza.'], ans: ['v'], why: 'Cada uno se obtiene como X por v, sobre la raíz de lambda.' },
+    ], [['v', 'verdadero', COL.real], ['f', 'falso', COL.task]], { multi: false, text: true }),
+  }], done, 'Práctica del capítulo   1 de 2') }],
+
+  ['final2', 'Práctica del capítulo', () => { panel(0); }, { ask: done => quiz(SCREEN, [{
+    id: 'p-proy', prompt: ['Un vector propio ', $m('v'), ' de la matriz de kernel tiene valor propio ', $m(`λ = ${aQ3.lam}`), '. Su componente ', $m('i'), ` vale ${aDec(aQ3.vi)}. Según (15.5), ¿cuánto vale la proyección del punto `, $m('i'), ' de la muestra?'],
+    build: choice(aQ3o.map(v => [aDec(v)]), 0,
+      'Es la raíz de lambda por la componente: 4 por 0.5.',
+      aQ3why),
+  }], done, 'Práctica del capítulo   2 de 2') }],
+
+  ['finish', 'Fin', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+boot();
+</script>
+</body>
+</html>
